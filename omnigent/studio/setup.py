@@ -410,7 +410,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     setup.add_argument("--timeout", type=float, default=5.0)
     setup.add_argument("--output", type=Path, help="write a JSON receipt")
     setup.add_argument("--json", action="store_true", help="print the JSON receipt")
+    contracts = commands.add_parser("contracts", help="run deterministic local A2 contracts")
+    contracts.add_argument("--output", type=Path, help="write a JSON receipt copy")
+    contracts.add_argument("--json", action="store_true", help="print the JSON receipt")
     args = parser.parse_args(argv)
+    if args.command == "contracts":
+        from omnigent.studio.contracts import main as contracts_main
+
+        return contracts_main(output=args.output, json_output=args.json)
     harnesses = [
         h
         for selected in (args.harness or ["both"])

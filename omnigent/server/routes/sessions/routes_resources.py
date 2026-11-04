@@ -119,10 +119,15 @@ from omnigent.stores import AgentStore, ConversationStore
 from omnigent.stores.artifact_store import ArtifactStore
 from omnigent.stores.file_store import FileStore
 from omnigent.stores.permission_store import PermissionStore
-from omnigent.stores.session_pull_request_store import SessionPullRequestLimitError
+from omnigent.stores.session_pull_request_store import (
+    SessionPullRequestLimitError,
+    SessionPullRequests,
+)
 
 if TYPE_CHECKING:
     from omnigent.inner.native_attachments import FilesystemAttachmentPolicy
+    from omnigent.stores.studio_review_store import StudioReviewStore
+    from omnigent.studio.reviews.models import ReviewTarget
 
 
 def _runner_resource_write_payload(
@@ -265,6 +270,7 @@ def register_resources_routes(
     host_registry: HostRegistry | None = None,
     register_initial_file_upload: Callable[..., None] | None = None,
     pull_request_refresher: server_prs.PullRequestRefresher | None = None,
+    studio_review_store: StudioReviewStore | None = None,
 ) -> None:
     """Register the resources routes on router."""
     pull_request_store = server_prs.open_store(conversation_store)
@@ -3630,6 +3636,50 @@ def register_resources_routes(
             runner_path=f"/v1/sessions/{session_id}/resources/github",
         )
         return await _with_server_pull_requests(session_id, info, requested_at)
+
+    if studio_review_store is not None:
+        from omnigent.server.routes.studio_reviews import create_studio_reviews_router
+        from omnigent.studio.reviews.capture import capture_review_target
+
+        async def _capture_studio_review_context(
+            request: Request, session_id: str, pr_url: str | None
+        ) -> ReviewTarget:
+            if pull_request_store is None:
+                raise HTTPException(503, "Pull request storage is unavailable for review capture")
+
+            async def load_session() -> Conversation:
+                return await _validate_session(session_id, request, LEVEL_OWNER)
+
+            async def load_associations() -> SessionPullRequests | None:
+                return await asyncio.to_thread(pull_request_store.read, session_id)
+
+            async def read_info(conv: Conversation, params: dict[str, Any]) -> dict[str, Any]:
+                return await _fs_get_with_host_fallback(
+                    session_id,
+                    conv,
+                    op="github_info",
+                    host_params=params,
+                    runner_params=params,
+                    runner_path=f"/v1/sessions/{session_id}/resources/github",
+                )
+
+            return await capture_review_target(
+                pr_url=pr_url,
+                load_session=load_session,
+                load_associations=load_associations,
+                read_info=read_info,
+            )
+
+        router.include_router(
+            create_studio_reviews_router(
+                studio_review_store,
+                conversation_store,
+                agent_store,
+                capture_context=_capture_studio_review_context,
+                auth_provider=auth_provider,
+                permission_store=permission_store,
+            )
+        )
 
     async def _update_host_pull_requests(
         session_id: str,

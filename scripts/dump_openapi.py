@@ -359,6 +359,7 @@ def _build_app_with_stub_stores() -> Any:
     from omnigent.stores.scheduled_task_store.sqlalchemy_store import (
         SqlAlchemyScheduledTaskStore,
     )
+    from omnigent.stores.studio_review_store import StudioReviewStore
 
     # On-disk SQLite (mkdtemp ensures uniqueness so concurrent
     # invocations don't collide).
@@ -386,6 +387,7 @@ def _build_app_with_stub_stores() -> Any:
         # The release feature is off by default; the spec documents the routes anyway.
         proactive_agent=True,
         memory_store=SqlAlchemyMemoryStore(db_uri),
+        studio_review_store=StudioReviewStore(db_uri),
     )
 
 

@@ -769,6 +769,8 @@ from omnigent.util.session_lifecycle import (
 )
 
 if TYPE_CHECKING:
+    from omnigent.stores.studio_review_store import StudioReviewStore
+
     __all__ = [
         "_agent_carries_native_fork_history",
         "_agent_is_native",
@@ -830,6 +832,7 @@ def create_sessions_router(
     register_runner_ingest: Callable[..., None] | None = None,
     register_startup_dispatch: Callable[..., None] | None = None,
     register_initial_file_upload: Callable[..., None] | None = None,
+    studio_review_store: StudioReviewStore | None = None,
 ) -> APIRouter:
     """
     Factory that builds the sessions router.
@@ -968,6 +971,7 @@ def create_sessions_router(
         host_registry=host_registry,
         register_initial_file_upload=register_initial_file_upload,
         pull_request_refresher=pull_request_refresher,
+        studio_review_store=studio_review_store,
     )
 
     register_ui_routes(
