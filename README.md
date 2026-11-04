@@ -21,6 +21,10 @@ Omnigent is an open-source **meta-harness** that gives you a common orchestratio
 
 ---
 
+This Egzakta fork is being extended for PR reviews, execution proofs and a
+Creator Mode pilot. See the [studio setup and delivery scope](docs/studio/README.md)
+for local and server instructions.
+
 ## Why Omnigent?
 
 Omnigent lets you:
