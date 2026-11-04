@@ -6,8 +6,9 @@ Omnigent owns sessions, hosts and the application interface.
 
 The [implementation plan](https://chatgpt.com/space/page_0dc939b0cb9c8191bfa031c3dadb65f1)
 defines the delivery order. [baseline.json](baseline.json) records the source
-revision at the start of this work. Setup verification is the first increment;
-the studio review controls and Creator Mode are subsequent work.
+revision at the start of this work. Setup verification and the private review
+record API are implemented. Review controls and Creator Mode follow them.
+Development and acceptance currently run locally; the fork is not deployed.
 
 ## Local checkout
 
@@ -149,8 +150,8 @@ not proof of agent or workflow readiness.
 
 | Work item | Deliverable |
 | --- | --- |
-| A1 | Reproducible laptop/server setup and qualified agent routes |
-| A2 | Revision-bound review records and shared authorized actions |
+| A1 | Setup and read-only preflight; native routes exercised locally with mock models |
+| A2 | Private, revision-bound review records and authorized capture API |
 | A3 | Run existing review skills from the PR panel and inspect findings |
 | A4 | Execute checks and retain immutable proofs |
 | A5 | Discuss, request fixes, review new revisions and publish selected feedback |
@@ -162,3 +163,22 @@ not proof of agent or workflow readiness.
 Full environment lifecycle management and the component map follow these two
 releases. The initial execution-target binding is limited to what review
 provenance needs.
+
+## Review record API
+
+A2 captures a review's PR revisions, execution host, workspace and reviewer
+profile. It persists these records in Omnigent's operational database. Capturing
+a record does not start an agent or verify that its selected skill is installed.
+The [API guide](review-records.md) gives a request example, retry rules and the
+remaining execution boundary.
+
+Run the deterministic acceptance checks from this checkout:
+
+```sh
+uv run --no-sync python scripts/verify_studio.py contracts
+```
+
+The command retains its test log, JUnit report and JSON receipt under
+`.omnigent/studio/evidence/`. It exercises local SQLite and controlled transport
+responses. It does not contact GitHub or model providers. Server deployment,
+PostgreSQL/MySQL execution and the complete PR workflow remain unqualified.

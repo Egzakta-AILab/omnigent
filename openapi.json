@@ -913,6 +913,112 @@
         "title": "CancelledEvent",
         "type": "object"
       },
+      "CaptureResult": {
+        "additionalProperties": false,
+        "properties": {
+          "created": {
+            "title": "Created",
+            "type": "boolean"
+          },
+          "operation": {
+            "$ref": "#/components/schemas/ReviewOperation"
+          },
+          "review": {
+            "$ref": "#/components/schemas/ReviewPass"
+          }
+        },
+        "required": [
+          "review",
+          "operation",
+          "created"
+        ],
+        "title": "CaptureResult",
+        "type": "object"
+      },
+      "CaptureReviewRequest": {
+        "additionalProperties": false,
+        "description": "Caller intent; execution location and actual revisions come from the server.",
+        "properties": {
+          "agent_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Agent Id",
+            "type": "string"
+          },
+          "expected_base_sha": {
+            "pattern": "^[0-9a-f]{40}(?:[0-9a-f]{24})?$",
+            "title": "Expected Base Sha",
+            "type": "string"
+          },
+          "expected_head_sha": {
+            "pattern": "^[0-9a-f]{40}(?:[0-9a-f]{24})?$",
+            "title": "Expected Head Sha",
+            "type": "string"
+          },
+          "harness": {
+            "enum": [
+              "codex-native",
+              "claude-native"
+            ],
+            "title": "Harness",
+            "type": "string"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "pr_url": {
+            "anyOf": [
+              {
+                "maxLength": 2048,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pr Url"
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reasoning Effort"
+          },
+          "skill": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Skill",
+            "type": "string"
+          }
+        },
+        "required": [
+          "expected_base_sha",
+          "expected_head_sha",
+          "agent_id",
+          "harness",
+          "skill"
+        ],
+        "title": "CaptureReviewRequest",
+        "type": "object"
+      },
       "ChildSessionList": {
         "description": "Paginated list of child sessions; `data` is a page of `ChildSessionSummary`.",
         "properties": {
@@ -5723,6 +5829,399 @@
           "error"
         ],
         "title": "RetryEvent",
+        "type": "object"
+      },
+      "ReviewEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "created_at": {
+            "format": "int64",
+            "title": "Created At",
+            "type": "integer"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "operation_id": {
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "review_id": {
+            "title": "Review Id",
+            "type": "string"
+          },
+          "sequence": {
+            "format": "int64",
+            "title": "Sequence",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "review_id",
+          "sequence",
+          "operation_id",
+          "kind",
+          "created_at"
+        ],
+        "title": "ReviewEvent",
+        "type": "object"
+      },
+      "ReviewEventsResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/ReviewEvent"
+            },
+            "title": "Data",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "format": "int64",
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "object": {
+            "const": "list",
+            "default": "list",
+            "title": "Object",
+            "type": "string"
+          }
+        },
+        "required": [
+          "data",
+          "next_cursor"
+        ],
+        "title": "ReviewEventsResponse",
+        "type": "object"
+      },
+      "ReviewListResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/ReviewPass"
+            },
+            "title": "Data",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "object": {
+            "const": "list",
+            "default": "list",
+            "title": "Object",
+            "type": "string"
+          }
+        },
+        "required": [
+          "data",
+          "next_cursor"
+        ],
+        "title": "ReviewListResponse",
+        "type": "object"
+      },
+      "ReviewOperation": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "review.capture",
+              "review.start",
+              "review.continue",
+              "review.cancel",
+              "review.publish"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "int64",
+            "title": "Created At",
+            "type": "integer"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "request_hash": {
+            "title": "Request Hash",
+            "type": "string"
+          },
+          "review_id": {
+            "title": "Review Id",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "pending",
+              "dispatching",
+              "running",
+              "succeeded",
+              "failed",
+              "cancelled",
+              "unknown"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "int64",
+            "title": "Updated At",
+            "type": "integer"
+          },
+          "version": {
+            "format": "int64",
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "review_id",
+          "action",
+          "idempotency_key",
+          "request_hash",
+          "state",
+          "version",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "ReviewOperation",
+        "type": "object"
+      },
+      "ReviewPass": {
+        "additionalProperties": false,
+        "properties": {
+          "created_at": {
+            "format": "int64",
+            "title": "Created At",
+            "type": "integer"
+          },
+          "dispatch_status": {
+            "enum": [
+              "not_requested",
+              "dispatching",
+              "running",
+              "succeeded",
+              "failed",
+              "cancelled",
+              "unknown"
+            ],
+            "title": "Dispatch Status",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "owner_user_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Owner User Id"
+          },
+          "profile": {
+            "$ref": "#/components/schemas/ReviewProfile"
+          },
+          "reviewer_session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reviewer Session Id"
+          },
+          "state": {
+            "enum": [
+              "prepared",
+              "running",
+              "completed",
+              "failed",
+              "cancelled",
+              "unknown"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "target": {
+            "$ref": "#/components/schemas/ReviewTarget"
+          },
+          "updated_at": {
+            "format": "int64",
+            "title": "Updated At",
+            "type": "integer"
+          },
+          "version": {
+            "format": "int64",
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "owner_user_id",
+          "target",
+          "profile",
+          "state",
+          "dispatch_status",
+          "reviewer_session_id",
+          "created_at",
+          "updated_at",
+          "version"
+        ],
+        "title": "ReviewPass",
+        "type": "object"
+      },
+      "ReviewProfile": {
+        "additionalProperties": false,
+        "properties": {
+          "agent_id": {
+            "title": "Agent Id",
+            "type": "string"
+          },
+          "agent_version": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Agent Version",
+            "type": "string"
+          },
+          "harness": {
+            "enum": [
+              "codex-native",
+              "claude-native"
+            ],
+            "title": "Harness",
+            "type": "string"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reasoning Effort"
+          },
+          "skill": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Skill",
+            "type": "string"
+          }
+        },
+        "required": [
+          "agent_id",
+          "agent_version",
+          "harness",
+          "skill"
+        ],
+        "title": "ReviewProfile",
+        "type": "object"
+      },
+      "ReviewTarget": {
+        "additionalProperties": false,
+        "properties": {
+          "base_sha": {
+            "pattern": "^[0-9a-f]{40}(?:[0-9a-f]{24})?$",
+            "title": "Base Sha",
+            "type": "string"
+          },
+          "head_sha": {
+            "pattern": "^[0-9a-f]{40}(?:[0-9a-f]{24})?$",
+            "title": "Head Sha",
+            "type": "string"
+          },
+          "host_id": {
+            "title": "Host Id",
+            "type": "string"
+          },
+          "pr_number": {
+            "exclusiveMinimum": 0.0,
+            "format": "int64",
+            "title": "Pr Number",
+            "type": "integer"
+          },
+          "pr_url": {
+            "maxLength": 2048,
+            "minLength": 1,
+            "title": "Pr Url",
+            "type": "string"
+          },
+          "repository": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Repository",
+            "type": "string"
+          },
+          "source_session_id": {
+            "title": "Source Session Id",
+            "type": "string"
+          },
+          "workspace": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "title": "Workspace",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_session_id",
+          "host_id",
+          "workspace",
+          "pr_url",
+          "repository",
+          "pr_number",
+          "base_sha",
+          "head_sha"
+        ],
+        "title": "ReviewTarget",
         "type": "object"
       },
       "RoutingDecisionData": {
@@ -19516,6 +20015,138 @@
         ]
       }
     },
+    "/v1/sessions/{source_session_id}/studio/reviews": {
+      "get": {
+        "operationId": "list_reviews_v1_sessions__source_session_id__studio_reviews_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "source_session_id",
+            "required": true,
+            "schema": {
+              "title": "Source Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 25,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "after_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "After Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Reviews",
+        "tags": [
+          "sessions"
+        ]
+      },
+      "post": {
+        "operationId": "capture_review_v1_sessions__source_session_id__studio_reviews_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "source_session_id",
+            "required": true,
+            "schema": {
+              "title": "Source Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[!-~]+$",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CaptureReviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CaptureResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Capture Review",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
     "/v1/sharing": {
       "get": {
         "description": "Report every setting, whether each is editable here, and the options.",
@@ -19698,6 +20329,165 @@
         "summary": "Get Skills",
         "tags": [
           "skills"
+        ]
+      }
+    },
+    "/v1/studio/reviews/{review_id}": {
+      "get": {
+        "operationId": "get_review_v1_studio_reviews__review_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "review_id",
+            "required": true,
+            "schema": {
+              "title": "Review Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewPass"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Review",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/studio/reviews/{review_id}/events": {
+      "get": {
+        "operationId": "list_events_v1_studio_reviews__review_id__events_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "review_id",
+            "required": true,
+            "schema": {
+              "title": "Review Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "after_sequence",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "maximum": 9223372036854775807,
+              "minimum": 0,
+              "title": "After Sequence",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewEventsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Events",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/studio/reviews/{review_id}/operations/{operation_id}": {
+      "get": {
+        "operationId": "get_operation_v1_studio_reviews__review_id__operations__operation_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "review_id",
+            "required": true,
+            "schema": {
+              "title": "Review Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "title": "Operation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewOperation"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Operation",
+        "tags": [
+          "sessions"
         ]
       }
     },

@@ -190,6 +190,7 @@ from omnigent.util.event_loop_watchdog import monitor_event_loop
 if TYPE_CHECKING:
     from omnigent.entities import Conversation
     from omnigent.inner.native_attachments import FilesystemAttachmentPolicy
+    from omnigent.stores.studio_review_store import StudioReviewStore
 
 _logger = logging.getLogger(__name__)
 
@@ -1594,6 +1595,7 @@ def create_app(
     preference_policy: PreferencePolicy = DEFAULT_PREFERENCE_POLICY,
     scheduled_task_dispatch: ScheduledTaskDispatchHooks | None = None,
     scheduled_task_scheduler_config: ScheduledTaskSchedulerConfig | None = None,
+    studio_review_store: "StudioReviewStore | None" = None,
 ) -> FastAPI:
     """
     Build and return the FastAPI application with all routes mounted.
@@ -3770,6 +3772,7 @@ def create_app(
             # Validates target-project ownership when PATCH /v1/sessions/{id}
             # files a session into a project (owner-private membership).
             project_store=project_store,
+            studio_review_store=studio_review_store,
             background_title_coordinator=background_title_coordinator,
             pull_request_refresher=pull_request_refresher,
             register_startup_dispatch=lambda handler: (

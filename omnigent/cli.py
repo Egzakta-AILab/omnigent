@@ -4903,6 +4903,7 @@ def server(
     from omnigent.stores.scheduled_task_store.sqlalchemy_store import (
         SqlAlchemyScheduledTaskStore,
     )
+    from omnigent.stores.studio_review_store import StudioReviewStore
 
     agent_store = SqlAlchemyAgentStore(db_uri, conv_db_uri)
     file_store = SqlAlchemyFileStore(db_uri)
@@ -4912,6 +4913,7 @@ def server(
     permission_store = SqlAlchemyPermissionStore(db_uri)
     scheduled_task_store = SqlAlchemyScheduledTaskStore(db_uri)
     project_store = SqlAlchemyProjectStore(db_uri)
+    studio_review_store = StudioReviewStore(db_uri)
     preference_store = None
     if authority_id is not None:
         from omnigent.stores.preference_store.sqlalchemy_store import SqlAlchemyPreferenceStore
@@ -5129,6 +5131,7 @@ def server(
         permission_store=permission_store,
         scheduled_task_store=scheduled_task_store,
         project_store=project_store,
+        studio_review_store=studio_review_store,
         preference_store=preference_store,
         auth_provider=auth_provider,
         host_store=host_store,

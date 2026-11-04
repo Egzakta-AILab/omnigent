@@ -15,6 +15,7 @@ node_modules/
 .pnpm-store/
 .pnpm-debug.log*
 reviews/
+!omnigent/studio/reviews/
 
 # repro/resolve-agent workspace artifact — the machine-readable handoff.
 # Rides in the PR Demo section / CI artifact bundle, never in the diff.

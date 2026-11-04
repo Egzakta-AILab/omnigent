@@ -1588,6 +1588,96 @@ class SqlScheduledTask(OmnigentBase):
     )
 
 
+class SqlStudioReviewPass(OmnigentBase):
+    """Owner-private frozen PR context; execution remains owned by sessions."""
+
+    __tablename__ = "studio_review_passes"
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, default=current_workspace_id, server_default="0"
+    )
+    id: Mapped[str] = mapped_column(Uuid16, primary_key=True)
+    owner_scope: Mapped[bytes] = mapped_column(_CKSUM32, nullable=False)
+    owner_user_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    source_session_id: Mapped[str] = mapped_column(Uuid16, nullable=False)
+    target_json: Mapped[str] = mapped_column(CompressedText, nullable=False)
+    profile_json: Mapped[str] = mapped_column(CompressedText, nullable=False)
+    state: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    dispatch_status: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    reviewer_session_id: Mapped[str | None] = mapped_column(Uuid16, nullable=True)
+    created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    updated_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    version: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    __table_args__ = (
+        CheckConstraint("state IN (1, 2, 3, 4, 5, 6)", name="ck_studio_review_pass_state"),
+        CheckConstraint(
+            "dispatch_status IN (1, 2, 3, 4, 5, 6, 7)",
+            name="ck_studio_review_dispatch_status",
+        ),
+        Index(
+            "ix_studio_review_pass_owner_session",
+            "workspace_id",
+            "owner_scope",
+            "source_session_id",
+            "created_at",
+            "id",
+        ),
+    )
+
+
+class SqlStudioReviewOperation(OmnigentBase):
+    """A durable, single-claim action; unknown outcomes cannot launch again."""
+
+    __tablename__ = "studio_review_operations"
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, default=current_workspace_id, server_default="0"
+    )
+    id: Mapped[str] = mapped_column(Uuid16, primary_key=True)
+    owner_scope: Mapped[bytes] = mapped_column(_CKSUM32, nullable=False)
+    review_id: Mapped[str] = mapped_column(Uuid16, nullable=False)
+    action: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(
+        String(128).with_variant(MySQLVarchar(128, collation="utf8mb4_bin"), "mysql"),
+        nullable=False,
+    )
+    request_hash: Mapped[bytes] = mapped_column(_CKSUM32, nullable=False)
+    start_once: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+    state: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    version: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    updated_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    __table_args__ = (
+        CheckConstraint("action IN (1, 2, 3, 4, 5)", name="ck_studio_review_operation_action"),
+        CheckConstraint("state IN (1, 2, 3, 4, 5, 6, 7)", name="ck_studio_review_operation_state"),
+        CheckConstraint(
+            "start_once IS NULL OR start_once = 1", name="ck_studio_review_start_once"
+        ),
+        UniqueConstraint(
+            "workspace_id",
+            "owner_scope",
+            "action",
+            "idempotency_key",
+            name="uq_studio_review_operation_request",
+        ),
+        UniqueConstraint(
+            "workspace_id", "review_id", "start_once", name="uq_studio_review_operation_start"
+        ),
+    )
+
+
+class SqlStudioReviewEvent(OmnigentBase):
+    """Ordered private state-change receipts, polled independently of shared chat."""
+
+    __tablename__ = "studio_review_events"
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, default=current_workspace_id, server_default="0"
+    )
+    review_id: Mapped[str] = mapped_column(Uuid16, primary_key=True)
+    sequence: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
+    operation_id: Mapped[str] = mapped_column(Uuid16, nullable=False)
+    kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
 class SqlScheduledTaskRun(OmnigentBase):
     """
     SQLAlchemy model for the ``scheduled_task_runs`` table.
