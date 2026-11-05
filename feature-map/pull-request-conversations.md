@@ -73,6 +73,8 @@ links findings to their captured changes.
   citation-checked critical and high findings after all selected reviewers report.
 - `creator-review-panel`: An operator-installed pilot panel opens a check
   receipt or preselects it in **Ask an agent** on the saved review.
+- `creator-preview`: Build and revise a data-only panel, then inspect the saved
+  revision's checks and open the associated proof.
 
 ## How to get to it (user POV)
 
@@ -92,6 +94,9 @@ links findings to their captured changes.
   **Publish inline drafts** as a publisher.
 - `creator-review-panel`: Enable the [review panel pilot](../docs/extending/extensions.md#creator-mode-review-panel-pilot)
   and open the installed panel by name in the review discussion.
+- `creator-preview`: On a saved review with the pilot enabled, expand
+  **Creator Mode**, load the template or paste a definition, and build the
+  preview.
 
 A session with one PR opens its details directly. With multiple PRs, select a
 request from the list first; **All pull requests** returns to that list.
@@ -182,6 +187,9 @@ receiver's persisted retry state across restarts.
 `tests/browser_ui/test_creator_review_panel.py` loads a fixture bundle in the
 built app and checks proof navigation, question prefill, and rejection of a
 request outside the panel's grants.
+Its Creator variant rejects an invalid definition, builds a revision, marks
+edited source out of date, and opens and attaches the same proof without
+sending a question.
 
 Render recovery has component coverage in
 `web/src/components/RenderErrorBoundary.test.tsx` and

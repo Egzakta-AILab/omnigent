@@ -7,3 +7,4 @@ services:
     pull_policy: build
     environment:
       OMNIGENT_AUTH_ENABLED: "1"
+      OMNIGENT_STUDIO_CREATOR_PILOT: "${OMNIGENT_STUDIO_CREATOR_PILOT:-0}"

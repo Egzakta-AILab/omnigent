@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from collections.abc import Mapping
 from typing import Literal
 
@@ -13,6 +12,7 @@ from pydantic import BaseModel, Field
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.extensions import ExtensionManifest, ExtensionPluginState, ReviewPanelContribution
 from omnigent.extensions.assets import ASSET_SCRIPT, ASSET_STYLES, ResolvedBundle
+from omnigent.extensions.review_panel import creator_pilot_enabled
 from omnigent.server.auth import AuthProvider, effective_admin
 from omnigent.server.routes._auth_helpers import require_user
 from omnigent.stores.permission_store import PermissionStore
@@ -139,9 +139,7 @@ def _serialize_manifest(
         pages=pages,
         primary_navigation=navigation,
         review_panel=(
-            manifest.review_panel
-            if bundle is not None and os.environ.get("OMNIGENT_STUDIO_CREATOR_PILOT") == "1"
-            else None
+            manifest.review_panel if bundle is not None and creator_pilot_enabled() else None
         ),
         browser=ExtensionBrowserBundleResponse(
             declared=manifest.entrypoints.browser is not None,

@@ -37,6 +37,44 @@ packages are not supported.
 
 ## Creator Mode review panel pilot
 
+Set `OMNIGENT_STUDIO_CREATOR_PILOT=1` on the server and restart. Open a saved
+review discussion and expand **Creator Mode**. For the Studio Compose overlay,
+set the same variable in its environment before recreating the service.
+
+1. Describe a panel and copy the authoring prompt. It includes the installed
+   schema, a QA template, and any draft or diagnostic currently in the editor.
+2. Open the agent composer in a separate tab, select Codex or Claude Code and
+   your isolated workspace, then send the prompt. Paste the resulting JSON
+   into **Panel definition**. Use **Load QA template** to try the preview
+   without an agent session.
+3. Select **Build preview**. The panel groups checks from findings on that
+   saved revision. **Open and discuss** opens the selected receipt and
+   preselects it in **Ask an agent**. You can review the context before
+   submitting a question.
+4. Edit and rebuild after a diagnostic. **Download definition** saves the
+   validated JSON for a normal Git branch. The preview belongs to the open
+   discussion and is cleared when you leave it.
+
+The preview compiles a bounded JSON definition and renders it with native
+Omnigent components. The definition can choose grouping, filtering, labels,
+and proof actions. It cannot add executable code, transport calls, or
+publication actions.
+
+Inspect the installed contract and template with
+`python scripts/verify_studio.py creator-contracts`. To verify that a
+running instance accepts a definition for a specific saved review:
+
+```bash
+python scripts/verify_studio.py creator-preview --mode local \
+  --server http://127.0.0.1:6767 --review <run-id> --definition review-panel.json
+```
+
+Omit `--definition` to use the installed template. For a remote instance,
+use `--mode server` and its HTTPS URL. The command checks the API binding and
+digest. Use the review discussion to verify receipt navigation and prefill.
+
+### Operator-installed browser panels
+
 On the server, set `OMNIGENT_STUDIO_CREATOR_PILOT=1` and restart with a reviewed
 extension installed. Add a `review_panel` field to its `ExtensionManifest`:
 
@@ -57,9 +95,8 @@ An extension can page through findings and check summaries. It can focus a
 receipt in the native review UI or select it in **Ask an agent**. The person
 using the form submits the question.
 
-Use `python scripts/verify_studio.py creator-contracts` from the checkout to
-inspect the manifest schema and available methods. Pass `--manifest panel.json`
-to validate a contribution before installing the package.
+Pass `--manifest panel.json` to `creator-contracts` to validate a browser
+contribution before installing its package.
 
 ## Installation and diagnostics
 

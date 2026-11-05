@@ -348,6 +348,7 @@ export interface ReviewDiscussion {
   can_attach_evidence?: boolean;
   can_ask?: boolean;
   can_use_review_workspace?: boolean;
+  creator_available?: boolean;
   check_repository?: string | null;
   review_workspace_host_id?: string | null;
   collaborators: string[] | null;
@@ -361,6 +362,39 @@ function reviewRunPath(runId: string) {
 
 export function getReviewDiscussion(runId: string, signal: AbortSignal) {
   return reviewRequest<ReviewDiscussion>(`${reviewRunPath(runId)}/discussion`, { signal });
+}
+
+export interface CreatorPanelDefinition {
+  slot: "review.panel";
+  contract_version: "1";
+  title: string;
+  description: string;
+  group_by: "file" | "directory";
+  checks: "failed" | "all";
+  proof_action: "open" | "open_and_discuss";
+}
+
+export interface CreatorPanelPreview {
+  run_id: string;
+  base_sha: string;
+  head_sha: string;
+  digest: string;
+  panel: CreatorPanelDefinition;
+}
+
+export function getCreatorPanelContract(runId: string, signal: AbortSignal) {
+  return reviewRequest<{
+    definition_schema: Record<string, unknown>;
+    template: CreatorPanelDefinition;
+  }>(`${reviewRunPath(runId)}/creator-preview`, { signal });
+}
+
+export function buildCreatorPanelPreview(runId: string, definition: string) {
+  return reviewRequest<CreatorPanelPreview>(`${reviewRunPath(runId)}/creator-preview`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: definition,
+  });
 }
 
 interface SharedReviewPage {
