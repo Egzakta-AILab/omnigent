@@ -88,6 +88,7 @@ vi.mock("@/lib/identity", () => ({
   authenticatedFetch: vi.fn(),
   getCurrentUserId: vi.fn(() => null),
   resolveIdentity: vi.fn(async () => null),
+  subscribeIdentity: vi.fn(() => () => {}),
 }));
 vi.mock("@/components/ui/toast", async (importOriginal) => ({
   ...(await importOriginal<typeof ToastModule>()),

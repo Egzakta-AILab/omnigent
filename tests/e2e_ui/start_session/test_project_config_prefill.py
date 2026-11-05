@@ -43,7 +43,7 @@ _CONFIG_WORKSPACE = "/work/configured-repo"
 # Bare create endpoint (POST captured); NOT the /{id}/... sub-routes.
 _SESSIONS_RE = re.compile(r"/v1/sessions(\?.*)?$")
 # One project config endpoint: /v1/projects/<id> (not the bare list).
-_PROJECT_CFG_RE = re.compile(r"/v1/projects/[^/?]+")
+_PROJECT_CFG_RE = re.compile(r"/v1/projects/[^/?]+(?:\?.*)?$")
 
 
 def _hosts_body() -> str:
@@ -107,7 +107,7 @@ def _project_config_body() -> str:
 def test_composer_prefills_from_project_config(
     seeded_session: tuple[str, str], mobile: bool, remembered: bool
 ) -> None:
-    """Saved defaults launch normally and remembered settings can open an empty workspace.
+    """Saved defaults launch normally and remembered settings browse a workspace before sending.
 
     The pinned agent (``ag_pinned_e2e``) and workspace (``/work/configured-repo``)
     come from ``config`` — NOT from the default-ranked Claude Code or a recent
@@ -188,6 +188,35 @@ async def _drive_prefill(base_url: str, session_id: str, mobile: bool, remembere
 
             await page.route("**/v1/hosts", handle_hosts)
             await stub_empty_host_picker_data(page, _HOST_ID)
+            if remembered:
+                await page.route(
+                    re.compile(rf"/v1/hosts/{_HOST_ID}/filesystem/work/configured-repo\?"),
+                    lambda route: route.fulfill(
+                        json={
+                            "object": "list",
+                            "data": [
+                                {
+                                    "name": "workspace-readme.md",
+                                    "path": f"{_CONFIG_WORKSPACE}/workspace-readme.md",
+                                    "type": "file",
+                                    "bytes": 24,
+                                    "modified_at": 0,
+                                }
+                            ],
+                            "has_more": False,
+                        }
+                    ),
+                )
+                await page.route(
+                    f"**/v1/projects/{_PROJECT_ID}/studio/files?**",
+                    lambda route: route.fulfill(
+                        json={
+                            "path": "workspace-readme.md",
+                            "content": "Project context fixture.",
+                            "truncated": False,
+                        }
+                    ),
+                )
             await page.route("**/v1/agents", handle_agents)
             await page.route("**/v1/sessions/projects", handle_projects_list)
             await page.route(_PROJECT_CFG_RE, handle_project_config)
@@ -208,26 +237,27 @@ async def _drive_prefill(base_url: str, session_id: str, mobile: bool, remembere
                 "Polly", timeout=15_000
             )
 
+            panel = page.get_by_role("complementary", name="Project workspace")
+            await expect(panel).to_be_visible()
+            if remembered:
+                await expect(
+                    panel.get_by_role("button", name="workspace-readme.md")
+                ).to_be_visible()
+                await panel.get_by_role("button", name="workspace-readme.md").click()
+                await expect(
+                    panel.get_by_text("Project context fixture.", exact=True)
+                ).to_be_visible()
+                await panel.get_by_role("button", name="Add file to prompt").click()
+            assert not create_bodies and not events_sent
             composer = page.get_by_test_id("new-chat-landing-input")
             await composer.fill("start here")
-            if remembered:
-                await page.get_by_role("button", name="Open workspace", exact=True).click()
-                await page.wait_for_url(re.compile(rf"/c/{session_id}(?:\?|$)"))
-                await page.wait_for_function(
-                    "id => JSON.parse(sessionStorage.getItem('omnigent.sessionDrafts') || '{}')"
-                    "[id] === 'start here'",
-                    arg=session_id,
-                )
-                assert not events_sent
-            else:
-                await page.get_by_test_id("new-chat-landing-submit").click()
+            await page.get_by_test_id("new-chat-landing-submit").click()
 
             await poll_until_async(lambda: len(create_bodies) == 1)
             body = create_bodies[0]
             assert body["host_id"] == _HOST_ID, body
             assert body["project_id"] == _PROJECT_ID, body
             if remembered:
-                assert "initial_input" not in body and not body.get("initial_items"), body
                 assert body["agent_id"] == "ag_pinned_e2e", body
                 assert body["workspace"] == _CONFIG_WORKSPACE, body
             else:

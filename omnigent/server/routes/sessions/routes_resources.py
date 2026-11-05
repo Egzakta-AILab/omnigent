@@ -127,6 +127,7 @@ if TYPE_CHECKING:
     from omnigent.inner.native_attachments import FilesystemAttachmentPolicy
     from omnigent.server.routes.sessions.routes_core import ReviewCreate
     from omnigent.server.routes.sessions.routes_events import ReviewSend
+    from omnigent.stores.project_store import ProjectStore
     from omnigent.stores.studio_review_store import StudioReviewStore
     from omnigent.studio.reviews.models import ReviewTarget
 
@@ -266,6 +267,7 @@ def register_resources_routes(
     register_initial_file_upload: Callable[..., None] | None = None,
     pull_request_refresher: server_prs.PullRequestRefresher | None = None,
     studio_review_store: StudioReviewStore | None = None,
+    project_store: ProjectStore | None = None,
     create_reviewer: ReviewCreate | None = None,
     send_review: ReviewSend | None = None,
 ) -> None:
@@ -3392,6 +3394,7 @@ def register_resources_routes(
 
         async def _read_studio_review_patch(request: Request, target: ReviewTarget) -> str:
             session_id = target.source_session_id
+            assert session_id is not None
             source = await _validate_session(session_id, request, LEVEL_OWNER)
             if (source.host_id, source.workspace) != (target.host_id, target.workspace):
                 raise HTTPException(409, "The review execution target changed")
@@ -3427,6 +3430,7 @@ def register_resources_routes(
                 send_review=send_review,
                 auth_provider=auth_provider,
                 permission_store=permission_store,
+                project_store=project_store,
             )
         )
 

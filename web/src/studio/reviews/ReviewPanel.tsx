@@ -6,7 +6,7 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { ExternalLinkIcon, Loader2Icon } from "lucide-react";
+import { Loader2Icon } from "lucide-react";
 import {
   EFFORT_SELECT_NONE,
   MODEL_SELECT_DEFAULT,
@@ -30,26 +30,26 @@ import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { nativeCodingAgentForAgentName } from "@/lib/nativeCodingAgents";
 import { canonicalNativeHarness } from "@/lib/nativeHarnessModes";
 import { randomUUID } from "@/lib/randomUUID";
-import { Link } from "@/lib/routing";
-import { pullRequestFileUrl } from "@/shell/pullRequestReview";
 import {
   captureReview,
   getReview,
-  getReviewReport,
   listReviewerProfiles,
   listReviews,
   matchesReviewRevision,
   REVIEW_HARNESS_LABELS,
+  reviewProfilesPath,
+  type ProjectReviewWorkspace,
   startReview,
   type CaptureReview,
-  type ReviewFinding,
   type ReviewHarness,
   type ReviewPage,
   type ReviewPass,
+  type ReviewScope,
   type ReviewerProfile,
   type ReviewSource,
 } from "./api";
 import { ProfileEditorDialog } from "./ProfileEditorDialog";
+import { ReviewResult, reviewSettingsLabel } from "./ReviewResult";
 
 const POLL_MS = 3_000;
 const START_CONFIRMATION_MS = 120_000;
@@ -58,12 +58,16 @@ const SKILL_NAME = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
 const CUSTOM_SKILL = "__custom_skill__";
 
 export function useStudioReviewHistory(conversationId: string, enabled: boolean) {
+  return useReviewHistory({ sessionId: conversationId }, enabled);
+}
+
+function useReviewHistory(scope: ReviewScope, enabled: boolean) {
   const identityReady = useIdentityReady();
   const viewerId = useViewerId();
-  const key = ["studio-reviews", viewerId, conversationId] as const;
+  const key = ["studio-reviews", viewerId, scope] as const;
   const query = useInfiniteQuery({
     queryKey: key,
-    queryFn: ({ pageParam, signal }) => listReviews(conversationId, pageParam, signal),
+    queryFn: ({ pageParam, signal }) => listReviews(scope, pageParam, signal),
     initialPageParam: null as string | null,
     getNextPageParam: (page) => page.next_cursor ?? undefined,
     enabled: enabled && identityReady,
@@ -90,24 +94,6 @@ const DISPATCH_LABELS: Record<ReviewPass["dispatch_status"], string> = {
   cancelled: "Cancelled",
   unknown: "Start unconfirmed",
 };
-
-function reviewSource(review: ReviewPass, finding: ReviewFinding): ReviewSource {
-  return {
-    prUrl: review.target.pr_url,
-    baseSha: review.target.base_sha,
-    headSha: review.target.head_sha,
-    path: finding.path,
-    side: finding.side,
-    line: finding.line,
-  };
-}
-
-function reviewSettingsLabel(review: ReviewPass): string {
-  const { role, skill, harness, model, reasoning_effort } = review.profile;
-  return [role?.label, skill, REVIEW_HARNESS_LABELS[harness], model, reasoning_effort]
-    .filter(Boolean)
-    .join(" · ");
-}
 
 function ReviewSelect({
   label,
@@ -148,181 +134,62 @@ function ReviewSelect({
   );
 }
 
-function FindingCard({
-  finding,
-  review,
-  current,
-  headRepoUrl,
-  onOpenSource,
-}: {
-  finding: ReviewFinding;
-  review: ReviewPass;
-  current: boolean;
+interface ReviewPanelProps {
+  active: boolean;
+  revision: CurrentRevision;
   headRepoUrl?: string | null;
-  onOpenSource: (source: ReviewSource) => void;
-}) {
-  const source = reviewSource(review, finding);
-  // GitHub's old diff side uses the merge base, which can differ from the PR base tip.
-  const blobUrl =
-    current && source.side === "head"
-      ? pullRequestFileUrl({
-          provider: "github",
-          baseRepoUrl: null,
-          headRepoUrl,
-          baseSha: null,
-          headSha: source.headSha,
-          path: source.path,
-          status: "modified",
-        })
-      : null;
-  return (
-    <li className="space-y-2 rounded-md border border-border p-3">
-      <div className="flex flex-wrap items-start gap-2">
-        <Badge
-          variant={
-            finding.severity === "critical" || finding.severity === "high"
-              ? "destructive"
-              : "outline"
-          }
-          className="capitalize"
-        >
-          {finding.severity}
-        </Badge>
-        <h4 className="min-w-0 font-medium [overflow-wrap:anywhere]">{finding.title}</h4>
-      </div>
-      <p className="font-mono text-xs text-muted-foreground [overflow-wrap:anywhere]">
-        {finding.path}:{finding.line} · {finding.side === "base" ? "Base" : "Head"}
-      </p>
-      <p className="text-muted-foreground whitespace-pre-wrap [overflow-wrap:anywhere]">
-        {finding.detail}
-      </p>
-      {(current || blobUrl) && (
-        <div className="flex flex-wrap items-center gap-1">
-          {current && (
-            <Button variant="outline" size="sm" onClick={() => onOpenSource(source)}>
-              Show in diff
-            </Button>
-          )}
-          {blobUrl && (
-            <Button asChild variant="ghost" size="sm">
-              <a href={`${blobUrl}#L${finding.line}`} target="_blank" rel="noreferrer">
-                Open source <ExternalLinkIcon data-icon="inline-end" />
-              </a>
-            </Button>
-          )}
-        </div>
-      )}
-    </li>
-  );
+  onOpenSource?: (source: ReviewSource) => void;
 }
 
-function ReviewResult({
-  review,
-  active,
-  viewerId,
-  current,
-  headRepoUrl,
-  onOpenSource,
-}: {
-  review: ReviewPass;
-  active: boolean;
-  viewerId: string | null;
-  current: boolean;
-  headRepoUrl?: string | null;
-  onOpenSource: (source: ReviewSource) => void;
-}) {
-  const launchAcknowledged =
-    review.dispatch_status === "running" || review.dispatch_status === "succeeded";
-  const { session: observedSession } = useSession(
-    active && !launchAcknowledged ? review.reviewer_session_id : null,
-  );
-  const sessionKnown = launchAcknowledged || !!observedSession;
-  const report = useQuery({
-    queryKey: ["studio-review-report", viewerId, review.id],
-    queryFn: ({ signal }) => getReviewReport(review.id, signal),
-    enabled: active && sessionKnown && !!review.reviewer_session_id,
-    retry: false,
-    refetchInterval: (query) =>
-      active && launchAcknowledged && query.state.data?.state === "pending" ? POLL_MS : false,
-  });
-  if (!review.reviewer_session_id || !sessionKnown) return null;
-  const ready = report.data?.state === "ready" && !report.isError;
-  const findings = new Map(
-    report.data?.findings.map((finding) => [JSON.stringify(finding), finding]),
-  );
-  return (
-    <section aria-label="Review findings" className="space-y-2">
-      <div className="flex flex-wrap items-center justify-between gap-1">
-        <h3 className="font-medium">Findings</h3>
-        <div className="flex flex-wrap items-center gap-1">
-          <Button asChild variant="outline" size="sm">
-            <Link to={`/c/${review.reviewer_session_id}`}>Open reviewer session</Link>
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => void report.refetch()}
-            disabled={report.isFetching}
-          >
-            Refresh report
-          </Button>
-        </div>
-      </div>
-      {report.isError ? (
-        <p role="alert" className="text-destructive">
-          {report.error.message}
-        </p>
-      ) : ready ? (
-        <>
-          {report.data?.summary && (
-            <p className="whitespace-pre-wrap [overflow-wrap:anywhere]">{report.data.summary}</p>
-          )}
-          {findings.size ? (
-            <ol className="space-y-2">
-              {Array.from(findings, ([key, finding]) => (
-                <FindingCard
-                  key={key}
-                  finding={finding}
-                  review={review}
-                  current={current}
-                  headRepoUrl={headRepoUrl}
-                  onOpenSource={onOpenSource}
-                />
-              ))}
-            </ol>
-          ) : (
-            <p className="text-muted-foreground">The reviewer reported no findings.</p>
-          )}
-        </>
-      ) : report.data?.state === "incomplete" ? (
-        <p role="status" className="text-muted-foreground">
-          The reviewer has not produced a complete report. Open the reviewer session and ask the
-          agent to {review.profile.skill ? "load the selected skill and " : ""}return a corrected
-          report, then refresh here.
-        </p>
-      ) : (
-        <p role="status" className="text-muted-foreground">
-          Waiting for the reviewer’s report…
-        </p>
-      )}
-    </section>
-  );
-}
+type ReviewOrigin = { sessionId: string } | (ProjectReviewWorkspace & { repository: string });
 
 export function ReviewPanel({
   conversationId,
+  history,
+  ...props
+}: ReviewPanelProps & {
+  conversationId: string;
+  history: ReturnType<typeof useStudioReviewHistory>;
+}) {
+  return <ReviewForm {...props} origin={{ sessionId: conversationId }} history={history} />;
+}
+
+export function ProjectReviewPanel({
+  projectId,
+  hostId,
+  workspace,
+  repository,
+  onReviewStarted,
+  ...props
+}: ReviewPanelProps &
+  ProjectReviewWorkspace & {
+    repository: string;
+    onReviewStarted?: (review: ReviewPass) => void;
+  }) {
+  const history = useReviewHistory({ projectId, prUrl: props.revision.prUrl }, props.active);
+  return (
+    <ReviewForm
+      key={JSON.stringify([projectId, hostId, workspace, repository, props.revision.prUrl])}
+      {...props}
+      origin={{ projectId, hostId, workspace, repository }}
+      history={history}
+      onReviewStarted={onReviewStarted}
+    />
+  );
+}
+
+function ReviewForm({
+  origin,
   active,
   revision,
   headRepoUrl,
   history,
   onOpenSource,
-}: {
-  conversationId: string;
-  active: boolean;
-  revision: CurrentRevision;
-  headRepoUrl?: string | null;
-  history: ReturnType<typeof useStudioReviewHistory>;
-  onOpenSource: (source: ReviewSource) => void;
+  onReviewStarted,
+}: ReviewPanelProps & {
+  origin: ReviewOrigin;
+  history: ReturnType<typeof useReviewHistory>;
+  onReviewStarted?: (review: ReviewPass) => void;
 }) {
   const queryClient = useQueryClient();
   const serverInfo = useServerInfo();
@@ -343,9 +210,13 @@ export function ReviewPanel({
     null,
   );
   const launchInFlight = useRef(false);
-  const { session } = useSession(active ? conversationId : null);
-  const hostId = session?.hostId;
-  const workspace = session?.workspace;
+  const projectOrigin = "projectId" in origin ? origin : null;
+  const { session } = useSession(active && "sessionId" in origin ? origin.sessionId : null);
+  const hostId = projectOrigin?.hostId ?? session?.hostId;
+  const workspace = projectOrigin?.workspace ?? session?.workspace;
+  const scope =
+    "sessionId" in origin ? origin : { projectId: origin.projectId, prUrl: revision.prUrl };
+  const profileEndpoint = reviewProfilesPath(origin);
   const canEditProfiles =
     active &&
     history.authorized &&
@@ -364,10 +235,10 @@ export function ReviewPanel({
       : [];
   });
   const reviewer = reviewers.find((agent) => agent.id === agentId);
-  const profileScope = JSON.stringify([history.viewerId, conversationId, hostId, workspace]);
+  const profileScope = JSON.stringify([history.viewerId, profileEndpoint, hostId, workspace]);
   const profileCatalog = useQuery({
-    queryKey: ["studio-review-profiles", history.viewerId, conversationId, hostId, workspace],
-    queryFn: ({ signal }) => listReviewerProfiles(conversationId, signal),
+    queryKey: ["studio-review-profiles", history.viewerId, profileEndpoint, hostId, workspace],
+    queryFn: ({ signal }) => listReviewerProfiles(profileEndpoint, signal),
     enabled: active && history.authorized && !!hostId && !!workspace,
     staleTime: 15_000,
     retry: false,
@@ -379,7 +250,7 @@ export function ReviewPanel({
   );
   const useCustomSkill = selectedProfile === null;
   function modelScopeFor(reviewerId: string | undefined) {
-    return JSON.stringify([history.viewerId, conversationId, hostId, reviewerId]);
+    return JSON.stringify([history.viewerId, profileEndpoint, hostId, reviewerId]);
   }
   const modelScope = modelScopeFor(reviewer?.id);
   const modelCatalog = useHostModelOptions(
@@ -429,7 +300,9 @@ export function ReviewPanel({
   const selected = detail.data ?? listed;
   const current = !!selected && matchesReviewRevision(selected, revision);
   const targetMatches =
-    selected?.target.host_id === hostId && selected?.target.workspace === workspace;
+    selected?.target.host_id === hostId &&
+    selected?.target.workspace === workspace &&
+    (!projectOrigin || selected?.target.repository_path === projectOrigin.repository);
 
   function remember(review: ReviewPass) {
     queryClient.setQueryData(detailKey(review.id), review);
@@ -452,15 +325,28 @@ export function ReviewPanel({
       if (intent.kind === "start") return startReview(intent.review.id);
       const attempt = captureAttempt.current;
       const captured =
-        attempt?.captured ?? (await captureReview(conversationId, intent.input, intent.key));
+        attempt?.captured ??
+        (await captureReview(
+          scope,
+          projectOrigin
+            ? {
+                ...intent.input,
+                host_id: intent.hostId,
+                workspace: intent.workspace,
+                repository: projectOrigin.repository,
+              }
+            : intent.input,
+          intent.key,
+        ));
       if (attempt?.key === intent.key) attempt.captured = captured;
       remember(captured);
       if (
         captured.target.host_id !== intent.hostId ||
-        captured.target.workspace !== intent.workspace
+        captured.target.workspace !== intent.workspace ||
+        (projectOrigin && captured.target.repository_path !== projectOrigin.repository)
       ) {
         throw new Error(
-          "The session’s execution target changed. Review the captured target before starting.",
+          "The workspace’s execution target changed. Review the captured target before starting.",
         );
       }
       return startReview(captured.id);
@@ -505,6 +391,19 @@ export function ReviewPanel({
     action.reset();
   }
 
+  function requestReview(intent: ReviewAction) {
+    action.mutate(intent, {
+      onSuccess: (review) => {
+        if (
+          review.reviewer_session_id &&
+          (review.dispatch_status === "running" || review.dispatch_status === "succeeded")
+        ) {
+          onReviewStarted?.(review);
+        }
+      },
+    });
+  }
+
   function runReview() {
     if (
       launchInFlight.current ||
@@ -532,11 +431,12 @@ export function ReviewPanel({
       captureAttempt.current = { intent, key: randomUUID() };
     }
     launchInFlight.current = true;
-    action.mutate({ kind: "capture", input, key: captureAttempt.current.key, hostId, workspace });
+    requestReview({ kind: "capture", input, key: captureAttempt.current.key, hostId, workspace });
   }
 
   const pending = action.isPending;
   const canRun =
+    history.authorized &&
     reviewable &&
     !!hostId &&
     !!workspace &&
@@ -754,7 +654,7 @@ export function ReviewPanel({
         <ProfileEditorDialog
           open={editingProfiles}
           onOpenChange={setEditingProfiles}
-          endpoint={`/v1/sessions/${encodeURIComponent(conversationId)}/studio/review-profiles/editor`}
+          endpoint={reviewProfilesPath(origin, true)}
           hostId={hostId}
           workspace={workspace}
         />
@@ -853,7 +753,7 @@ export function ReviewPanel({
                 onClick={() => {
                   if (launchInFlight.current) return;
                   launchInFlight.current = true;
-                  action.mutate({ kind: "start", review: selected });
+                  requestReview({ kind: "start", review: selected });
                 }}
               >
                 Start captured review

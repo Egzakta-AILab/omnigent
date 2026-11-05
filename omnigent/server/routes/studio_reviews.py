@@ -14,6 +14,7 @@ from omnigent.entities import Conversation
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.harness_availability import reported_harness_availability
 from omnigent.native.native_coding_agents import native_coding_agent_for_agent_name
+from omnigent.runner.session_prs import PullRequestRef
 from omnigent.server.auth import AuthProvider
 from omnigent.server.routes._auth_helpers import require_user
 from omnigent.server.routes._content_type import require_json_content_type
@@ -28,18 +29,24 @@ from omnigent.server.routes._session_create_validation import (
     validate_session_agent,
     validate_session_model_metadata,
 )
+from omnigent.server.routes._studio_project_workspace import (
+    ProjectWorkspace,
+    require_owned_project,
+    resolve_project_workspace,
+)
 from omnigent.server.routes.skills import request_host_skills
 from omnigent.server.schemas import SessionEventInput
 from omnigent.server.session_orchestration import require_owned_session
 from omnigent.server.startup_inputs import initial_input_id
 from omnigent.stores import AgentStore, ConversationStore
 from omnigent.stores.permission_store import PermissionStore
+from omnigent.stores.project_store import ProjectStore
 from omnigent.stores.studio_review_store import (
     ReviewConflictError,
     ReviewNotFoundError,
     StudioReviewStore,
 )
-from omnigent.studio.reviews.launch import SKILL_NAME, review_prompt, run_review
+from omnigent.studio.reviews.launch import SKILL_NAME, review_prompt, run_review, verified_patch
 from omnigent.studio.reviews.models import (
     CaptureResult,
     ReviewEvent,
@@ -51,6 +58,7 @@ from omnigent.studio.reviews.models import (
 )
 from omnigent.studio.reviews.report import ReviewReport, read_review_report, report_instructions
 from omnigent.studio.reviews.service import (
+    CaptureProjectReviewRequest,
     CaptureReviewRequest,
     CaptureUnavailableError,
     ReviewService,
@@ -104,11 +112,82 @@ class StartReviewRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+_WRITE_GATES = [Depends(require_json_content_type), Depends(require_trusted_origin)]
+
+
 def _identifier(value: str) -> str:
     try:
         return uuid_to_bytes(value).hex()
     except ValueError:
         raise HTTPException(status_code=404, detail="Review or session not found") from None
+
+
+async def _read_project_review_resource(
+    workspace: ProjectWorkspace, op: str, params: dict[str, Any]
+) -> dict[str, Any]:
+    try:
+        return await read_workspace_from_host(
+            host_registry=workspace.registry,
+            host_conn=workspace.connection,
+            op=op,
+            workspace=workspace.path,
+            session_id=workspace.record_id,
+            params=params,
+        )
+    except HostFsError as exc:
+        if exc.status in (400, 404, 409, 422):
+            raise HTTPException(exc.status, exc.message) from exc
+        raise HTTPException(503, "The review host could not read this pull request") from exc
+    except HostFsUnavailableError as exc:
+        raise HTTPException(503, "The review host could not read this pull request") from exc
+
+
+async def _capture_project_target(
+    workspace: ProjectWorkspace, repository_path: str, pr_url: str
+) -> ReviewTarget:
+    try:
+        reference = PullRequestRef.from_url(pr_url)
+    except ValueError as exc:
+        raise HTTPException(400, "Choose a valid GitHub pull request URL") from exc
+    if reference.provider != "github":
+        raise HTTPException(400, "Studio review capture currently supports GitHub pull requests")
+    payload = await _read_project_review_resource(
+        workspace,
+        "studio_project_pull_request",
+        {
+            "repository": repository_path,
+            "pr_url": reference.url,
+            "include_files": False,
+            "require_active": True,
+        },
+    )
+    pr = payload.get("pr")
+    if (
+        not isinstance(pr, dict)
+        or pr.get("url") != reference.url
+        or type(pr.get("number")) is not int
+        or pr["number"] != reference.number
+    ):
+        raise HTTPException(503, "The review host returned incomplete pull request identity")
+    base_sha, head_sha = pr.get("base_sha"), pr.get("head_sha")
+    if not isinstance(base_sha, str) or not isinstance(head_sha, str):
+        raise HTTPException(503, "The review host returned incomplete pull request revisions")
+    try:
+        return ReviewTarget(
+            source_project_id=workspace.record_id,
+            host_id=workspace.host_id,
+            workspace=workspace.path,
+            repository_path=repository_path,
+            pr_url=reference.url,
+            repository=reference.repository,
+            pr_number=reference.number,
+            base_sha=base_sha,
+            head_sha=head_sha,
+        )
+    except ValidationError as exc:
+        raise HTTPException(
+            503, "The review host returned incomplete pull request revisions"
+        ) from exc
 
 
 async def _owned_source(
@@ -210,7 +289,7 @@ async def _read_selected_role(
         owner_id=owner_id,
         host_id=target.host_id,
         workspace=target.workspace,
-        session_id=target.source_session_id,
+        session_id=target.origin_id,
         profile_id=profile_id,
     )
     try:
@@ -265,6 +344,7 @@ def create_studio_reviews_router(
     send_review: ReviewSend | None = None,
     auth_provider: AuthProvider | None = None,
     permission_store: PermissionStore | None = None,
+    project_store: ProjectStore | None = None,
 ) -> APIRouter:
     """Expose owner-private captures, native starts and saved review reports."""
     router = APIRouter()
@@ -311,24 +391,17 @@ def create_studio_reviews_router(
                 503, "The review host returned an invalid profile catalog"
             ) from exc
 
-    @router.post(
-        "/sessions/{source_session_id}/studio/reviews",
-        status_code=201,
-        response_model=CaptureResult,
-    )
-    async def capture_review(
+    async def save_capture(
         request: Request,
         response: Response,
-        source_session_id: str,
+        user_id: str | None,
         body: CaptureReviewRequest,
-        idempotency_key: IdempotencyKey,
+        idempotency_key: str,
+        target: Callable[[], Awaitable[ReviewTarget]],
+        *,
+        source_session_id: str | None = None,
+        source_project_id: str | None = None,
     ) -> dict[str, Any]:
-        user_id = require_user(request, auth_provider)
-        source_session_id = _identifier(source_session_id)
-        await _owned_source(
-            source_session_id, user_id, conversation_store, permission_store, auth_provider
-        )
-
         async def profile() -> ReviewProfile:
             agent = await validate_session_agent(
                 user_id=user_id,
@@ -349,18 +422,6 @@ def create_studio_reviews_router(
                 reasoning_effort=effort,
             )
 
-        async def target() -> ReviewTarget:
-            captured = await capture_context(request, source_session_id, body.pr_url)
-            source = await _owned_source(
-                source_session_id, user_id, conversation_store, permission_store, auth_provider
-            )
-            if body.profile_id and (source.host_id, source.workspace) != (
-                captured.host_id,
-                captured.workspace,
-            ):
-                raise HTTPException(409, "The review execution target changed")
-            return captured
-
         async def role(captured: ReviewTarget) -> ReviewRole:
             assert body.profile_id is not None and body.profile_digest is not None
             selected = await _read_selected_role(
@@ -372,6 +433,7 @@ def create_studio_reviews_router(
             result = await service.capture(
                 owner_user_id=user_id,
                 source_session_id=source_session_id,
+                source_project_id=source_project_id,
                 idempotency_key=idempotency_key,
                 body=body,
                 resolve_profile=profile,
@@ -389,43 +451,155 @@ def create_studio_reviews_router(
         response.status_code = 201 if result.created else 200
         return result.model_dump(mode="json")
 
-    @router.get("/sessions/{source_session_id}/studio/reviews", response_model=ReviewListResponse)
-    async def list_reviews(
+    @router.post(
+        "/sessions/{source_session_id}/studio/reviews",
+        status_code=201,
+        response_model=CaptureResult,
+    )
+    async def capture_review(
         request: Request,
+        response: Response,
         source_session_id: str,
-        limit: Annotated[int, Query(ge=1, le=100)] = 25,
-        after_id: str | None = None,
+        body: CaptureReviewRequest,
+        idempotency_key: IdempotencyKey,
     ) -> dict[str, Any]:
         user_id = require_user(request, auth_provider)
         source_session_id = _identifier(source_session_id)
         await _owned_source(
             source_session_id, user_id, conversation_store, permission_store, auth_provider
         )
+
+        async def target() -> ReviewTarget:
+            captured = await capture_context(request, source_session_id, body.pr_url)
+            source = await _owned_source(
+                source_session_id, user_id, conversation_store, permission_store, auth_provider
+            )
+            if body.profile_id and (source.host_id, source.workspace) != (
+                captured.host_id,
+                captured.workspace,
+            ):
+                raise HTTPException(409, "The review execution target changed")
+            return captured
+
+        return await save_capture(
+            request,
+            response,
+            user_id,
+            body,
+            idempotency_key,
+            target,
+            source_session_id=source_session_id,
+        )
+
+    @router.post(
+        "/projects/{project_id}/studio/reviews",
+        status_code=201,
+        response_model=CaptureResult,
+        dependencies=_WRITE_GATES,
+    )
+    async def capture_project_review(
+        request: Request,
+        response: Response,
+        project_id: str,
+        body: CaptureProjectReviewRequest,
+        idempotency_key: IdempotencyKey,
+    ) -> dict[str, Any]:
+        user_id = require_user(request, auth_provider)
+        project_id = _identifier(project_id)
+        await require_owned_project(project_store, project_id, user_id)
+
+        async def target() -> ReviewTarget:
+            workspace = await resolve_project_workspace(
+                request,
+                project_store,
+                project_id=project_id,
+                owner_id=user_id,
+                host_id=body.host_id,
+                workspace=body.workspace,
+            )
+            return await _capture_project_target(workspace, body.repository, body.pr_url)
+
+        return await save_capture(
+            request, response, user_id, body, idempotency_key, target, source_project_id=project_id
+        )
+
+    async def review_history(
+        user_id: str | None,
+        limit: int,
+        after_id: str | None,
+        *,
+        source_session_id: str | None = None,
+        source_project_id: str | None = None,
+    ) -> ReviewListResponse:
         try:
             page = await asyncio.to_thread(
                 review_store.list_page,
                 owner_user_id=user_id,
                 source_session_id=source_session_id,
+                source_project_id=source_project_id,
                 limit=limit,
                 after_id=_identifier(after_id) if after_id is not None else None,
             )
         except ReviewNotFoundError:
             raise HTTPException(status_code=404, detail="Review cursor not found") from None
-        return {
-            "object": "list",
-            "data": [r.model_dump(mode="json") for r in page.entries],
-            "next_cursor": page.next_cursor,
-        }
+        return ReviewListResponse(data=page.entries, next_cursor=page.next_cursor)
+
+    @router.get("/sessions/{source_session_id}/studio/reviews", response_model=ReviewListResponse)
+    async def list_reviews(
+        request: Request,
+        source_session_id: str,
+        limit: Annotated[int, Query(ge=1, le=100)] = 25,
+        after_id: str | None = None,
+    ) -> ReviewListResponse:
+        user_id = require_user(request, auth_provider)
+        source_session_id = _identifier(source_session_id)
+        await _owned_source(
+            source_session_id, user_id, conversation_store, permission_store, auth_provider
+        )
+        return await review_history(user_id, limit, after_id, source_session_id=source_session_id)
+
+    @router.get("/projects/{project_id}/studio/reviews", response_model=ReviewListResponse)
+    async def list_project_reviews(
+        request: Request,
+        response: Response,
+        project_id: str,
+        limit: Annotated[int, Query(ge=1, le=100)] = 25,
+        after_id: str | None = None,
+    ) -> ReviewListResponse:
+        user_id = require_user(request, auth_provider)
+        project_id = _identifier(project_id)
+        await require_owned_project(project_store, project_id, user_id)
+        response.headers["Cache-Control"] = "no-store"
+        return await review_history(user_id, limit, after_id, source_project_id=project_id)
 
     @router.get("/studio/reviews/{review_id}", response_model=ReviewPass)
     async def get_review(request: Request, review_id: str) -> dict[str, Any]:
         review = await owned_review(request, review_id)
         return review.model_dump(mode="json")
 
+    @router.get("/sessions/{reviewer_session_id}/studio/review", response_model=ReviewPass)
+    async def get_session_review(
+        request: Request, response: Response, reviewer_session_id: str
+    ) -> ReviewPass:
+        reviewer_session_id = _identifier(reviewer_session_id)
+        review = await owned_review(request, reviewer_session_id)
+        if review.reviewer_session_id != reviewer_session_id:
+            raise HTTPException(404, "Review not found")
+        await _owned_source(
+            reviewer_session_id,
+            review.owner_user_id,
+            conversation_store,
+            permission_store,
+            auth_provider,
+            private=True,
+        )
+        response.headers["Cache-Control"] = "no-store"
+        return review
+
     @router.post(
         "/studio/reviews/{review_id}/start",
         response_model=ReviewPass,
-        dependencies=[Depends(require_json_content_type), Depends(require_trusted_origin)],
+        dependencies=_WRITE_GATES,
     )
     async def start_review(
         request: Request,
@@ -436,10 +610,18 @@ def create_studio_reviews_router(
         review = await owned_review(request, review_id)
         owner = review.owner_user_id
         target = review.target
-        await _owned_source(
-            target.source_session_id, owner, conversation_store, permission_store, auth_provider
-        )
-        if read_patch is None or create_reviewer is None or send_review is None:
+        project_id = target.source_project_id
+        if project_id is not None:
+            await require_owned_project(project_store, project_id, owner)
+        else:
+            await _owned_source(
+                target.origin_id, owner, conversation_store, permission_store, auth_provider
+            )
+        if (
+            create_reviewer is None
+            or send_review is None
+            or (project_id is None and read_patch is None)
+        ):
             raise HTTPException(503, "Native review execution is unavailable")
 
         async def validate_profile() -> None:
@@ -465,7 +647,22 @@ def create_studio_reviews_router(
         async def prepare() -> str:
             await validate_profile()
             await _qualify_skill(request, review)
-            current = await capture_context(request, target.source_session_id, target.pr_url)
+            workspace = None
+            if project_id is not None:
+                workspace = await resolve_project_workspace(
+                    request,
+                    project_store,
+                    project_id=project_id,
+                    owner_id=owner,
+                    host_id=target.host_id,
+                    workspace=target.workspace,
+                )
+                assert target.repository_path is not None
+                current = await _capture_project_target(
+                    workspace, target.repository_path, target.pr_url
+                )
+            else:
+                current = await capture_context(request, target.origin_id, target.pr_url)
             if current != target:
                 raise HTTPException(409, "The pull request revision or execution target changed")
             role_instructions = None
@@ -478,16 +675,35 @@ def create_studio_reviews_router(
                         409, "The workspace review profile changed. Reload profiles."
                     )
                 role_instructions = selected_role.instructions
-            patch = await read_patch(request, target)
-            source = await _owned_source(
-                target.source_session_id,
-                owner,
-                conversation_store,
-                permission_store,
-                auth_provider,
-            )
-            if (source.host_id, source.workspace) != (target.host_id, target.workspace):
-                raise HTTPException(409, "The review execution target changed")
+            if workspace is not None:
+                payload = await _read_project_review_resource(
+                    workspace,
+                    "studio_project_pull_request_patch",
+                    {
+                        "repository": target.repository_path,
+                        "pr_url": target.pr_url,
+                        "base_sha": target.base_sha,
+                        "head_sha": target.head_sha,
+                        "capture": True,
+                        "require_active": True,
+                    },
+                )
+                try:
+                    patch = verified_patch(payload, target)
+                except ValueError as exc:
+                    raise HTTPException(409, str(exc)) from None
+            else:
+                assert read_patch is not None
+                patch = await read_patch(request, target)
+                source = await _owned_source(
+                    target.origin_id,
+                    owner,
+                    conversation_store,
+                    permission_store,
+                    auth_provider,
+                )
+                if (source.host_id, source.workspace) != (target.host_id, target.workspace):
+                    raise HTTPException(409, "The review execution target changed")
             try:
                 return review_prompt(
                     review, patch, report_instructions(review), role_instructions=role_instructions
@@ -518,6 +734,7 @@ def create_studio_reviews_router(
                 or reviewer.agent_id != review.profile.agent_id
                 or reviewer.runner_id != session.runner_id
                 or (reviewer.host_id, reviewer.workspace) != (target.host_id, target.workspace)
+                or (project_id is not None and reviewer.project_id != project_id)
             ):
                 raise RuntimeError("Reviewer session binding changed before delivery")
             await validate_profile()

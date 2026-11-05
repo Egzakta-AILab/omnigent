@@ -248,11 +248,13 @@ if TYPE_CHECKING:
 
 # Workspaces whose fs reader (and change registry) stay warm between requests.
 _FS_READER_CACHE_SIZE = 8
-_STUDIO_WORKSPACE_OPS = frozenset({"studio_review_profile_editor", "studio_repository_settings"})
+_STUDIO_WORKSPACE_OPS = frozenset(
+    {"studio_review_profile_editor", "studio_repository_settings", "studio_project_file_preview"}
+)
 
 
 def _studio_workspace_path_error(op: str, path: str) -> str | None:
-    if op not in _STUDIO_WORKSPACE_OPS:
+    if op not in _STUDIO_WORKSPACE_OPS and not op.startswith("studio_project_pull_request"):
         return None
     if os.name == "nt":
         return "Workspace settings require a macOS or Linux host."
@@ -3850,6 +3852,16 @@ class HostProcess:
                         400, "invalid_depth", "Choose an integer scan depth."
                     )
                 payload = read_repository_settings(Path(expanded), depth)
+            elif frame.op == "studio_project_file_preview":
+                from omnigent.workspace_fs import read_workspace_file_preview
+
+                payload = read_workspace_file_preview(Path(expanded), str(params.get("path", "")))
+            elif frame.op.startswith("studio_project_pull_request"):
+                from omnigent.studio.workspace import PULL_REQUEST_OPS, read_project_pull_requests
+
+                if frame.op not in PULL_REQUEST_OPS:
+                    raise ValueError("Unknown project pull request operation")
+                payload = read_project_pull_requests(Path(expanded), frame.op, params)
             else:
                 # A workspace can gain or lose its .git while the host is running.
                 repo_root = detect_git_root(Path(expanded))

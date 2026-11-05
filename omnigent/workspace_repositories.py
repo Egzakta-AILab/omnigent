@@ -9,9 +9,7 @@ import stat
 import subprocess
 import time
 from collections import deque
-from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -20,7 +18,7 @@ from urllib.parse import urlsplit
 import yaml
 
 from omnigent.git_providers import ParsedRemote, host_of, resolve_pr_url, resolve_remote
-from omnigent.workspace_fs import WorkspaceReaderError
+from omnigent.workspace_fs import WorkspaceReaderError, open_workspace_directory
 from omnigent.workspace_settings import read_workspace_settings, replace_workspace_settings
 
 _MANIFEST = "repos.yaml"
@@ -167,27 +165,9 @@ def is_workspace_repository_path(path: object) -> bool:
     )
 
 
-@contextmanager
-def _open_workspace_directory(root: Path, name: str) -> Iterator[int]:
-    """Open every component without following symlinks or entering another device."""
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-    descriptor = os.open(root, flags)
-    try:
-        device = os.fstat(descriptor).st_dev
-        for part in Path(name).parts:
-            child = os.open(part, flags, dir_fd=descriptor)
-            os.close(descriptor)
-            descriptor = child
-            if os.fstat(descriptor).st_dev != device:
-                raise OSError("Repository path crosses a workspace mount")
-        yield descriptor
-    finally:
-        os.close(descriptor)
-
-
 def _contained_directory(root: Path, name: str) -> CheckoutState:
     try:
-        with _open_workspace_directory(root, name):
+        with open_workspace_directory(root, name):
             return "ready"
     except FileNotFoundError:
         return "missing"
@@ -198,7 +178,7 @@ def _contained_directory(root: Path, name: str) -> CheckoutState:
 def _checkout_state(root: Path, name: str, *, deadline: float | None = None) -> CheckoutState:
     path = root / name
     try:
-        with _open_workspace_directory(root, name) as directory:
+        with open_workspace_directory(root, name) as directory:
             try:
                 marker = os.stat(".git", dir_fd=directory, follow_symlinks=False)
             except FileNotFoundError:
@@ -369,7 +349,7 @@ def _discover_paths(
             return candidates, True
         path, level = pending.popleft()
         try:
-            with _open_workspace_directory(root, path) as directory:
+            with open_workspace_directory(root, path) as directory:
                 try:
                     marker = os.stat(".git", dir_fd=directory, follow_symlinks=False)
                 except FileNotFoundError:
@@ -619,3 +599,48 @@ def read_workspace_repositories(root: Path, repository: object = None) -> dict[s
             404, "checkout_unavailable", "Repository checkout is unavailable."
         )
     return _branch_pr(root / path, path, _github_selector(resolve_remote(url)), deadline)
+
+
+def resolve_workspace_github_repository(
+    root: Path, repository: object
+) -> tuple[Path, ParsedRemote, bool]:
+    """Bind an explicitly selected checkout to its current and any pinned origin."""
+    if not isinstance(repository, str) or not is_workspace_repository_path(repository):
+        raise WorkspaceReaderError(400, "invalid_repository", "Choose a workspace repository.")
+    root = root.resolve()
+    key = repository.casefold()
+    declared = next(
+        (entry for entry in _read_manifest(root) or [] if entry.name.casefold() == key), None
+    )
+    raw, _ = read_workspace_settings(root, _SETTINGS, _MAX_MANIFEST_BYTES)
+    _, assignments = _parse_assignments(raw)
+    assignment = next((entry for entry in assignments if entry.path.casefold() == key), None)
+    repository = declared.name if declared else assignment.path if assignment else repository
+    if declared is None and assignment is not None and assignment.role == "excluded":
+        raise WorkspaceReaderError(404, "unknown_repository", "This repository is excluded.")
+    deadline = time.monotonic() + _BRANCH_LOOKUP_SECONDS
+    if _checkout_state(root, repository, deadline=deadline) != "ready":
+        raise WorkspaceReaderError(
+            404, "checkout_unavailable", "Repository checkout is unavailable."
+        )
+    checkout = root / repository
+    url = _git_output(checkout, "remote", "get-url", "origin", deadline=deadline)
+    remote = resolve_remote(url) if url else None
+    selector = _github_selector(remote)
+    if remote is None or selector is None:
+        raise WorkspaceReaderError(
+            400, "unsupported_origin", "Choose a repository with a GitHub origin."
+        )
+    if declared is not None:
+        expected_origin = _github_selector(resolve_remote(declared.url))
+    else:
+        expected_origin = assignment.origin if assignment is not None else None
+    is_pinned = declared is not None or (assignment is not None and assignment.role == "active")
+    if is_pinned and (
+        expected_origin is None or selector.casefold() != expected_origin.casefold()
+    ):
+        raise WorkspaceReaderError(
+            409, "origin_mismatch", "The checkout's origin differs from workspace settings."
+        )
+    review_available = is_pinned or (repository == "." and assignment is None)
+    return checkout, remote, review_available

@@ -1047,6 +1047,116 @@ def read_workspace_branch_pr(
     return "found", {"url": parsed.url, "title": title, "number": parsed.number}
 
 
+def list_workspace_pull_requests(root: str, remote: ParsedRemote) -> list[dict[str, Any]]:
+    """List open pull requests for one explicitly scoped checkout origin."""
+    repository = f"{remote.host}/{remote.repository}"
+    reference = PullRequestRef.from_url(f"https://{repository}/pull/1")
+    with _gh_deadline_scope(time.monotonic() + _PR_EDIT_REQUEST_SECONDS):
+        _host_args(root, reference)
+        rc, output, _ = _gh(
+            [
+                "pr",
+                "list",
+                f"--repo={repository}",
+                "--state",
+                "open",
+                "--limit",
+                "30",
+                "--json",
+                "number,title,url,isDraft,baseRefName,headRefName,updatedAt",
+            ],
+            cwd=root,
+            token=_pr_token(root, reference),
+        )
+    if rc != 0:
+        raise ValueError("GitHub could not list pull requests. Check gh access on the host.")
+    rows = json.loads(output)
+    if not isinstance(rows, list):
+        raise ValueError("GitHub returned an invalid pull request list.")
+    results = []
+    for row in rows[:30]:
+        if not isinstance(row, dict) or not isinstance(row.get("url"), str):
+            continue
+        parsed = resolve_pr_url(row["url"])
+        if (
+            parsed is None
+            or parsed.provider != "github"
+            or parsed.host != remote.host
+            or parsed.repository.casefold() != remote.repository.casefold()
+            or type(row.get("number")) is not int
+            or row["number"] != parsed.number
+            or not isinstance(row.get("title"), str)
+        ):
+            continue
+        results.append(
+            {
+                "number": parsed.number,
+                "title": row["title"],
+                "url": parsed.url,
+                "is_draft": row.get("isDraft") is True,
+                "base_ref": row.get("baseRefName"),
+                "head_ref": row.get("headRefName"),
+                "updated_at": row.get("updatedAt"),
+            }
+        )
+    return results
+
+
+def read_workspace_pull_request(
+    root: str, reference: PullRequestRef, *, include_files: bool
+) -> dict[str, Any]:
+    """Read an explicitly scoped PR without associating it with a session."""
+    endpoint = f"repos/{reference.repository}/pulls/{reference.number}"
+    with _gh_deadline_scope(time.monotonic() + _PR_EDIT_REQUEST_SECONDS):
+        data = _pr_api(root, reference, endpoint)
+        if data.get("number") != reference.number:
+            raise ValueError("GitHub returned a different pull request.")
+        base_sha = _api_string(data, "base", "sha")
+        head_sha = _api_string(data, "head", "sha")
+        files = []
+        if include_files:
+            rc, output, _ = _gh(
+                ["api", *_host_args(root, reference), f"{endpoint}/files?per_page=40"],
+                cwd=root,
+                token=_pr_token(root, reference),
+            )
+            if rc != 0:
+                raise ValueError("GitHub could not load the PR's changed files. Refresh to retry.")
+            rows = json.loads(output)
+            if not isinstance(rows, list):
+                raise ValueError("GitHub returned an invalid changed-file list.")
+            files = _shape_changed_files(rows[:40])
+            _check_pr_revision(root, reference, head_sha=head_sha, base_sha=base_sha)
+    body = data.get("body")
+    count = data.get("changed_files")
+    return {
+        "pr": {
+            "number": reference.number,
+            "title": _api_string(data, "title"),
+            "url": reference.url,
+            "state": "MERGED"
+            if data.get("merged") is True
+            else _api_string(data, "state").upper(),
+            "is_draft": data.get("draft") is True,
+            "base_ref": _api_string(data, "base", "ref"),
+            "head_ref": _api_string(data, "head", "ref"),
+            "base_sha": base_sha,
+            "head_sha": head_sha,
+            "body": body[:16384] if isinstance(body, str) else None,
+        },
+        "files": files,
+        "files_truncated": include_files
+        and (len(files) < count if type(count) is int else len(files) == 40),
+    }
+
+
+def read_workspace_pull_request_patch(
+    root: str, reference: PullRequestRef, *, head_sha: str, base_sha: str
+) -> dict[str, Any]:
+    """Read the provider patch and confirm both revisions before and after."""
+    return _pr_patch_at_revision(root, reference, head_sha=head_sha, base_sha=base_sha)
+
+
 def _workspace_github_info(root: str) -> dict[str, Any]:
     """Resolve GitHub context for the workspace: repo, branch, base, and PR.
 
@@ -1467,6 +1577,10 @@ def _pr_changed_files(root: str, reference: PullRequestRef | None) -> dict[str, 
         entries = [
             entry for page in entries for entry in (page if isinstance(page, list) else [page])
         ]
+    return {"object": "list", "data": _shape_changed_files(entries), "has_more": False}
+
+
+def _shape_changed_files(entries: list[Any]) -> list[dict[str, Any]]:
     data: list[dict[str, Any]] = []
     for entry in entries:
         if not isinstance(entry, dict):
@@ -1487,7 +1601,7 @@ def _pr_changed_files(root: str, reference: PullRequestRef | None) -> dict[str, 
                 "previous_path": entry.get("previous_filename"),
             }
         )
-    return {"object": "list", "data": data, "has_more": False}
+    return data
 
 
 def _pr_changed_files_at_revision(

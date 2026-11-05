@@ -308,16 +308,17 @@ In the project settings for your Egzakta sessions, select your Mac and set
 Leave **Random worktree** off so new sessions open the root that contains your
 nested clones.
 
-From **New session in project**, choose **Open workspace** to start an empty
-session using the host, working directory and agent shown in the composer.
-The Workspace panel opens with Files, Pull Requests and Agents available.
-Use **+ → Reviewer profiles** to manage profiles before linking a PR. With a
-native harness and an empty draft, the session opens in Terminal. An existing
-draft carries into Chat for you to send when ready.
+Open the project or choose **New session in project**. Workspace opens beside
+the composer using its selected host and directory. Browse **Files**, choose
+an agent, or manage reviewer profiles under **Profiles**. Use **Add file to
+prompt** or **Add PR to prompt** to carry a reference into your first message.
 
-To start with a review, open **Pull Requests**, find the nested checkout’s
-branch PR or link a known PR URL, then use **Review → Run review**. The
-reviewer appears as a separate private session in the same project.
+To start with a review, select a repository under **Pull Requests**, then
+choose an open PR or paste its GitHub URL. Inspect the overview or diff, then
+choose **Review → Run review**. This creates one private reviewer session in
+the project. It opens on a report with the captured revision, reviewer
+settings, summary, and findings. **Open transcript** shows the original
+review prompt and agent response.
 
 For any workspace, open **Project settings → Repositories**, or open
 **Manage repositories** from the PR panel. The managers run on the connected
@@ -327,20 +328,18 @@ and depth 2 includes one additional level. You can also add a checkout by its
 path relative to the root.
 
 Scanned checkouts start as **Reference**. Promote the repos you want to use as
-PR targets to **Active**. Use **Excluded** to hide an entry from the PR picker,
+review targets to **Active**. Use **Excluded** to hide an entry from the PR picker,
 or **Remove** to forget its assignment. **Save repositories** writes the depth
 and assignments to `.omnigent-repositories.json` in the workspace. The scan is
 local and reports when it reaches a limit. Repository roles control the harness
 picker. The agent's filesystem access follows its native permissions.
 
-Omnigent also reads a compatible `repos.yaml` to show declared checkouts in
-**Workspace → Pull Requests → Workspace repositories**. For example, choose
-`KVARK` for platform work and see its declared dependency on `Services`. Switch
-to `Services` when you need its own branch PR. GitHub lookup checks that the
-checkout's `origin` matches the declared or saved host, organization and repository.
-Egzakta checkouts use `github.com/Egzakta-AILab`. **Find branch PR** looks for an
-open PR from the exact local branch name. Use **Link a PR** with the full URL
-for fork branches, closed PRs or another known PR.
+Omnigent also reads a compatible `repos.yaml` for declared checkouts. Select
+`KVARK` for platform PRs or `Services` for its own PRs. GitHub lookup checks
+the checkout's `origin` against the declared or saved repository. Egzakta
+checkouts use `github.com/Egzakta-AILab`. In an existing session, **Find branch
+PR** looks up the checkout's current branch. On the project screen, **Open PR**
+accepts the full GitHub URL for a known PR in the selected repository.
 
 The session and its reviewer start at the workspace root, where the native
 harness resolves skills and rules through its normal configuration. Keep using

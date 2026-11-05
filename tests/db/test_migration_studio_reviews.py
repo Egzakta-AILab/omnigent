@@ -16,6 +16,7 @@ from omnigent.db.utils import _build_alembic_config
 
 _PREVIOUS = "d0a1f879a01d"
 _REVISION = "e6a2b4c8d013"
+_PROJECT_ORIGIN = "5f9ca09e07cd"
 _TABLES = {"studio_review_passes", "studio_review_operations", "studio_review_events"}
 
 
@@ -39,11 +40,6 @@ def test_upgrade_and_downgrade_preserve_existing_database(tmp_path: Path) -> Non
             connection.execute(sa.text("INSERT INTO legacy_guard VALUES ('preserved')"))
         _migrate(uri, engine, "upgrade", _REVISION)
         assert set(sa.inspect(engine).get_table_names()) >= _TABLES
-        for model in (SqlStudioReviewPass, SqlStudioReviewOperation, SqlStudioReviewEvent):
-            inspected = sa.inspect(engine)
-            actual = {c["name"] for c in inspected.get_columns(model.__tablename__)}
-            assert actual == set(model.__table__.c.keys())
-            assert inspected.get_foreign_keys(model.__tablename__) == []
         with engine.begin() as connection:
             connection.execute(
                 sa.text(
@@ -63,6 +59,24 @@ def test_upgrade_and_downgrade_preserve_existing_database(tmp_path: Path) -> Non
             assert (
                 connection.execute(sa.text("SELECT value FROM legacy_guard")).scalar_one()
                 == "preserved"
+            )
+        _migrate(uri, engine, "upgrade", _PROJECT_ORIGIN)
+        for model in (SqlStudioReviewPass, SqlStudioReviewOperation, SqlStudioReviewEvent):
+            inspected = sa.inspect(engine)
+            actual = {c["name"] for c in inspected.get_columns(model.__tablename__)}
+            assert actual == set(model.__table__.c.keys())
+            assert inspected.get_foreign_keys(model.__tablename__) == []
+        with engine.connect() as connection:
+            assert connection.execute(
+                sa.text("SELECT source_session_id, source_project_id FROM studio_review_passes")
+            ).one() == (b"s" * 16, None)
+        _migrate(uri, engine, "downgrade", _REVISION)
+        with engine.connect() as connection:
+            assert (
+                connection.execute(
+                    sa.text("SELECT source_session_id FROM studio_review_passes")
+                ).scalar_one()
+                == b"s" * 16
             )
         _migrate(uri, engine, "downgrade", _PREVIOUS)
         assert not _TABLES.intersection(sa.inspect(engine).get_table_names())

@@ -33,12 +33,16 @@ search, and file content work identically in both modes.
 from __future__ import annotations
 
 import base64
+import codecs
 import mimetypes
 import os
 import re
+import stat
 import subprocess
 from collections import deque
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import TypeAlias, cast
 
@@ -62,6 +66,7 @@ from omnigent.runtime.filesystem_registry import (
 
 # Match the runner's caps so a host-served read is truncated identically.
 _MAX_READ_BYTES = 10 * 1024 * 1024  # 10 MiB
+_FILE_PREVIEW_BYTES = 64 * 1024
 _REPOSITORY_BRANCH_TIMEOUT_S = 3.0
 _MAX_REPOSITORY_BRANCHES = 10
 
@@ -140,6 +145,55 @@ def _resolve_workspace_path(root: Path, path: str) -> Path:
             400, "invalid_path", f"Path {path!r} escapes the workspace root"
         ) from exc
     return full
+
+
+@contextmanager
+def open_workspace_directory(root: Path, path: str) -> Iterator[int]:
+    """Open a validated relative directory without following symlinks or mounts."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    descriptor = os.open(root, flags)
+    try:
+        device = os.fstat(descriptor).st_dev
+        for part in Path(path).parts:
+            child = os.open(part, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+            if os.fstat(descriptor).st_dev != device:
+                raise OSError("Path crosses a workspace mount")
+        yield descriptor
+    finally:
+        os.close(descriptor)
+
+
+def read_workspace_file_preview(root: Path, path: str) -> _WorkspacePayload:
+    """Return a bounded UTF-8 preview of a regular file within the workspace."""
+    try:
+        relative = Path(_validate_path(path))
+    except InvalidPath as exc:
+        raise WorkspaceReaderError(400, "invalid_path", str(exc)) from exc
+    if not relative.name:
+        raise WorkspaceReaderError(400, "invalid_path", "Choose a file to preview.")
+    try:
+        with open_workspace_directory(root, str(relative.parent)) as directory:
+            flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+            with os.fdopen(os.open(relative.name, flags, dir_fd=directory), "rb") as stream:
+                info = os.fstat(stream.fileno())
+                if not stat.S_ISREG(info.st_mode) or info.st_dev != os.fstat(directory).st_dev:
+                    raise WorkspaceReaderError(
+                        400, "invalid_file", "Choose a regular file to preview."
+                    )
+                raw = stream.read(_FILE_PREVIEW_BYTES + 1)
+    except OSError as exc:
+        raise WorkspaceReaderError(
+            404, "not_found", "This file is unavailable for preview."
+        ) from exc
+    truncated = len(raw) > _FILE_PREVIEW_BYTES
+    data = raw[:_FILE_PREVIEW_BYTES]
+    content = None
+    if b"\x00" not in data:
+        with suppress(UnicodeDecodeError):
+            content = codecs.getincrementaldecoder("utf-8")().decode(data, final=not truncated)
+    return {"path": relative.as_posix(), "content": content, "truncated": truncated}
 
 
 def read_repository_branches(root: Path, repositories: list[dict[str, str]]) -> _WorkspacePayload:

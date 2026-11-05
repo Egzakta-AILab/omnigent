@@ -159,6 +159,7 @@ import { InlineTerminalsSection } from "./InlineTerminalsSection";
 import { resolveDefaultShell } from "./preferredShell";
 import { WorkspacePanel } from "./WorkspacePanel";
 import { SessionRail } from "./SessionRail";
+import { ReviewerSessionView } from "@/studio/reviews/ReviewerSessionView";
 import type { RightRailTab } from "./railTabs";
 
 // Dev-only preview; lazy so the sample data never ships in production bundles.
@@ -696,6 +697,9 @@ function AppShellImpl() {
     () => ({ ...activeConv?.labels, ...activeSession?.labels }),
     [activeConv?.labels, activeSession?.labels],
   );
+  const reviewerSessionHint =
+    sessionLabels["omnigent.studio.review"] === "true" ||
+    /^Review PR #\d+\b/.test(activeSession?.title ?? activeConv?.title ?? "");
   const terminalFirst = sessionLabels["omnigent.ui"] === "terminal";
   const {
     terminals,
@@ -2755,7 +2759,22 @@ function AppShellImpl() {
                 >
                   <SubagentPanelOpenerContext.Provider value={openSubagentInPanel}>
                     <RenderErrorBoundary name="this page" resetKey={location.pathname}>
-                      <Outlet />
+                      {serverConversationId &&
+                      isOwnerLevel(permissionLevel) &&
+                      (searchParams.get("view") === "review" ||
+                        (reviewerSessionHint &&
+                          serverInfo !== "loading" &&
+                          serverInfo.studio_reviews)) ? (
+                        <ReviewerSessionView
+                          sessionId={serverConversationId}
+                          requestedView={searchParams.get("view")}
+                          lastActivityAt={activeConv?.updated_at}
+                        >
+                          <Outlet />
+                        </ReviewerSessionView>
+                      ) : (
+                        <Outlet />
+                      )}
                     </RenderErrorBoundary>
                   </SubagentPanelOpenerContext.Provider>
                 </GridSessionMain>

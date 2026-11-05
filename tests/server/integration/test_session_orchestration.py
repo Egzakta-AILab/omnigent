@@ -576,7 +576,9 @@ async def test_same_host_still_requires_host_ownership(auth_client, auth_app, pe
     assert permissions.list_for_user("alice") == before_grants
 
 
-@pytest.mark.parametrize("scenario", ["unfiled", "moved", "foreign", "legacy", "stale-agent"])
+@pytest.mark.parametrize(
+    "scenario", ["unfiled", "moved", "foreign", "legacy", "stale-agent", "project"]
+)
 async def test_studio_reviewer_uses_private_session_and_original_runner(
     auth_client, auth_app, peers, db_uri, monkeypatch, scenario
 ):
@@ -587,16 +589,23 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
     from omnigent.db.utils import builtin_agent_id
     from omnigent.errors import ErrorCode, OmnigentError
     from omnigent.harness_plugins import native_provider_for_key
-    from omnigent.host.frames import HostLaunchRunnerFrame, HostStatFrame, decode_host_frame
+    from omnigent.host.frames import (
+        HostFsRequestFrame,
+        HostLaunchRunnerFrame,
+        HostStatFrame,
+        decode_host_frame,
+    )
     from omnigent.native.native_coding_agents import CODEX_NATIVE_AGENT_NAME
     from omnigent.runtime import _globals
     from omnigent.server.app import _build_native_bundle, _ensure_builtin_agent
     from omnigent.server.auth import LEVEL_OWNER, RESERVED_USER_PUBLIC, UnifiedAuthProvider
     from omnigent.server.routes.sessions import routes_core, routes_events
+    from omnigent.server.routes.studio_reviews import create_studio_reviews_router
     from omnigent.server.schemas import SessionEventInput
     from omnigent.server.sharing_settings import DefaultPublicSessions
     from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
     from omnigent.stores.project_store.sqlalchemy_store import SqlAlchemyProjectStore
+    from omnigent.stores.studio_review_store import StudioReviewStore
     from omnigent.studio.reviews.models import ReviewPass, ReviewProfile, ReviewTarget
     from tests.server.integration.test_sessions_permissions import _register_online_host
 
@@ -627,12 +636,23 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
     if scenario == "legacy":
         expected_project_name = "Legacy"
         conversations.set_labels(source["id"], {PROJECT_LABEL_KEY: expected_project_name})
+    if scenario == "project":
+        project = projects.create(uuid4().hex, "Direct review", "alice")
+        expected_project_id = project.id
+        expected_project_name = project.name
     host_id = uuid4().hex
     _register_online_host(auth_app, host_id, "alice")
+    auth_app.state.host_store.upsert_on_connect(
+        host_id, "Review host", "alice", configured_harnesses={"codex-native": True}
+    )
     workspace = "/review-workspace"
     conversations.set_host_id(source["id"], host_id, workspace=workspace)
     auth_app.state.default_public_sessions = lambda: DefaultPublicSessions.ALL
     launches = []
+    pr_url = "https://github.com/example/project/pull/42"
+    role_digest = "1" * 64
+    current_head = "b" * 40
+    base_sha = "a" * 40
 
     def answer_host(connection, payload):
         frame = decode_host_frame(payload)
@@ -643,6 +663,43 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
         elif isinstance(frame, HostLaunchRunnerFrame):
             launches.append(frame)
             connection.pending_launches[frame.request_id].set_result({"status": "launched"})
+        elif isinstance(frame, HostFsRequestFrame) and scenario == "project":
+            assert frame.session_id == expected_project_id
+            assert frame.workspace == workspace
+            if frame.op == "studio_project_pull_request":
+                assert frame.params["repository"] == "nested/project"
+                assert frame.params["pr_url"] == pr_url
+                assert frame.params["require_active"] is True
+                result = {
+                    "pr": {
+                        "url": pr_url,
+                        "number": 42,
+                        "base_sha": base_sha,
+                        "head_sha": current_head,
+                    }
+                }
+            elif frame.op == "studio_project_pull_request_patch":
+                assert frame.params["base_sha"] == base_sha
+                assert frame.params["head_sha"] == current_head
+                assert frame.params["capture"] is True
+                result = {
+                    "object": "session.github.pr_diff",
+                    "patch": "diff --git a/hello b/hello\n@@ -1 +1 @@\n-before\n+after\n",
+                    "base_sha": base_sha,
+                    "head_sha": current_head,
+                }
+            else:
+                assert frame.op == "studio_review_profiles"
+                assert frame.params == {"profile_id": "backend"}
+                result = {
+                    "id": "backend",
+                    "label": "Backend",
+                    "digest": role_digest,
+                    "instructions": "Check service boundaries.",
+                }
+            connection.pending_fs_requests[frame.request_id].set_result(
+                {"status": "ok", "payload": result}
+            )
         else:
             pytest.fail(f"Unexpected host frame: {frame}")
 
@@ -651,14 +708,16 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
         id=uuid4().hex,
         owner_user_id="alice",
         target=ReviewTarget(
-            source_session_id=source["id"],
+            source_session_id=source["id"] if scenario != "project" else None,
+            source_project_id=expected_project_id if scenario == "project" else None,
+            repository_path="nested/project" if scenario == "project" else None,
             host_id=host_id,
             workspace=workspace,
-            pr_url="https://github.com/example/project/pull/42",
+            pr_url=pr_url,
             repository="example/project",
             pr_number=42,
-            base_sha="a" * 40,
-            head_sha="b" * 40,
+            base_sha=base_sha,
+            head_sha=current_head,
         ),
         profile=ReviewProfile(
             agent_id=reviewer.id,
@@ -723,6 +782,103 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
         announce_session(user_id, session_id)
 
     monkeypatch.setattr(routes_core, "_announce_session_added", observe_announcement)
+    if scenario == "project":
+        send_review = AsyncMock(return_value={"queued": True, "pending_id": "review-input"})
+        legacy_capture, legacy_patch = AsyncMock(), AsyncMock()
+        # Keep the optional SPA catch-all after the injected API routes.
+        mounts = [route for route in auth_app.router.routes if route.name == "web-ui"]
+        for mount in mounts:
+            auth_app.router.routes.remove(mount)
+        auth_app.include_router(
+            create_studio_reviews_router(
+                StudioReviewStore(db_uri),
+                conversations,
+                agents,
+                capture_context=legacy_capture,
+                read_patch=legacy_patch,
+                create_reviewer=create_reviewer,
+                send_review=send_review,
+                auth_provider=auth_provider,
+                permission_store=permissions,
+                project_store=projects,
+            ),
+            prefix="/v1",
+        )
+        auth_app.router.routes.extend(mounts)
+        path = f"/v1/projects/{expected_project_id}/studio/reviews"
+        before = {conv.id for conv in conversations.list_conversations().data}
+        history = await auth_client.get(path)
+        assert history.status_code == 200, history.text
+        assert history.json()["data"] == []
+        capture = await auth_client.post(
+            path,
+            headers={"Idempotency-Key": "project-capture"},
+            json={
+                "host_id": host_id,
+                "workspace": workspace,
+                "repository": "nested/project",
+                "pr_url": pr_url,
+                "expected_base_sha": base_sha,
+                "expected_head_sha": current_head,
+                "agent_id": reviewer.id,
+                "harness": "codex-native",
+                "profile_id": "backend",
+                "profile_digest": role_digest,
+                "model": "review-model",
+                "reasoning_effort": "high",
+            },
+        )
+        assert capture.status_code == 201, capture.text
+        captured = capture.json()["review"]
+        assert captured["target"] == review.target.model_dump()
+        assert {conv.id for conv in conversations.list_conversations().data} == before
+        assert not launches
+        assert (await auth_client.get(path)).json()["data"] == [captured]
+        start_path = f"/v1/studio/reviews/{captured['id']}/start"
+        current_head = "c" * 40
+        stale = await auth_client.post(
+            start_path, headers={"Idempotency-Key": "project-start"}, json={}
+        )
+        assert stale.status_code == 409, stale.text
+        assert {conv.id for conv in conversations.list_conversations().data} == before
+        current_head = "b" * 40
+        started = await auth_client.post(
+            start_path, headers={"Idempotency-Key": "project-start"}, json={}
+        )
+        assert started.status_code == 200, started.text
+        started_review = started.json()
+        assert started_review["dispatch_status"] == "running", started.text
+        review_id = captured["id"]
+        assert started_review["reviewer_session_id"] == review_id
+        replay = await auth_client.post(
+            start_path, headers={"Idempotency-Key": "project-start"}, json={}
+        )
+        assert replay.json() == started_review
+        assert {conv.id for conv in conversations.list_conversations().data} == before | {
+            review_id
+        }
+        assert [frame.session_id for frame in launches] == [review_id]
+        assert announcements == [("alice", review_id, expected_project_id)]
+        send_review.assert_awaited_once()
+        legacy_capture.assert_not_awaited()
+        legacy_patch.assert_not_awaited()
+        conv = conversations.get_conversation(review_id)
+        assert conv is not None
+        assert (conv.host_id, conv.workspace, conv.project_id, conv.parent_conversation_id) == (
+            host_id,
+            workspace,
+            expected_project_id,
+            None,
+        )
+        assert conv.model_override == "review-model" and conv.reasoning_effort == "high"
+        assert permissions.get(RESERVED_USER_PUBLIC, review_id) is None
+        reviewer_path = f"/v1/sessions/{review_id}/studio/review"
+        assert (await auth_client.get(reviewer_path)).json() == started_review
+        for private_path in (path, reviewer_path):
+            private = await auth_client.get(private_path, headers={"X-Forwarded-Email": "bob"})
+            assert private.status_code == 404, private.text
+        return
+
     created = await create_reviewer(request, "alice", review, review.id)
     assert created.id == review.id
     assert created.harness == review.profile.harness
