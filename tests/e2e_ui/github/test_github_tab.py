@@ -1170,6 +1170,13 @@ def test_studio_review_from_pr_panel(
     base_sha, head_sha = "1" * 40, "2" * 40
     revision = {"base_sha": base_sha, "head_sha": head_sha}
     workspace = "/work/acme/egzakta-org" if rail else "/work/acme/app"
+    role = {
+        "id": "backend",
+        "label": "Backend QA",
+        "description": "Review APIs and data access.",
+        "digest": "3" * 64,
+    }
+    model = "review-model"
     association = {
         "url": pr_url,
         "host": "github.com",
@@ -1196,7 +1203,14 @@ def test_studio_review_from_pr_panel(
     review = {
         "id": review_id,
         "target": {**revision, "pr_url": pr_url, "host_id": host_id, "workspace": workspace},
-        "profile": {"agent_id": agent_id, "harness": "codex-native", "skill": "team-review"},
+        "profile": {
+            "agent_id": agent_id,
+            "harness": "codex-native",
+            "skill": None if rail else "team-review",
+            "role": role if rail else None,
+            "model": model,
+            "reasoning_effort": "high",
+        },
         "state": "prepared",
         "dispatch_status": "not_requested",
         "reviewer_session_id": None,
@@ -1302,13 +1316,20 @@ def test_studio_review_from_pr_panel(
             "expected_head_sha": head_sha,
             "agent_id": agent_id,
             "harness": "codex-native",
-            "skill": "team-review",
+            "model": model,
+            "reasoning_effort": "high",
+            **(
+                {"profile_id": role["id"], "profile_digest": role["digest"]}
+                if rail
+                else {"skill": "team-review"}
+            ),
         }
         capture_keys.append(route.request.headers["idempotency-key"])
         captured = True
         route.fulfill(json={"review": review}, status=201)
 
     def start(route: Route) -> None:
+        assert route.request.post_data_json == {}
         start_keys.append(route.request.headers["idempotency-key"])
         if entry == "rail" and len(start_keys) == 1:
             route.fulfill(json={"detail": "Start response unavailable"}, status=503)
@@ -1379,6 +1400,24 @@ def test_studio_review_from_pr_panel(
             }
         ),
     )
+    page.route(
+        f"**/v1/hosts/{host_id}/harnesses/codex-native/model-options",
+        lambda r: r.fulfill(
+            json={
+                "models": [
+                    {
+                        "id": model,
+                        "displayName": "Review Model",
+                        "supportedReasoningEfforts": [{"reasoningEffort": "high"}],
+                    }
+                ]
+            }
+        ),
+    )
+    page.route(
+        "**/studio/review-profiles",
+        lambda r: r.fulfill(json={"profiles": [role] if rail else []}),
+    )
     page.route(re.compile(r"/studio/reviews(?:\?|$)"), list_or_capture)
     page.route(f"**/studio/reviews/{review_id}", lambda r: r.fulfill(json=review))
     page.route(f"**/studio/reviews/{review_id}/start", start)
@@ -1427,8 +1466,19 @@ def test_studio_review_from_pr_panel(
         ).to_be_visible()
     panel.get_by_role("combobox", name="Reviewer", exact=True).click()
     page.get_by_role("option", name="Codex", exact=True).click()
-    panel.get_by_role("combobox", name="Review skill", exact=True).click()
-    page.get_by_role("option", name="team-review", exact=True).click()
+    if rail:
+        panel.get_by_role("combobox", name="Reviewer profile", exact=True).click()
+        page.get_by_role("option", name="Backend QA", exact=True).click()
+        expect(panel.get_by_text(role["description"], exact=True)).to_be_visible()
+    else:
+        panel.get_by_role("combobox", name="Review skill", exact=True).click()
+        page.get_by_role("option", name="team-review", exact=True).click()
+    panel.get_by_role("combobox", name="Model", exact=True).click()
+    page.get_by_role("option", name="Review Model", exact=True).click()
+    panel.get_by_role("combobox", name="Reasoning effort", exact=True).click()
+    page.get_by_role("option", name="High", exact=True).click()
+    if rail:
+        page.screenshot(path=str(tmp_path / "studio-review-role-and-model.png"))
     run_button = panel.get_by_role("button", name="Run review", exact=True)
     if entry == "rail":
         # Plain HTTP omits randomUUID. Mask it after app setup to exercise the action itself.

@@ -3,6 +3,13 @@ import { apiErrorFromResponse } from "@/lib/sessionsApi";
 
 export type ReviewHarness = "codex-native" | "claude-native";
 
+export interface ReviewerProfile {
+  id: string;
+  label: string;
+  description?: string | null;
+  digest: string;
+}
+
 export interface ReviewPass {
   id: string;
   target: {
@@ -15,7 +22,10 @@ export interface ReviewPass {
   profile: {
     agent_id: string;
     harness: ReviewHarness;
-    skill: string;
+    skill: string | null;
+    model?: string | null;
+    reasoning_effort?: string | null;
+    role?: ReviewerProfile | null;
   };
   state: "prepared" | "running" | "completed" | "failed" | "cancelled" | "unknown";
   dispatch_status:
@@ -56,7 +66,11 @@ export interface CaptureReview {
   expected_head_sha: string;
   agent_id: string;
   harness: ReviewHarness;
-  skill: string;
+  skill?: string;
+  model?: string;
+  reasoning_effort?: string;
+  profile_id?: string;
+  profile_digest?: string;
 }
 
 export interface ReviewPage {
@@ -109,6 +123,35 @@ export async function listReviews(
     throw new Error("Invalid review list");
   }
   return page;
+}
+
+export async function listReviewerProfiles(sessionId: string, signal: AbortSignal) {
+  const response = await authenticatedFetch(
+    `/v1/sessions/${encodeURIComponent(sessionId)}/studio/review-profiles`,
+    { signal },
+  );
+  // A server from before the catalog was added can still run a custom skill.
+  if (response.status === 404) return [];
+  if (!response.ok) throw await apiErrorFromResponse(response);
+  const body = (await response.json()) as { profiles?: ReviewerProfile[] } | null;
+  if (
+    !Array.isArray(body?.profiles) ||
+    body.profiles.some(
+      (profile) =>
+        !profile ||
+        typeof profile.id !== "string" ||
+        !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(profile.id) ||
+        typeof profile.label !== "string" ||
+        !profile.label.trim() ||
+        (profile.description != null && typeof profile.description !== "string") ||
+        typeof profile.digest !== "string" ||
+        !/^[0-9a-f]{64}$/.test(profile.digest),
+    ) ||
+    new Set(body.profiles.map((profile) => profile.id)).size !== body.profiles.length
+  ) {
+    throw new Error("Invalid reviewer profile catalog");
+  }
+  return body.profiles;
 }
 
 export async function captureReview(sessionId: string, input: CaptureReview, key: string) {

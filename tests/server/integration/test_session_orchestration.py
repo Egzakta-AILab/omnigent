@@ -652,6 +652,8 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
             agent_version=str(reviewer.version + int(agent_version_changed)),
             harness="codex-native",
             skill="review",
+            model="review-model",
+            reasoning_effort="high",
         ),
         state="prepared",
         dispatch_status="not_requested",
@@ -695,6 +697,8 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
         None,
         None,
     )
+    assert conv.model_override == review.profile.model
+    assert conv.reasoning_effort == review.profile.reasoning_effort
     owner = permissions.get("alice", conv.id)
     assert owner is not None and owner.level == LEVEL_OWNER
     assert permissions.get(RESERVED_USER_PUBLIC, conv.id) is None

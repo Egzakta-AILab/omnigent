@@ -223,11 +223,11 @@ provenance needs.
    Pull Requests**. In a multi-repo workspace, choose a checkout under
    **Workspace repositories** and select **Find branch PR**, then link the
    result. For any full PR URL, use **Link a PR**, paste the URL and select
-   **Link**. In the PR details, open **Review**, choose **Codex**
-   or **Claude Code**, select a review skill, then click **Run review**. The
-   skill list comes from the chosen reviewer and workspace. To inspect the
-   harness inventory, open **Settings → Harnesses**, select the host and open
-   the relevant harness card's **Skills** tab.
+   **Link**. In the PR details, open **Review** and choose **Codex** or
+   **Claude Code**. Select a **Reviewer profile** or choose **Custom skill**
+   to pick a native skill. Select a **Model** from the review host, then
+   **Reasoning effort** where available. **Default** uses the harness's
+   own configuration. Click **Run review**.
 4. Inspect the summary and findings. Open a finding's line in **Changes** to
    compare the claim with the diff. Refresh the page and reopen **Review** to
    check that the saved run and its linked reviewer session return.
@@ -240,6 +240,31 @@ permissions. It receives the PR diff at the captured base and head revisions.
 The first version accepts GitHub text diffs up to 48 KiB. A moved revision
 requires a fresh capture. Reports contain agent findings. Check evidence is A4.
 See the [review API and state model](review-records.md) for retry behavior.
+
+### Share reviewer profiles with a workspace
+
+Place `review-profiles.yaml` in the working directory on each execution host.
+Each entry points to a trusted Markdown file inside that workspace. Keep the
+profile files in the team-controlled meta-repo so a nested PR checkout cannot
+change the instructions used to review it.
+
+```yaml
+version: 1
+profiles:
+  backend:
+    label: Backend QA
+    description: Review APIs, data access, and backend tests.
+    file: platform/agents/KVARK/kvark-backend-qa.md
+```
+
+Egzakta's workspace references the shared Backend, Frontend, AI Quality,
+and CI/CD QA lenses and keeps private-review versions of KVARK's Security
+and Orchestrator instructions in the meta-repo.
+The review uses the Markdown body as guidance for a single private review of
+the captured PR diff. Orchestrator applies its routing criteria within that
+review. Native tool permissions and the requested model come from the selected
+harness and launch settings. History records the requested model and profile.
+If the profile changes after capture, start a fresh review to use the new version.
 
 Run the deterministic A2 record checks from this checkout:
 

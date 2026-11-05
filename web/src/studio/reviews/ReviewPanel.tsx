@@ -7,6 +7,11 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import { ExternalLinkIcon, Loader2Icon } from "lucide-react";
+import {
+  EFFORT_SELECT_NONE,
+  MODEL_SELECT_DEFAULT,
+  nativeEffortOptions,
+} from "@/components/HarnessConfigControls";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -17,6 +22,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useAvailableAgents } from "@/hooks/useAvailableAgents";
+import { useHostModelOptions } from "@/hooks/useHosts";
 import { sessionQueryOptions, useSession } from "@/hooks/useSession";
 import { useSkills } from "@/hooks/useSkills";
 import { useIdentityReady, useViewerId } from "@/hooks/useViewerId";
@@ -29,6 +35,7 @@ import {
   captureReview,
   getReview,
   getReviewReport,
+  listReviewerProfiles,
   listReviews,
   matchesReviewRevision,
   startReview,
@@ -37,6 +44,7 @@ import {
   type ReviewHarness,
   type ReviewPage,
   type ReviewPass,
+  type ReviewerProfile,
   type ReviewSource,
 } from "./api";
 
@@ -44,6 +52,7 @@ const POLL_MS = 3_000;
 const START_CONFIRMATION_MS = 120_000;
 const FULL_SHA = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 const SKILL_NAME = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
+const CUSTOM_SKILL = "__custom_skill__";
 const HARNESS_LABELS: Record<ReviewHarness, string> = {
   "codex-native": "Codex",
   "claude-native": "Claude Code",
@@ -92,6 +101,52 @@ function reviewSource(review: ReviewPass, finding: ReviewFinding): ReviewSource 
     side: finding.side,
     line: finding.line,
   };
+}
+
+function reviewSettingsLabel(review: ReviewPass): string {
+  const { role, skill, harness, model, reasoning_effort } = review.profile;
+  return [role?.label, skill, HARNESS_LABELS[harness], model, reasoning_effort]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+function ReviewSelect({
+  label,
+  value,
+  onChange,
+  options,
+  disabled,
+  placeholder,
+  description,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  options: { value: string; label: string; title?: string | null }[];
+  disabled: boolean;
+  placeholder?: string;
+  description?: string | null;
+}) {
+  return (
+    <div className="min-w-0 space-y-1">
+      <p className="text-xs text-muted-foreground">{label}</p>
+      <Select value={value} onValueChange={onChange}>
+        <SelectTrigger aria-label={label} disabled={disabled} className="w-full">
+          <SelectValue placeholder={placeholder} />
+        </SelectTrigger>
+        <SelectContent>
+          {options.map((option) => (
+            <SelectItem key={option.value} value={option.value} title={option.title ?? undefined}>
+              {option.label}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      {description && (
+        <p className="text-xs text-muted-foreground [overflow-wrap:anywhere]">{description}</p>
+      )}
+    </div>
+  );
 }
 
 function FindingCard({
@@ -243,7 +298,8 @@ function ReviewResult({
       ) : report.data?.state === "incomplete" ? (
         <p role="status" className="text-muted-foreground">
           The reviewer has not produced a complete report. Open the reviewer session and ask the
-          agent to load the selected skill and return a corrected report, then refresh here.
+          agent to {review.profile.skill ? "load the selected skill and " : ""}return a corrected
+          report, then refresh here.
         </p>
       ) : (
         <p role="status" className="text-muted-foreground">
@@ -272,6 +328,15 @@ export function ReviewPanel({
   const queryClient = useQueryClient();
   const [agentId, setAgentId] = useState("");
   const [skill, setSkill] = useState("");
+  const [profileChoice, setProfileChoice] = useState<{
+    scope: string;
+    profile: ReviewerProfile;
+  } | null>(null);
+  const [modelChoice, setModelChoice] = useState<{
+    scope: string;
+    model: string;
+    effort: string;
+  } | null>(null);
   const [selectedId, setSelectedId] = useState("");
   const captureAttempt = useRef<{ intent: string; key: string; captured?: ReviewPass } | null>(
     null,
@@ -291,16 +356,46 @@ export function ReviewPanel({
       : [];
   });
   const reviewer = reviewers.find((agent) => agent.id === agentId);
+  const profileScope = JSON.stringify([history.viewerId, conversationId, hostId, workspace]);
+  const profileCatalog = useQuery({
+    queryKey: ["studio-review-profiles", history.viewerId, conversationId, hostId, workspace],
+    queryFn: ({ signal }) => listReviewerProfiles(conversationId, signal),
+    enabled: active && history.authorized && !!hostId && !!workspace,
+    staleTime: 15_000,
+    retry: false,
+  });
+  const profiles = profileCatalog.isSuccess ? profileCatalog.data : [];
+  const selectedProfile = profileChoice?.scope === profileScope ? profileChoice.profile : null;
+  const role = profiles.find(
+    (profile) => profile.id === selectedProfile?.id && profile.digest === selectedProfile.digest,
+  );
+  const useCustomSkill = selectedProfile === null;
+  const modelScope = JSON.stringify([history.viewerId, conversationId, hostId, reviewer?.id]);
+  const modelCatalog = useHostModelOptions(
+    hostId ?? null,
+    reviewer?.harness ?? "",
+    active && history.authorized && !!reviewer,
+    { poll: false },
+  );
+  const models = modelCatalog.isSuccess ? modelCatalog.data : [];
+  const { model, effort } =
+    modelChoice?.scope === modelScope ? modelChoice : { model: "", effort: "" };
+  const validModel = !model || models.some((option) => option.id === model);
+  const efforts = validModel ? (nativeEffortOptions(reviewer?.harness, models, model) ?? []) : [];
+  const validEffort = !effort || efforts.some((option) => option.value === effort);
   const catalog = useSkills({
     target:
       reviewer && hostId && workspace
         ? { hostId, path: workspace, harness: reviewer.harness, agentId: reviewer.id }
         : null,
-    enabled: active,
+    enabled: active && useCustomSkill,
   });
   const skills = catalog.skills.filter((entry) => SKILL_NAME.test(entry.name));
   const completeCatalog = catalog.skillsStatus === "ready" && catalog.skillsWarnings.length === 0;
   const reviewable = FULL_SHA.test(revision.baseSha) && FULL_SHA.test(revision.headSha);
+  const validProfile = useCustomSkill
+    ? completeCatalog && skills.some((entry) => entry.name === skill)
+    : !!role;
   const records = (history.query.data?.pages ?? [])
     .flatMap((page) => page.data)
     .filter((review) => review.target.pr_url === revision.prUrl);
@@ -380,8 +475,9 @@ export function ReviewPanel({
       !hostId ||
       !workspace ||
       !reviewable ||
-      !completeCatalog ||
-      !skills.some((entry) => entry.name === skill)
+      !validProfile ||
+      !validModel ||
+      !validEffort
     )
       return;
     const input: CaptureReview = {
@@ -390,7 +486,9 @@ export function ReviewPanel({
       expected_head_sha: revision.headSha,
       agent_id: reviewer.id,
       harness: reviewer.harness,
-      skill,
+      ...(role ? { profile_id: role.id, profile_digest: role.digest } : { skill }),
+      ...(model ? { model } : {}),
+      ...(effort ? { reasoning_effort: effort } : {}),
     };
     const intent = JSON.stringify({ input, hostId, workspace });
     if (captureAttempt.current?.intent !== intent) {
@@ -405,8 +503,10 @@ export function ReviewPanel({
     reviewable &&
     !!hostId &&
     !!workspace &&
-    completeCatalog &&
-    skills.some((entry) => entry.name === skill);
+    !!reviewer &&
+    validProfile &&
+    validModel &&
+    validEffort;
   const canStartCaptured =
     selected?.dispatch_status === "not_requested" && current && targetMatches;
   const canRetryRead =
@@ -421,8 +521,8 @@ export function ReviewPanel({
         <div className="space-y-1">
           <h3 className="font-medium">Private review</h3>
           <p className="text-muted-foreground">
-            Run an existing skill in a separate reviewer session. The agent uses its normal
-            permissions in this workspace.
+            Run a workspace profile or a custom skill in a separate session. The reviewer uses its
+            normal permissions in this workspace.
           </p>
         </div>
         <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
@@ -438,64 +538,117 @@ export function ReviewPanel({
           <dd className="font-mono [overflow-wrap:anywhere]">{workspace ?? "Unavailable"}</dd>
         </dl>
         <div className="grid gap-2 min-[540px]:grid-cols-2">
-          <div className="min-w-0 space-y-1">
-            <p className="text-xs text-muted-foreground">Reviewer</p>
-            <Select
-              value={reviewer?.id ?? ""}
-              onValueChange={(id) => {
-                setAgentId(id);
-                setSkill("");
+          <ReviewSelect
+            label="Reviewer"
+            value={reviewer?.id ?? ""}
+            onChange={(id) => {
+              setAgentId(id);
+              setSkill("");
+              setModelChoice(null);
+              action.reset();
+            }}
+            options={reviewers.map((agent) => ({ value: agent.id, label: agent.display_name }))}
+            disabled={pending || reviewers.length === 0}
+            placeholder={agents.isPending ? "Loading reviewers…" : "Choose reviewer"}
+          />
+          {reviewer && (
+            <ReviewSelect
+              label="Model"
+              value={validModel ? model || MODEL_SELECT_DEFAULT : ""}
+              onChange={(value) => {
+                setModelChoice({
+                  scope: modelScope,
+                  model: value === MODEL_SELECT_DEFAULT ? "" : value,
+                  effort: "",
+                });
                 action.reset();
               }}
-            >
-              <SelectTrigger
-                aria-label="Reviewer"
-                disabled={pending || reviewers.length === 0}
-                className="w-full"
-              >
-                <SelectValue
-                  placeholder={agents.isPending ? "Loading reviewers…" : "Choose reviewer"}
-                />
-              </SelectTrigger>
-              <SelectContent>
-                {reviewers.map((agent) => (
-                  <SelectItem key={agent.id} value={agent.id}>
-                    {agent.display_name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="min-w-0 space-y-1">
-            <p className="text-xs text-muted-foreground">Review skill</p>
-            <Select
+              options={[
+                { value: MODEL_SELECT_DEFAULT, label: "Default" },
+                ...models.map((option) => ({
+                  value: option.id,
+                  label: option.displayName || option.id,
+                })),
+              ]}
+              disabled={pending}
+              placeholder="Choose model again"
+              description={modelCatalog.isPending && hostId ? "Loading models…" : undefined}
+            />
+          )}
+          {(profiles.length > 0 || selectedProfile) && (
+            <ReviewSelect
+              label="Reviewer profile"
+              value={useCustomSkill ? CUSTOM_SKILL : (role?.id ?? "")}
+              onChange={(id) => {
+                const profile = profiles.find((entry) => entry.id === id);
+                setProfileChoice(profile ? { scope: profileScope, profile } : null);
+                action.reset();
+              }}
+              options={[
+                { value: CUSTOM_SKILL, label: "Custom skill" },
+                ...profiles.map((profile) => ({ value: profile.id, label: profile.label })),
+              ]}
+              disabled={pending}
+              placeholder="Choose profile again"
+              description={role?.description}
+            />
+          )}
+          {(efforts.length > 0 || effort) && (
+            <ReviewSelect
+              label="Reasoning effort"
+              value={validEffort ? effort || EFFORT_SELECT_NONE : ""}
+              onChange={(value) => {
+                setModelChoice({
+                  scope: modelScope,
+                  model,
+                  effort: value === EFFORT_SELECT_NONE ? "" : value,
+                });
+                action.reset();
+              }}
+              options={[{ value: EFFORT_SELECT_NONE, label: "Default" }, ...efforts]}
+              disabled={pending}
+              placeholder="Choose effort again"
+            />
+          )}
+          {useCustomSkill && (
+            <ReviewSelect
+              label="Review skill"
               value={skills.some((entry) => entry.name === skill) ? skill : ""}
-              onValueChange={(name) => {
+              onChange={(name) => {
                 setSkill(name);
                 action.reset();
               }}
-            >
-              <SelectTrigger
-                aria-label="Review skill"
-                disabled={pending || !completeCatalog || skills.length === 0}
-                className="w-full"
-              >
-                <SelectValue
-                  placeholder={
-                    catalog.skillsStatus === "loading" ? "Loading skills…" : "Choose skill"
-                  }
-                />
-              </SelectTrigger>
-              <SelectContent>
-                {skills.map((entry) => (
-                  <SelectItem key={entry.name} value={entry.name} title={entry.description}>
-                    {entry.display_name || entry.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
+              options={skills.map((entry) => ({
+                value: entry.name,
+                label: entry.display_name || entry.name,
+                title: entry.description,
+              }))}
+              disabled={pending || !completeCatalog || skills.length === 0}
+              placeholder={catalog.skillsStatus === "loading" ? "Loading skills…" : "Choose skill"}
+            />
+          )}
         </div>
+        {reviewer && modelCatalog.isError && (
+          <div className="flex flex-wrap items-center gap-2 text-muted-foreground">
+            <p>Couldn’t load the host’s models.</p>
+            <Button variant="outline" size="sm" onClick={() => void modelCatalog.refetch()}>
+              Reload models
+            </Button>
+          </div>
+        )}
+        {(profileCatalog.isError || (selectedProfile && action.isError)) && (
+          <div className="flex flex-wrap items-center gap-2 text-muted-foreground">
+            {profileCatalog.isError && <p>{profileCatalog.error.message}</p>}
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={pending || profileCatalog.isFetching}
+              onClick={() => void profileCatalog.refetch()}
+            >
+              Reload profiles
+            </Button>
+          </div>
+        )}
         {agents.isError && (
           <p role="alert" className="text-destructive">
             Couldn’t load reviewers.
@@ -506,15 +659,17 @@ export function ReviewPanel({
             No built-in Codex or Claude Code reviewers are available.
           </p>
         )}
-        {reviewer && (catalog.skillsStatus === "error" || catalog.skillsWarnings.length > 0) && (
-          <div role="alert" className="flex flex-wrap items-center gap-2 text-destructive">
-            <p>The host’s skill catalog is unavailable or incomplete.</p>
-            <Button variant="outline" size="sm" onClick={() => void catalog.refetch()}>
-              Reload skills
-            </Button>
-          </div>
-        )}
-        {reviewer && completeCatalog && skills.length === 0 && (
+        {reviewer &&
+          useCustomSkill &&
+          (catalog.skillsStatus === "error" || catalog.skillsWarnings.length > 0) && (
+            <div role="alert" className="flex flex-wrap items-center gap-2 text-destructive">
+              <p>The host’s skill catalog is unavailable or incomplete.</p>
+              <Button variant="outline" size="sm" onClick={() => void catalog.refetch()}>
+                Reload skills
+              </Button>
+            </div>
+          )}
+        {reviewer && useCustomSkill && completeCatalog && skills.length === 0 && (
           <p className="text-muted-foreground">
             This reviewer has no supported skills in the selected workspace.
           </p>
@@ -571,8 +726,7 @@ export function ReviewPanel({
             <SelectContent>
               {records.map((review) => (
                 <SelectItem key={review.id} value={review.id}>
-                  {HARNESS_LABELS[review.profile.harness]} · {review.profile.skill} ·{" "}
-                  {review.target.head_sha.slice(0, 8)} ·{" "}
+                  {reviewSettingsLabel(review)} · {review.target.head_sha.slice(0, 8)} ·{" "}
                   {new Date(review.created_at).toLocaleString()}
                 </SelectItem>
               ))}
@@ -601,6 +755,9 @@ export function ReviewPanel({
               <p className="font-mono text-xs text-muted-foreground [overflow-wrap:anywhere]">
                 {selected.target.base_sha.slice(0, 8)} → {selected.target.head_sha.slice(0, 8)} ·{" "}
                 {selected.target.workspace}
+              </p>
+              <p className="text-xs text-muted-foreground [overflow-wrap:anywhere]">
+                {reviewSettingsLabel(selected)}
               </p>
               {unconfirmed && (
                 <p className="text-muted-foreground">

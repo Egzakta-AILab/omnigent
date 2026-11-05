@@ -3813,6 +3813,10 @@ class HostProcess:
                 )
             elif frame.op == "workspace_repositories":
                 payload = read_workspace_repositories(Path(expanded), params.get("repository"))
+            elif frame.op == "studio_review_profiles":
+                from omnigent.studio.reviews.profiles import read_review_profiles
+
+                payload = read_review_profiles(Path(expanded), params.get("profile_id"))
             else:
                 # A workspace can gain or lose its .git while the host is running.
                 repo_root = detect_git_root(Path(expanded))

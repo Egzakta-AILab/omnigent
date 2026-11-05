@@ -2,8 +2,9 @@
 
 The capture API creates a durable review record before agent execution. Each
 record freezes the linked PR's base and head SHA, source
-session, host, workspace, agent version, harness, skill name and optional model
-settings. Existing session, agent and resource services supply this context.
+session, host, workspace, agent version, harness, selected skill or profile,
+and requested model settings. Existing session, agent and resource services
+supply this context.
 
 ```mermaid
 sequenceDiagram
@@ -59,10 +60,17 @@ returns 409; refresh the context and create a new capture. Unavailable PR access
 or unsynchronized association data blocks capture rather than creating a
 partially verified record.
 
+For a workspace profile, read its ID and digest from the profile catalog.
+Send them as `profile_id` and `profile_digest` in the capture body. You can
+omit `skill` for a profile-only run. Optional `model` and `reasoning_effort`
+values record the requested launch settings. Omitted settings use native
+defaults.
+
 ## Read and reconnect
 
 | Endpoint | Result |
 | --- | --- |
+| `GET /v1/sessions/{source_session_id}/studio/review-profiles` | Profile labels, descriptions and digests from the owned source's workspace |
 | `GET /v1/sessions/{source_session_id}/studio/reviews` | Owned source's records, with `limit` and `after_id` pagination |
 | `GET /v1/studio/reviews/{review_id}` | Durable snapshot and current state |
 | `GET /v1/studio/reviews/{review_id}/operations/{operation_id}` | One operation's status |
@@ -87,7 +95,7 @@ describes request and response fields.
 
 The PR panel performs these steps after **Run review**. For a direct API call,
 capture a record with the built-in Codex or Claude Code agent ID and a skill
-available on the owned host. Then send:
+or profile available on the owned host. Then send:
 
 ```http
 POST /v1/studio/reviews/REVIEW_ID/start
@@ -98,12 +106,13 @@ Idempotency-Key: kvark-pr-17-start-1
 ```
 
 Omnigent checks the current source binding, PR revision, agent version, host
-readiness and complete skill inventory. It reads the bounded text diff through
+readiness and the selected skill or profile. A changed profile digest requires
+a new capture. Omnigent reads the bounded text diff through
 the existing PR transport and claims one attempt before creating a private root
 session. The new session uses the captured workspace and normal native agent
-permissions. Its first input supplies the diff as review evidence. Codex uses
-its native skill mention. Claude Code receives an explicit request to load the
-skill with its native Skill tool.
+permissions. Its first input supplies the diff as review evidence and the
+profile body as review guidance. For a selected skill, Codex uses its native
+skill mention and Claude Code receives a request to load it with the Skill tool.
 
 | `dispatch_status` | Meaning |
 | --- | --- |
@@ -119,8 +128,9 @@ start. The caller can inspect the original session and decide what to do next.
 
 The report comes from the latest eligible assistant reply in that session. A
 ready result contains one `studio-review-v1` JSON block bound to the review ID
-and both captured SHAs. Claude Code also requires the same turn's matching
-Skill tool launch receipt. Malformed or interrupted output stays incomplete and
+and both captured SHAs. When a Claude Code review selects a skill, it also
+requires the same turn's matching Skill tool launch receipt. Malformed or
+interrupted output stays incomplete and
 can be repaired in the same conversation. Omnigent validates the report shape
 and relative file coordinates. The UI resolves a finding to a displayed diff
 line only when the selected PR revision and the loaded patch match the capture.

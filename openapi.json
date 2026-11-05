@@ -989,6 +989,30 @@
             ],
             "title": "Pr Url"
           },
+          "profile_digest": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Profile Digest"
+          },
+          "profile_id": {
+            "anyOf": [
+              {
+                "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Profile Id"
+          },
           "reasoning_effort": {
             "anyOf": [
               {
@@ -1003,18 +1027,24 @@
             "title": "Reasoning Effort"
           },
           "skill": {
-            "maxLength": 256,
-            "minLength": 1,
-            "title": "Skill",
-            "type": "string"
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Skill"
           }
         },
         "required": [
           "expected_base_sha",
           "expected_head_sha",
           "agent_id",
-          "harness",
-          "skill"
+          "harness"
         ],
         "title": "CaptureReviewRequest",
         "type": "object"
@@ -6208,18 +6238,34 @@
             ],
             "title": "Reasoning Effort"
           },
+          "role": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReviewRole"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "skill": {
-            "maxLength": 256,
-            "minLength": 1,
-            "title": "Skill",
-            "type": "string"
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Skill"
           }
         },
         "required": [
           "agent_id",
           "agent_version",
-          "harness",
-          "skill"
+          "harness"
         ],
         "title": "ReviewProfile",
         "type": "object"
@@ -6271,6 +6317,58 @@
           "state"
         ],
         "title": "ReviewReport",
+        "type": "object"
+      },
+      "ReviewRole": {
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "default": "",
+            "maxLength": 512,
+            "title": "Description",
+            "type": "string"
+          },
+          "digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Digest",
+            "type": "string"
+          },
+          "id": {
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+            "title": "Id",
+            "type": "string"
+          },
+          "label": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Label",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "digest"
+        ],
+        "title": "ReviewRole",
+        "type": "object"
+      },
+      "ReviewRolesResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "profiles": {
+            "items": {
+              "$ref": "#/components/schemas/ReviewRole"
+            },
+            "maxItems": 64,
+            "title": "Profiles",
+            "type": "array"
+          }
+        },
+        "required": [
+          "profiles"
+        ],
+        "title": "ReviewRolesResponse",
         "type": "object"
       },
       "ReviewTarget": {
@@ -20135,6 +20233,48 @@
           }
         },
         "summary": "Fork Session",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/sessions/{source_session_id}/studio/review-profiles": {
+      "get": {
+        "operationId": "list_review_profiles_v1_sessions__source_session_id__studio_review_profiles_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "source_session_id",
+            "required": true,
+            "schema": {
+              "title": "Source Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewRolesResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Review Profiles",
         "tags": [
           "sessions"
         ]
