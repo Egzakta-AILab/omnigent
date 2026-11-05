@@ -101,6 +101,13 @@ class InlineDraft(InlineDraftVersion):
     publication_state: InlinePublicationState = "draft"
     provider_url: str | None = None
     publication_confirmed_by: str | None = None
+    publication_reference: ReviewRoleDigest | None = None
+
+
+class ReconcileInlinePublication(InlineDraftVersion):
+    provider_url: Annotated[
+        str, StringConstraints(strip_whitespace=True, max_length=2048, min_length=1)
+    ]
 
 
 class ReportDraftResult(FrozenModel):

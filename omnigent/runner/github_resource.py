@@ -1984,6 +1984,13 @@ def _api_string(value: object, *keys: str) -> str:
     return value
 
 
+def read_review_comment(root: str, reference: PullRequestRef, comment_id: int) -> dict[str, Any]:
+    with _gh_deadline_scope(time.monotonic() + _PR_EDIT_REQUEST_SECONDS):
+        return _pr_api(
+            root, reference, f"repos/{reference.repository}/pulls/comments/{comment_id}"
+        )
+
+
 def _pr_file_contents(
     root: str,
     reference: PullRequestRef,

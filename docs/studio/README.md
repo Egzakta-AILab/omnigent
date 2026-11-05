@@ -700,8 +700,11 @@ The review owner can select drafts in **Publish inline drafts**, choose
 shows the exact text, lines, and PR revision. Omnigent checks the revision again
 at confirmation and posts each selected draft as its own thread from the
 captured workspace's configured account. A posted draft links to its provider
-thread. If delivery is unconfirmed, check the PR for that comment before taking
-further action. The current Studio capture flow supports GitHub.
+thread. If delivery is unconfirmed, find the inline comment on GitHub and paste
+its **Copy link** URL into **Check delivery**. Studio reads that comment and
+checks its delivery reference, text, and original diff anchor before updating
+the draft. Comments sent before Studio added delivery references can be checked
+manually on GitHub. The current Studio capture flow supports GitHub.
 
 Before confirming, **Download preview** saves the exact proposed comments.
 After publication, the review owner can verify one comment using the saved
