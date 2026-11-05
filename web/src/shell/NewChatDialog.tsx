@@ -2103,7 +2103,7 @@ function ProjectWorkspaceBrowser({ hostId, workspace }: { hostId: string; worksp
         initialPath={workspace}
         workspacePath={workspace}
         title="Project workspace"
-        description="Browse the project’s saved working directory without changing this session’s settings."
+        description="Browse this working directory without changing the new session’s settings."
       />
     </>
   );
@@ -5158,6 +5158,21 @@ export function NewChatLandingScreen() {
       : null;
   const visibleWorkspace = cachedWorkspace?.workspace ?? workspaceTrimmed;
   const visibleWorktreeHeader = cachedWorkspace ?? worktreeHeader;
+  // Prefer the project's own location. Without one, use the active composer
+  // pair, not the display cache, which can still show a previous selection.
+  const workspaceSeededForAnotherHost =
+    workspaceFromConfigRef.current &&
+    !!prefillConfig?.hostId &&
+    prefillConfig.hostId !== selectedHostId;
+  const projectWorkspaceTarget =
+    typeof projectWorkspaceHostId === "string" &&
+    projectWorkspaceHostId !== "" &&
+    projectWorkspaceHostId !== SANDBOX_HOST_CHOICE &&
+    isNavigablePath(projectWorkspace)
+      ? { hostId: projectWorkspaceHostId, workspace: projectWorkspace }
+      : prefillSettled && prefill.project === projectParam && !workspaceSeededForAnotherHost
+        ? workspacePreview
+        : null;
 
   const pickerSelectionError =
     sandboxDefaultModelsEnabled &&
@@ -6432,18 +6447,19 @@ export function NewChatLandingScreen() {
             </h1>
           ) : null}
         </div>
-        {selectedProject === projectParam &&
-          configProjectId !== null &&
+        {projectParam !== "" &&
+          selectedProject === projectParam &&
+          !projectListLoading &&
           !projectConfigLoading &&
-          typeof projectWorkspaceHostId === "string" &&
-          projectWorkspaceHostId !== "" &&
-          projectWorkspaceHostId !== SANDBOX_HOST_CHOICE &&
-          projectWorkspace &&
-          isNavigablePath(projectWorkspace) && (
+          projectWorkspaceTarget && (
             <ProjectWorkspaceBrowser
-              key={JSON.stringify([configProjectId, projectWorkspaceHostId, projectWorkspace])}
-              hostId={projectWorkspaceHostId}
-              workspace={projectWorkspace}
+              key={JSON.stringify([
+                projectParam,
+                projectWorkspaceTarget.hostId,
+                projectWorkspaceTarget.workspace,
+              ])}
+              hostId={projectWorkspaceTarget.hostId}
+              workspace={projectWorkspaceTarget.workspace}
             />
           )}
         {/* Drop cue, spanning the landing surface. */}

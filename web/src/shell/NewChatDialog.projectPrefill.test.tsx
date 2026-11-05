@@ -361,6 +361,34 @@ afterEach(() => {
 });
 
 describe("NewChatLandingScreen project prefill", () => {
+  it.each(["proj_alpha", null])(
+    "browses the effective working directory for a project without saved settings (%s)",
+    async (projectId) => {
+      setProjects([{ id: projectId, name: "Alpha" }]);
+      setProjectConfig(undefined);
+      renderLanding();
+
+      const open = await screen.findByRole("button", { name: "Open project workspace" });
+      fireEvent.click(open);
+      expect(screen.getByRole("dialog", { name: "Project workspace" })).toBeInTheDocument();
+      expect(useHostFilesystem).toHaveBeenCalledWith("host_1", RECENT_WORKSPACE);
+      expect(authenticatedFetch).not.toHaveBeenCalled();
+    },
+  );
+
+  it("does not browse a remembered working directory on a fallback host", async () => {
+    writeProjectLaunchDefaults("proj_alpha", { hostId: "offline_host", workspace: REPO }, {});
+    renderLanding();
+
+    await waitFor(() =>
+      expect(screen.getByTestId("new-chat-landing-workspace-chip")).toHaveAccessibleName(
+        `Working directory: ${REPO}`,
+      ),
+    );
+    expect(screen.queryByRole("button", { name: "Open project workspace" })).toBeNull();
+    expect(useHostFilesystem).not.toHaveBeenCalledWith("host_1", REPO);
+  });
+
   it("browses the saved project workspace independently of the session draft's launch target", async () => {
     const config = { host_id: "host_1", workspace: REPO, agent_id: "ag_hello" };
     setProjectConfig(config);

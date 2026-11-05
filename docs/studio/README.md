@@ -309,8 +309,9 @@ Leave **Random worktree** off so new sessions open the root that contains your
 nested clones.
 
 From **New session in project**, use **Open project workspace** to browse the
-saved directory before sending. A review launched from a project session
-appears as a separate private session in that project.
+saved directory before sending. If the project has no saved location, the
+button opens the working directory shown in the composer. A review launched
+from a project session appears as a separate private session in that project.
 
 For any workspace, open **Project settings → Repositories**, or open
 **Manage repositories** from the PR panel. The managers run on the connected
