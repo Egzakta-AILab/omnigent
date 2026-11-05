@@ -19,6 +19,7 @@ from omnigent.db.account_authority import account_generation
 from omnigent.db.utils import builtin_agent_id
 from omnigent.entities import Conversation, Project
 from omnigent.errors import ErrorCode, OmnigentError
+from omnigent.extensions.review_panel import creator_pilot_enabled
 from omnigent.harness_availability import reported_harness_availability
 from omnigent.native.native_coding_agents import native_coding_agent_for_agent_name
 from omnigent.runner.session_prs import PullRequestRef
@@ -64,6 +65,14 @@ from omnigent.stores.studio_review_store import (
     ReviewConflictError,
     ReviewNotFoundError,
     StudioReviewStore,
+)
+from omnigent.studio.creator_panel import (
+    PANEL_BYTES,
+    CreatorPanelContract,
+    CreatorPanelPreview,
+    ReviewPanelDefinition,
+    compile_creator_panel,
+    creator_panel_contract,
 )
 from omnigent.studio.reviews.artifacts import (
     EvidenceCheckSelection,
@@ -1668,6 +1677,52 @@ def create_studio_reviews_router(
             )
         )
 
+    async def creator_access(request: Request, run_id: str) -> DiscussionAccess:
+        if not creator_pilot_enabled():
+            raise HTTPException(404, "Creator Mode is unavailable")
+        access = await discussion_access(request, run_id)
+        if access.run.patch_sha256 is None:
+            raise HTTPException(404, "This review has no captured diff")
+        return access
+
+    @router.get(
+        "/studio/review-runs/{run_id}/creator-preview", response_model=CreatorPanelContract
+    )
+    async def get_creator_contract(
+        request: Request, response: Response, run_id: str
+    ) -> CreatorPanelContract:
+        await creator_access(request, run_id)
+        response.headers["Cache-Control"] = "no-store"
+        return creator_panel_contract()
+
+    @router.post(
+        "/studio/review-runs/{run_id}/creator-preview",
+        response_model=CreatorPanelPreview,
+        dependencies=_WRITE_GATES,
+        openapi_extra=_discussion_request_schema(ReviewPanelDefinition),
+    )
+    async def preview_creator_panel(
+        request: Request, response: Response, run_id: str
+    ) -> CreatorPanelPreview:
+        access = await creator_access(request, run_id)
+        raw = await _bounded_body(request, limit=PANEL_BYTES)
+        try:
+            preview = compile_creator_panel(
+                raw,
+                run_id=access.run.id,
+                base_sha=access.run.target.base_sha,
+                head_sha=access.run.target.head_sha,
+            )
+        except ValidationError as exc:
+            errors = exc.errors(include_url=False, include_context=False, include_input=False)
+            diagnostic = " ".join(
+                f"{str(error['loc'][0])[:64] if error['loc'] else 'JSON'}: {error['msg']}."
+                for error in errors[:5]
+            )
+            raise HTTPException(422, diagnostic) from exc
+        response.headers["Cache-Control"] = "no-store"
+        return preview
+
     @router.get("/studio/review-runs/{run_id}/discussion", response_model=ReviewDiscussionView)
     async def get_review_discussion(
         request: Request, response: Response, run_id: str
@@ -1770,6 +1825,7 @@ def create_studio_reviews_router(
             can_attach_evidence=access.actor == access.owner,
             can_ask=access.can_comment and create_reviewer is not None and send_review is not None,
             can_use_review_workspace=access.actor == access.owner,
+            creator_available=creator_pilot_enabled(),
             check_repository=(
                 posixpath.join(target.workspace, target.repository_path)
                 if access.actor == access.owner

@@ -2433,6 +2433,59 @@
         "title": "CreatedEvent",
         "type": "object"
       },
+      "CreatorPanelContract": {
+        "properties": {
+          "definition_schema": {
+            "additionalProperties": true,
+            "title": "Definition Schema",
+            "type": "object"
+          },
+          "template": {
+            "$ref": "#/components/schemas/ReviewPanelDefinition"
+          }
+        },
+        "required": [
+          "definition_schema",
+          "template"
+        ],
+        "title": "CreatorPanelContract",
+        "type": "object"
+      },
+      "CreatorPanelPreview": {
+        "properties": {
+          "base_sha": {
+            "pattern": "^[0-9a-f]{40}(?:[0-9a-f]{24})?$",
+            "title": "Base Sha",
+            "type": "string"
+          },
+          "digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Digest",
+            "type": "string"
+          },
+          "head_sha": {
+            "pattern": "^[0-9a-f]{40}(?:[0-9a-f]{24})?$",
+            "title": "Head Sha",
+            "type": "string"
+          },
+          "panel": {
+            "$ref": "#/components/schemas/ReviewPanelDefinition"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "base_sha",
+          "head_sha",
+          "digest",
+          "panel"
+        ],
+        "title": "CreatorPanelPreview",
+        "type": "object"
+      },
       "DailyCost": {
         "description": "One day's LLM spend for the daily timeline chart.",
         "properties": {
@@ -7369,6 +7422,11 @@
             "title": "Comments",
             "type": "array"
           },
+          "creator_available": {
+            "default": false,
+            "title": "Creator Available",
+            "type": "boolean"
+          },
           "findings": {
             "items": {
               "$ref": "#/components/schemas/ReviewDiscussionFinding"
@@ -7783,6 +7841,68 @@
           "capabilities"
         ],
         "title": "ReviewPanelContribution",
+        "type": "object"
+      },
+      "ReviewPanelDefinition": {
+        "additionalProperties": false,
+        "description": "A layout and explicit actions for a scoped list of review checks.",
+        "properties": {
+          "checks": {
+            "enum": [
+              "failed",
+              "all"
+            ],
+            "title": "Checks",
+            "type": "string"
+          },
+          "contract_version": {
+            "const": "1",
+            "title": "Contract Version",
+            "type": "string"
+          },
+          "description": {
+            "default": "",
+            "maxLength": 240,
+            "title": "Description",
+            "type": "string"
+          },
+          "group_by": {
+            "enum": [
+              "file",
+              "directory"
+            ],
+            "title": "Group By",
+            "type": "string"
+          },
+          "proof_action": {
+            "enum": [
+              "open",
+              "open_and_discuss"
+            ],
+            "title": "Proof Action",
+            "type": "string"
+          },
+          "slot": {
+            "const": "review.panel",
+            "title": "Slot",
+            "type": "string"
+          },
+          "title": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "slot",
+          "contract_version",
+          "title",
+          "group_by",
+          "checks",
+          "proof_action"
+        ],
+        "title": "ReviewPanelDefinition",
         "type": "object"
       },
       "ReviewPass": {
@@ -24249,6 +24369,157 @@
           }
         },
         "summary": "Get Project Review Run",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/studio/review-runs/{run_id}/creator-preview": {
+      "get": {
+        "operationId": "get_creator_contract_v1_studio_review_runs__run_id__creator_preview_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatorPanelContract"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Creator Contract",
+        "tags": [
+          "sessions"
+        ]
+      },
+      "post": {
+        "operationId": "preview_creator_panel_v1_studio_review_runs__run_id__creator_preview_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "description": "A layout and explicit actions for a scoped list of review checks.",
+                "properties": {
+                  "checks": {
+                    "enum": [
+                      "failed",
+                      "all"
+                    ],
+                    "title": "Checks",
+                    "type": "string"
+                  },
+                  "contract_version": {
+                    "const": "1",
+                    "title": "Contract Version",
+                    "type": "string"
+                  },
+                  "description": {
+                    "default": "",
+                    "maxLength": 240,
+                    "title": "Description",
+                    "type": "string"
+                  },
+                  "group_by": {
+                    "enum": [
+                      "file",
+                      "directory"
+                    ],
+                    "title": "Group By",
+                    "type": "string"
+                  },
+                  "proof_action": {
+                    "enum": [
+                      "open",
+                      "open_and_discuss"
+                    ],
+                    "title": "Proof Action",
+                    "type": "string"
+                  },
+                  "slot": {
+                    "const": "review.panel",
+                    "title": "Slot",
+                    "type": "string"
+                  },
+                  "title": {
+                    "maxLength": 80,
+                    "minLength": 1,
+                    "title": "Title",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "slot",
+                  "contract_version",
+                  "title",
+                  "group_by",
+                  "checks",
+                  "proof_action"
+                ],
+                "title": "ReviewPanelDefinition",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatorPanelPreview"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Preview Creator Panel",
         "tags": [
           "sessions"
         ]

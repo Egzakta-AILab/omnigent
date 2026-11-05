@@ -417,6 +417,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     contracts.add_argument("--json", action="store_true", help="print the JSON receipt")
     creator = commands.add_parser("creator-contracts", help="inspect the review panel contract")
     creator.add_argument("--manifest", type=Path, help="validate a review.panel manifest")
+    creator_preview = commands.add_parser(
+        "creator-preview", help="verify a scoped Creator preview"
+    )
+    creator_preview.add_argument("--mode", choices=("local", "server"), required=True)
+    creator_preview.add_argument("--server", required=True, help="explicit trusted instance URL")
+    creator_preview.add_argument("--review", required=True, help="saved review run ID")
+    creator_preview.add_argument(
+        "--definition", type=Path, help="JSON definition, or use the template"
+    )
     review = commands.add_parser("review", help="verify a saved native review report")
     review.add_argument("--mode", choices=("local", "server"), required=True)
     review.add_argument("--server", required=True, help="explicit trusted instance URL")
@@ -497,8 +506,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         from pydantic import ValidationError
 
         from omnigent.extensions.review_panel import ReviewPanelContribution, inspect_review_panel
+        from omnigent.studio.creator_panel import creator_panel_contract
 
         catalog = inspect_review_panel()
+        catalog["generated_panel"] = creator_panel_contract().model_dump(mode="json")
         if args.manifest is not None:
             try:
                 manifest = ReviewPanelContribution.model_validate_json(args.manifest.read_bytes())
@@ -506,6 +517,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                 parser.error("Invalid review.panel manifest. Check the installed manifest schema.")
             catalog["validated_manifest"] = manifest.model_dump(mode="json")
         print(json.dumps(catalog, indent=2))
+        return 0
+    if args.command == "creator-preview":
+        from omnigent.studio.verify_creator import verify_creator_preview
+
+        try:
+            preview = verify_creator_preview(
+                mode=args.mode,
+                server_url=args.server,
+                run_id=args.review,
+                definition=args.definition,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+        print(preview.model_dump_json(indent=2))
         return 0
     if args.command == "attach-proof":
         from omnigent.studio.attach_proof import attach_proof

@@ -337,6 +337,7 @@ class ReviewDiscussionView(FrozenModel):
     can_attach_evidence: bool = False
     can_ask: bool = False
     can_use_review_workspace: bool = False
+    creator_available: bool = Field(default=False, exclude_if=lambda value: not value)
     check_repository: str | None = None
     review_workspace_host_id: str | None = None
     collaborators: list[str] | None = None

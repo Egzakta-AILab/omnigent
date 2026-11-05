@@ -19,6 +19,7 @@ import { InlinePublication } from "./InlinePublication";
 import { DiscussionQuestions, type QuestionAttempt } from "./DiscussionQuestions";
 import { ReviewDiff } from "./ReviewDiff";
 import { CreatorReviewPanels } from "./CreatorReviewPanels";
+import { CreatorPanelStudio } from "./CreatorPanelStudio";
 import type { ReviewProofTarget } from "./creatorReviewBridge";
 
 function anchorKey(anchor: DiscussionAnchor) {
@@ -211,14 +212,14 @@ function DiscussionContent({
     send.reset();
   }
 
-  function showPanelProof(target: ReviewProofTarget, attach: boolean) {
+  function showPanelProof(target: ReviewProofTarget, attach: boolean, alsoOpen = false) {
     if (send.isPending) return false;
     if (target.findingKey !== selectedFinding?.key) {
       if (body.trim()) return false;
       select({ kind: "finding", finding_key: target.findingKey });
     }
     if (attach) setSuggestedProof(target);
-    else setFocusedProof(target);
+    if (!attach || alsoOpen) setFocusedProof(target);
     return true;
   }
 
@@ -273,6 +274,13 @@ function DiscussionContent({
         </header>
         <Sharing discussion={discussion} refresh={refresh} />
         <CreatorReviewPanels runId={discussion.id} onProof={showPanelProof} />
+        {discussion.creator_available && (
+          <CreatorPanelStudio
+            discussion={discussion}
+            viewerId={viewerId}
+            onProof={showPanelProof}
+          />
+        )}
         {discussion.can_publish_inline && publicationDrafts.length > 0 && (
           <InlinePublication runId={discussion.id} drafts={publicationDrafts} refresh={refresh} />
         )}

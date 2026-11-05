@@ -1,10 +1,15 @@
 """Manifest and inspection catalog for the Creator review panel pilot."""
 
+import os
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
 ReviewCapability = Literal["review.read", "review.openProof", "review.attachProof"]
+
+
+def creator_pilot_enabled() -> bool:
+    return os.environ.get("OMNIGENT_STUDIO_CREATOR_PILOT") == "1"
 
 
 class ReviewPanelContribution(BaseModel):

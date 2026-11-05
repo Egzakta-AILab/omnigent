@@ -1312,6 +1312,33 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
         owner_view = (await auth_client.get(discussion_path)).json()
         assert owner_view["can_attach_evidence"] is True
         assert owner_view["review_workspace_host_id"] == host_id
+        creator_path = f"{run_path}/creator-preview"
+        assert (await auth_client.get(creator_path)).status_code == 404
+        with monkeypatch.context() as creator_env:
+            creator_env.setenv("OMNIGENT_STUDIO_CREATOR_PILOT", "1")
+            assert (await auth_client.get(discussion_path)).json()["creator_available"] is True
+            contract = await auth_client.get(creator_path)
+            assert contract.status_code == 200
+            assert contract.headers["Cache-Control"] == "no-store"
+            definition = contract.json()["template"]
+            preview = await auth_client.post(creator_path, json=definition)
+            assert preview.status_code == 200, preview.text
+            assert preview.headers["Cache-Control"] == "no-store"
+            built = preview.json()
+            assert built["panel"] == definition
+            assert (built["run_id"], built["base_sha"], built["head_sha"]) == (
+                run["id"],
+                base_sha,
+                current_head,
+            )
+            assert (
+                await auth_client.post(creator_path, json={**definition, "script": "x"})
+            ).status_code == 422
+            assert (
+                await auth_client.post(
+                    creator_path, json=definition, headers={"X-Forwarded-Email": "eve"}
+                )
+            ).status_code == 404
         assert (view["base_sha"], view["head_sha"], view["patch"]) == (
             base_sha,
             current_head,
@@ -1829,16 +1856,20 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
         assert {draft["publication_confirmed_by"] for draft in posted_drafts} == {"bob"}
         assert posted_drafts[0]["provider_url"] == f"{pr_url}#discussion_r1"
         assert posted_drafts[1]["provider_url"] is None
+        assert len({draft["publication_reference"] for draft in posted_drafts}) == 2
         assert inline_writes == [
             {
                 "repository": "nested/project",
                 "pr_url": pr_url,
                 "anchor": draft["anchor"],
-                "body": draft["body"],
+                "body": (
+                    f"{draft['body']}\n\n"
+                    f"<!-- omnigent-delivery:{posted_draft['publication_reference']} -->"
+                ),
                 "base_sha": base_sha,
                 "head_sha": current_head,
             }
-            for draft in preview["drafts"]
+            for draft, posted_draft in zip(preview["drafts"], posted_drafts, strict=True)
         ]
         assert (
             await auth_client.post(
