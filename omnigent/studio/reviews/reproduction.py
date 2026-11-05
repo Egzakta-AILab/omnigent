@@ -24,9 +24,10 @@ from omnigent.studio.reviews.evidence_files import (
     EVIDENCE_LIMITS,
     MAX_CAPTURED_FILES,
     CapturedEvidenceFile,
+    EvidenceFilename,
     evidence_type_for_name,
 )
-from omnigent.studio.reviews.models import FrozenModel, ReviewRoleDigest, Sha
+from omnigent.studio.reviews.models import FrozenModel, ReviewRoleDigest, Sha, require_uuid
 
 _SHA = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 _IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}")
@@ -98,13 +99,37 @@ class ReproductionReceipt(FrozenModel):
     timeout_seconds: int = Field(ge=1, le=300)
     source: ReproductionSource | None = None
     included_paths: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
+    proposal_id: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    requested_evidence: tuple[EvidenceFilename, ...] = Field(
+        default=(), max_length=MAX_CAPTURED_FILES, exclude_if=lambda value: not value
+    )
     base: ReproductionSide
     head: ReproductionSide
+
+    @field_validator("proposal_id")
+    @classmethod
+    def canonical_proposal_id(cls, value: str | None) -> str | None:
+        return require_uuid(value) if value is not None else None
+
+    @model_validator(mode="after")
+    def validate_requested_evidence(self) -> ReproductionReceipt:
+        requested = set(self.requested_evidence)
+        if len(requested) != len(self.requested_evidence):
+            raise ValueError("Use each evidence filename once")
+        for name in requested:
+            evidence_type_for_name(name)
+        if (requested or self.proposal_id is not None) and any(
+            item.name not in requested for side in (self.base, self.head) for item in side.evidence
+        ):
+            raise ValueError("Captured evidence was outside the requested files")
+        if self.proposal_id is not None and self.source is None:
+            raise ValueError("An agent proposal must identify a saved review")
+        return self
 
     @field_validator("included_paths")
     @classmethod
     def validate_included_paths(cls, paths: tuple[str, ...]) -> tuple[str, ...]:
-        _validate_export_paths(paths)
+        validate_export_paths(paths)
         return paths
 
     @field_validator("command")
@@ -158,7 +183,7 @@ class FixVerificationReceipt(FrozenModel):
     @model_validator(mode="after")
     def validate_comparison(self) -> FixVerificationReceipt:
         ReproductionReceipt.validate_command(self.command)
-        _validate_export_paths(self.included_paths)
+        validate_export_paths(self.included_paths)
         if (
             self.before.commit != self.source.head_sha
             or self.after.commit == self.before.commit
@@ -205,6 +230,7 @@ class SharedReproductionReceipt(FrozenModel):
     image_id: str
     timeout_seconds: int
     included_paths: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
+    proposal_id: str | None = Field(default=None, exclude_if=lambda value: value is None)
     base: ReproductionSide
     head: ReproductionSide
 
@@ -249,6 +275,7 @@ class SharedAttachedReproduction(FrozenModel):
                 image_id=receipt.image_id,
                 timeout_seconds=receipt.timeout_seconds,
                 included_paths=receipt.included_paths,
+                proposal_id=receipt.proposal_id,
                 base=receipt.base,
                 head=receipt.head,
             ),
@@ -727,11 +754,12 @@ def reproduce(
     source: ReproductionSource | None = None,
     collection: EvidenceCollection | None = None,
     paths: tuple[str, ...] = (),
+    proposal_id: str | None = None,
 ) -> ReproductionReceipt:
     """Observe one command on two Git exports without mounting the host checkout."""
     if source is not None and (source.base_sha, source.head_sha) != (base, head):
         raise ValueError("The reproduction commits do not match the saved review run")
-    _validate_export_paths(paths)
+    validate_export_paths(paths)
     image_id, before, after = _compare_revisions(
         repository=repository,
         base=base,
@@ -750,6 +778,8 @@ def reproduce(
         timeout_seconds=timeout,
         source=source,
         included_paths=paths,
+        proposal_id=proposal_id,
+        requested_evidence=collection.names if collection is not None else (),
         base=before,
         head=after,
     )
@@ -766,7 +796,7 @@ def validate_fix_patch(patch: bytes) -> None:
         raise ValueError("The proposed patch must contain text changes")
 
 
-def _validate_export_paths(paths: tuple[str, ...]) -> None:
+def validate_export_paths(paths: tuple[str, ...]) -> None:
     if len(paths) > 32 or any(
         len(path.encode()) > 1024
         or path in ("", ".")
@@ -792,7 +822,7 @@ def verify_fix(
 ) -> FixVerificationReceipt:
     """Compare the captured head with the same head plus a proposed text patch."""
     validate_fix_patch(patch)
-    _validate_export_paths(paths)
+    validate_export_paths(paths)
     image_id, before, after = _compare_revisions(
         repository=repository,
         base=source.head_sha,

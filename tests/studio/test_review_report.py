@@ -330,6 +330,57 @@ def test_proposed_fix_requires_repository_relative_text_hunks(
     )
 
 
+@pytest.mark.parametrize(
+    ("paths", "cite", "expected"),
+    [
+        (["readme"], True, "ready"),
+        (["../readme"], True, "incomplete"),
+        (["readme"], False, "incomplete"),
+    ],
+)
+def test_agent_check_requires_bounded_paths_and_a_matched_citation(
+    review: ReviewPass, paths: list[str], cite: bool, expected: str
+) -> None:
+    captured = (
+        "diff --git a/readme b/readme\n--- a/readme\n+++ b/readme\n@@ -1 +1 @@\n-old\n+new\n"
+    )
+    prompt = "Draft a sandbox check"
+    payload = {
+        "question_id": review.id,
+        "base_sha": review.target.base_sha,
+        "head_sha": review.target.head_sha,
+        "answer": "Count lines in the exported file.",
+        "citations": [{"path": "readme", "side": "head", "line": 1, "quote": "new"}]
+        if cite
+        else [],
+        "proposed_check": {
+            "command": ["wc", "-l", "readme"],
+            "paths": paths,
+            "timeout_seconds": 10,
+            "evidence_files": [],
+        },
+    }
+    store = _transcript(
+        review,
+        _message(prompt, user=True),
+        _message(f"```studio-check-proposal-v1\n{json.dumps(payload)}\n```"),
+    )
+    assert review.reviewer_session_id is not None
+    state, answer = read_question_answer(
+        store,
+        session_id=review.reviewer_session_id,
+        question_id=review.id,
+        target=review.target,
+        prompt_digest=hashlib.sha256(prompt.encode()).hexdigest(),
+        updated_at=0,
+        running=True,
+        captured_patch=captured,
+        action="propose_check",
+    )
+    assert state == expected
+    assert (answer is not None) == (expected == "ready")
+
+
 def test_reads_a_claude_report_split_across_persisted_text_blocks(review: ReviewPass) -> None:
     start, end = _report(review).rsplit("\n", 1)
     store = _transcript(

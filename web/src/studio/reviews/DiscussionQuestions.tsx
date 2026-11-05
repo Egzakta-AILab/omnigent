@@ -8,6 +8,7 @@ import { useHostModelOptions, useHosts } from "@/hooks/useHosts";
 import { nativeCodingAgentForAgentName } from "@/lib/nativeCodingAgents";
 import { randomUUID } from "@/lib/randomUUID";
 import { Link } from "@/lib/routing";
+import { CheckProposal } from "./CheckProposal";
 import {
   askReviewQuestion,
   getReviewQuestion,
@@ -53,18 +54,19 @@ function AnswerCitations({ citations }: { citations?: QuestionCitation[] | null 
 }
 
 function QuestionCard({
-  runId,
+  discussion,
   initial,
   viewerId,
   canShare,
   refresh,
 }: {
-  runId: string;
+  discussion: ReviewDiscussion;
   initial: ReviewQuestion;
   viewerId: string | null;
   canShare: boolean;
   refresh: () => Promise<void>;
 }) {
+  const runId = discussion.id;
   const result = useQuery({
     queryKey: ["studio-review-question", viewerId, runId, initial.id],
     queryFn: ({ signal }) => getReviewQuestion(runId, initial.id, signal),
@@ -86,7 +88,8 @@ function QuestionCard({
     onSuccess: async () => refresh(),
   });
   const question = initial.answer ? initial : (result.data ?? initial);
-  const isProposal = question.action === "propose_fix";
+  const isProposal = question.action === "propose_fix" || question.action === "propose_check";
+  const proposalLabel = question.action === "propose_check" ? "check proposal" : "fix proposal";
   const proposedPatch = question.proposed_patch;
   if (question.published_at || share.isSuccess) return null;
   const pending =
@@ -96,7 +99,7 @@ function QuestionCard({
   return (
     <article className="space-y-2 rounded-md border p-2 text-sm">
       <p className="text-xs font-medium">
-        {isProposal ? "Private fix proposal" : "Private"} ·{" "}
+        {isProposal ? `Private ${proposalLabel}` : "Private"} ·{" "}
         {REVIEW_HARNESS_LABELS[question.harness]}
       </p>
       <p className="whitespace-pre-wrap break-words">{question.body}</p>
@@ -106,6 +109,17 @@ function QuestionCard({
             {question.answer}
           </p>
           <AnswerCitations citations={question.citations} />
+          {question.proposed_check &&
+            question.anchor.kind === "finding" &&
+            discussion.check_repository && (
+              <CheckProposal
+                check={question.proposed_check}
+                proposalId={question.id}
+                findingKey={question.anchor.finding_key}
+                discussion={discussion}
+                repository={discussion.check_repository}
+              />
+            )}
           {proposedPatch && (
             <>
               <details className="rounded-md border p-2">
@@ -129,10 +143,10 @@ function QuestionCard({
             ? "Delivery unconfirmed. Check the private session."
             : pending
               ? isProposal
-                ? "Waiting for a fix proposal…"
+                ? `Waiting for a ${proposalLabel}…`
                 : "Waiting for an answer…"
               : isProposal
-                ? "No fix proposal confirmed. Open the private session for details."
+                ? `No ${proposalLabel} confirmed. Open the private session for details.`
                 : "No answer confirmed for the saved question."}
         </p>
       )}
@@ -189,8 +203,14 @@ function AskForm({
   refresh: () => Promise<void>;
 }) {
   const [selection, setSelection] = useState("");
-  const isProposal = action === "propose_fix";
-  const [body, setBody] = useState(isProposal ? "Propose a focused patch for this finding." : "");
+  const isProposal = action !== "question";
+  const [body, setBody] = useState(
+    action === "propose_check"
+      ? "Propose a sandbox check that can reproduce this finding."
+      : action === "propose_fix"
+        ? "Propose a focused patch for this finding."
+        : "",
+  );
   const [reviewWorkspace, setReviewWorkspace] = useState(!!discussion.can_use_review_workspace);
   const [hostId, setHostId] = useState("");
   const [workspace, setWorkspace] = useState("");
@@ -264,9 +284,11 @@ function AskForm({
       }}
     >
       <p className="text-xs text-muted-foreground">
-        {isProposal
-          ? "The agent drafts a patch from the captured diff in a private session using its native permissions. Review the patch before running a fix check."
-          : "The agent receives the captured diff in a private session on the selected host, using its native permissions. Read its answer before sharing it."}
+        {action === "propose_check"
+          ? "The agent drafts a command from the captured diff in a private session. Review it before running the sandbox check."
+          : isProposal
+            ? "The agent drafts a patch from the captured diff in a private session using its native permissions. Review the patch before running a fix check."
+            : "The agent receives the captured diff in a private session on the selected host, using its native permissions. Read its answer before sharing it."}
       </p>
       <label className="grid gap-1">
         <span>Answer with</span>
@@ -393,10 +415,20 @@ function AskForm({
         </div>
       )}
       <textarea
-        aria-label={isProposal ? "Fix instructions" : "Question for agent"}
+        aria-label={
+          action === "propose_check"
+            ? "Check instructions"
+            : isProposal
+              ? "Fix instructions"
+              : "Question for agent"
+        }
         className="min-h-16 w-full rounded-md border bg-background p-2"
         placeholder={
-          isProposal ? "What should the patch change?" : "What should the agent explain?"
+          action === "propose_check"
+            ? "What should the check prove?"
+            : isProposal
+              ? "What should the patch change?"
+              : "What should the agent explain?"
         }
         maxLength={2000}
         value={body}
@@ -450,7 +482,7 @@ export function DiscussionQuestions({
         .map((question) => (
           <QuestionCard
             key={question.id}
-            runId={discussion.id}
+            discussion={discussion}
             initial={question}
             viewerId={viewerId}
             canShare={discussion.can_comment}
@@ -476,6 +508,16 @@ export function DiscussionQuestions({
                 onClick={() => setOpen(open === "propose_fix" ? null : "propose_fix")}
               >
                 Propose a fix
+              </Button>
+            )}
+            {anchor.kind === "finding" && discussion.check_repository && (
+              <Button
+                size="sm"
+                variant="outline"
+                aria-expanded={open === "propose_check"}
+                onClick={() => setOpen(open === "propose_check" ? null : "propose_check")}
+              >
+                Draft sandbox check
               </Button>
             )}
           </div>

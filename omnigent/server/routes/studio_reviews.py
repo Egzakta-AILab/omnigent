@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import posixpath
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Any, Literal, TypeVar, cast
@@ -1660,6 +1661,13 @@ def create_studio_reviews_router(
             can_attach_evidence=access.actor == access.owner,
             can_ask=access.can_comment and create_reviewer is not None and send_review is not None,
             can_use_review_workspace=access.actor == access.owner,
+            check_repository=(
+                posixpath.join(target.workspace, target.repository_path)
+                if access.actor == access.owner
+                and target.candidate is None
+                and target.repository_path is not None
+                else None
+            ),
             review_workspace_host_id=target.host_id if access.actor == access.owner else None,
             collaborators=collaborators,
             sharing_available=(
@@ -2048,6 +2056,11 @@ def create_studio_reviews_router(
         if create_reviewer is None or send_review is None:
             raise HTTPException(503, "Native question sessions are unavailable")
         body = await _bounded_json(request, AskReviewQuestion, limit=44 * 1024)
+        if body.action == "propose_check":
+            if access.actor != access.owner:
+                raise HTTPException(403, "The review owner can request a sandbox check")
+            if access.run.target.candidate is not None:
+                raise HTTPException(409, "Draft the check on the captured pull request")
         exclude = {"action"} if body.action == "question" else None
         intent = hashlib.sha256(body.model_dump_json(exclude=exclude).encode()).hexdigest()
         existing = await question_record(access, body.id, intent=intent)

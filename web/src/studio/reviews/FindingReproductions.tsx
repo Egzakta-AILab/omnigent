@@ -5,6 +5,7 @@ import { copyText } from "@/lib/clipboard";
 import { getCliServerUrl } from "@/lib/host";
 import { Link } from "@/lib/routing";
 import { FindingEvidence } from "./FindingEvidence";
+import { hasTerminalControls, shellQuote } from "./sandboxCommand";
 import {
   attachFindingReproduction,
   listFindingReproductions,
@@ -14,22 +15,6 @@ import {
   type ReproductionSide,
   type ReviewRun,
 } from "./api";
-
-function shellQuote(value: string) {
-  return "'" + value.replaceAll("'", "'\"'\"'") + "'";
-}
-
-function hasTerminalControls(value: string) {
-  return [...value].some((character) => {
-    const code = character.charCodeAt(0);
-    return (
-      code < 32 ||
-      (code >= 127 && code <= 159) ||
-      (code >= 0x202a && code <= 0x202e) ||
-      (code >= 0x2066 && code <= 0x2069)
-    );
-  });
-}
 
 function rerunCommand(
   run: Pick<ReviewRun, "id" | "target">,
@@ -45,13 +30,15 @@ function rerunCommand(
       : run.target.workspace;
   const evidenceOptions =
     "base" in receipt
-      ? [
-          ...new Set(
-            [...(receipt.base.evidence ?? []), ...(receipt.head.evidence ?? [])].map(
-              ({ name }) => name,
+      ? (
+          receipt.requested_evidence ?? [
+            ...new Set(
+              [...(receipt.base.evidence ?? []), ...(receipt.head.evidence ?? [])].map(
+                ({ name }) => name,
+              ),
             ),
-          ),
-        ].flatMap((name) => ["--capture-evidence", name])
+          ]
+        ).flatMap((name) => ["--capture-evidence", name])
       : [];
   const args = [
     "--mode",
@@ -68,6 +55,7 @@ function rerunCommand(
     receipt.image_id,
     "--timeout",
     String(receipt.timeout_seconds),
+    ...("base" in receipt && receipt.proposal_id ? ["--proposal-id", receipt.proposal_id] : []),
     ...evidenceOptions,
     ...(receipt.included_paths ?? []).flatMap((path) => ["--include-path", path]),
     "--output",
@@ -318,6 +306,12 @@ function Reproductions({
               </>
             ) : (
               <>
+                {receipt.proposal_id && (
+                  <p className="text-xs text-muted-foreground">
+                    Agent proposal ·{" "}
+                    <code title={receipt.proposal_id}>{receipt.proposal_id.slice(0, 12)}</code>
+                  </p>
+                )}
                 {!!receipt.included_paths?.length && (
                   <p className="break-all text-xs text-muted-foreground">
                     Export scope · {receipt.included_paths.join(", ")}

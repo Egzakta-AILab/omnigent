@@ -1711,6 +1711,57 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
         assert (
             await auth_client.put(f"{drafts_path}/{left_draft['id']}", json=update)
         ).status_code == 409
+        check_request = {**owner_question, "id": uuid4().hex, "action": "propose_check"}
+        assert (
+            await auth_client.post(questions_path, json=check_request, headers=foreign_headers)
+        ).status_code == 403
+        check_response = await auth_client.post(questions_path, json=check_request)
+        assert check_response.status_code == 200, check_response.text
+        assert check_response.json()["status"] == "accepted"
+        check_session = check_response.json()["session_id"]
+        check_prompt = send_review.await_args.args[2].data["content"][0]["text"]
+        assert "studio-check-proposal-v1" in check_prompt
+        question_echo(check_prompt, check_session)
+        check = {
+            "command": ["python", "check.py"],
+            "paths": ["hello"],
+            "timeout_seconds": 60,
+            "evidence_files": ["finding.png"],
+        }
+        check_answer = {
+            **response_body,
+            "question_id": check_request["id"],
+            "answer": "Compare the check on both revisions.",
+            "proposed_check": check,
+        }
+        save_assistant_message(
+            check_session, "```studio-check-proposal-v1\n" + json.dumps(check_answer) + "\n```"
+        )
+        check_path = f"{questions_path}/{check_request['id']}"
+        private_check = await auth_client.get(check_path)
+        assert private_check.status_code == 200, private_check.text
+        assert private_check.json()["proposed_check"] == check
+        assert (await auth_client.post(f"{check_path}/share", json={})).status_code == 409
+        checked = {
+            **receipt,
+            "proposal_id": check_request["id"],
+            "included_paths": check["paths"],
+            "requested_evidence": check["evidence_files"],
+        }
+        assert (
+            await auth_client.post(
+                reproduction_path, json={**checked, "command": ["python", "other.py"]}
+            )
+        ).status_code == 409
+        assert (
+            await auth_client.post(reproduction_path, json={**checked, "proposal_id": uuid4().hex})
+        ).status_code == 409
+        attached_check = await auth_client.post(reproduction_path, json=checked)
+        assert attached_check.status_code == 200, attached_check.text
+        assert attached_check.json()["receipt"] == checked
+        assert (
+            await auth_client.post(reproduction_path, json=checked)
+        ).json() == attached_check.json()
         return
 
     created = await create_reviewer(request, "alice", review, review.id)

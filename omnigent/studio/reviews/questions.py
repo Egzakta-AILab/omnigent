@@ -23,6 +23,7 @@ from omnigent.studio.reviews.reproduction import validate_fix_patch
 _LEGACY_FENCE = "```studio-review-answer-v1"
 _FENCE = "```studio-review-answer-v2"
 _FIX_FENCE = "```studio-fix-proposal-v1"
+_CHECK_FENCE = "```studio-check-proposal-v1"
 _MAX_QUESTION_PROMPT_BYTES = 72 * 1024
 _FOCUS_BYTES = 8 * 1024
 
@@ -90,6 +91,22 @@ def question_prompt(
         )
         fence = _FIX_FENCE
         expected["proposed_patch"] = None
+    if request.action == "propose_check":
+        task = (
+            "Draft one focused check for the saved finding. Return proposed_check as an object "
+            "with command (an argv array), paths (1–8 repository-relative Git paths available "
+            "on both revisions), timeout_seconds (1–120), and evidence_files (0–2 distinct "
+            "PNG, JPEG, MP4, WebM, or JSON basenames). The same command will run in two "
+            "network-disabled Docker containers on those exports. Assume only tools in an "
+            "operator-selected local image. State the image prerequisites and the expected "
+            "difference between base and head in the answer. A check may write only the "
+            "requested evidence names under /evidence. A measurements JSON file contains "
+            "method and metrics, where each metric has label, unit, and observed. "
+            "Use printable single-line argv strings and cite the captured lines that "
+            "motivate the check. If you lack enough context, use null for proposed_check."
+        )
+        fence = _CHECK_FENCE
+        expected["proposed_check"] = None
     context = {
         "pull_request": target.pr_url,
         "anchor": request.anchor.model_dump(mode="json"),
@@ -147,11 +164,14 @@ def read_question_answer(
             target.head_sha,
         ):
             return False
-        if action == "question" and reply.proposed_patch is not None:
+        if reply.proposed_patch is not None and (
+            action != "propose_fix"
+            or not reply.citations
+            or not _valid_proposed_patch(reply.proposed_patch)
+        ):
             return False
-        if action == "propose_fix" and reply.proposed_patch is not None:
-            if not reply.citations or not _valid_proposed_patch(reply.proposed_patch):
-                return False
+        if reply.proposed_check is not None and (action != "propose_check" or not reply.citations):
+            return False
         if captured_patch is None:
             return action == "question" and reply.citations is None
         if reply.citations is None:
@@ -163,11 +183,15 @@ def read_question_answer(
             for citation in reply.citations
         )
 
-    fence = _FENCE if captured_patch is not None else _LEGACY_FENCE
+    fence = {
+        "question": _FENCE if captured_patch is not None else _LEGACY_FENCE,
+        "propose_fix": _FIX_FENCE,
+        "propose_check": _CHECK_FENCE,
+    }[action]
     state, _, answer = read_native_turn(
         store,
         session_id,
-        _FIX_FENCE if action == "propose_fix" else fence,
+        fence,
         QuestionAnswer,
         updated_at=updated_at,
         running=running,

@@ -6140,6 +6140,53 @@
         "title": "ProjectOrderResponse",
         "type": "object"
       },
+      "ProposedCheck": {
+        "additionalProperties": false,
+        "properties": {
+          "command": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 32,
+            "minItems": 1,
+            "title": "Command",
+            "type": "array"
+          },
+          "evidence_files": {
+            "items": {
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]{0,95}$",
+              "type": "string"
+            },
+            "maxItems": 2,
+            "title": "Evidence Files",
+            "type": "array"
+          },
+          "paths": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 8,
+            "minItems": 1,
+            "title": "Paths",
+            "type": "array"
+          },
+          "timeout_seconds": {
+            "format": "int64",
+            "maximum": 120.0,
+            "minimum": 1.0,
+            "title": "Timeout Seconds",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "command",
+          "paths",
+          "timeout_seconds",
+          "evidence_files"
+        ],
+        "title": "ProposedCheck",
+        "type": "object"
+      },
       "QuestionCitation": {
         "additionalProperties": false,
         "properties": {
@@ -6427,6 +6474,27 @@
             "format": "date-time",
             "title": "Observed At",
             "type": "string"
+          },
+          "proposal_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Proposal Id"
+          },
+          "requested_evidence": {
+            "default": [],
+            "items": {
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]{0,95}$",
+              "type": "string"
+            },
+            "maxItems": 2,
+            "title": "Requested Evidence",
+            "type": "array"
           },
           "runtime": {
             "const": "docker-no-network",
@@ -7126,6 +7194,17 @@
                 "type": "null"
               }
             ]
+          },
+          "check_repository": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Check Repository"
           },
           "collaborators": {
             "anyOf": [
@@ -7953,7 +8032,8 @@
             "default": "question",
             "enum": [
               "question",
-              "propose_fix"
+              "propose_fix",
+              "propose_check"
             ],
             "title": "Action",
             "type": "string"
@@ -8026,6 +8106,16 @@
           "id": {
             "title": "Id",
             "type": "string"
+          },
+          "proposed_check": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProposedCheck"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "proposed_patch": {
             "anyOf": [
@@ -12740,6 +12830,17 @@
             "format": "date-time",
             "title": "Observed At",
             "type": "string"
+          },
+          "proposal_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Proposal Id"
           },
           "timeout_seconds": {
             "format": "int64",
@@ -24456,7 +24557,8 @@
                     "default": "question",
                     "enum": [
                       "question",
-                      "propose_fix"
+                      "propose_fix",
+                      "propose_check"
                     ],
                     "title": "Action",
                     "type": "string"
