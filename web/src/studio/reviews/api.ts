@@ -437,6 +437,67 @@ export async function changeReviewCollaborator(runId: string, userId: string, re
   );
   if (!response.ok) throw await apiErrorFromResponse(response);
 }
+export const EVIDENCE_TYPES = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  mp4: "video/mp4",
+  webm: "video/webm",
+  json: "application/json",
+} as const;
+
+type EvidenceMediaType = (typeof EVIDENCE_TYPES)[keyof typeof EVIDENCE_TYPES];
+
+export interface FindingArtifact {
+  digest: string;
+  source: { base_sha: string; head_sha: string; patch_sha256: string };
+  media_type: EvidenceMediaType;
+  byte_size: number;
+  attached_at: number;
+  provenance: "uploaded";
+  measurements?: {
+    method: string;
+    metrics: { label: string; unit: string; baseline?: number | null; observed: number }[];
+  } | null;
+}
+
+function findingEvidencePath(runId: string, findingKey: string) {
+  return `${reviewRunPath(runId)}/findings/${encodeURIComponent(findingKey)}/evidence`;
+}
+
+export function listFindingEvidence(runId: string, findingKey: string, signal: AbortSignal) {
+  return reviewRequest<FindingArtifact[]>(findingEvidencePath(runId, findingKey), { signal });
+}
+
+export function attachFindingEvidence(
+  runId: string,
+  findingKey: string,
+  patchDigest: string,
+  file: File,
+) {
+  const extension = file.name.split(".").pop()?.toLowerCase() as keyof typeof EVIDENCE_TYPES;
+  const mediaType = Object.hasOwn(EVIDENCE_TYPES, extension) ? EVIDENCE_TYPES[extension] : null;
+  if (!mediaType) throw new Error("Choose PNG, JPEG, MP4, WebM, or measurements JSON.");
+  return reviewRequest<FindingArtifact>(
+    `${findingEvidencePath(runId, findingKey)}?patch_sha256=${encodeURIComponent(patchDigest)}`,
+    { method: "POST", headers: { "Content-Type": mediaType }, body: file },
+  );
+}
+
+export async function readFindingEvidence(
+  runId: string,
+  findingKey: string,
+  digest: string,
+  signal: AbortSignal,
+) {
+  const response = await authenticatedFetch(
+    `${findingEvidencePath(runId, findingKey)}/${encodeURIComponent(digest)}`,
+    { signal },
+  );
+  if (!response.ok) throw await apiErrorFromResponse(response);
+  return response.blob();
+}
+
 function reproductionPath(runId: string, findingKey: string) {
   return `${reviewRunPath(runId)}/findings/${encodeURIComponent(findingKey)}/reproductions`;
 }

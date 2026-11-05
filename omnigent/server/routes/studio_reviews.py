@@ -54,12 +54,19 @@ from omnigent.server.schemas import SessionEventInput
 from omnigent.server.session_orchestration import require_owned_session
 from omnigent.server.startup_inputs import initial_input_id
 from omnigent.stores import AgentStore, ConversationStore
+from omnigent.stores.artifact_store import ArtifactStore
 from omnigent.stores.permission_store import PermissionStore
 from omnigent.stores.project_store import ProjectStore
 from omnigent.stores.studio_review_store import (
     ReviewConflictError,
     ReviewNotFoundError,
     StudioReviewStore,
+)
+from omnigent.studio.reviews.artifacts import (
+    EVIDENCE_LIMITS,
+    EvidenceMediaType,
+    EvidenceStorageError,
+    FindingArtifact,
 )
 from omnigent.studio.reviews.discussion import (
     AccountId,
@@ -154,6 +161,16 @@ IdempotencyKey = Annotated[
 FindingKey = Annotated[str, Path(pattern=r"^[0-9a-f]{64}$")]
 _RequestBody = TypeVar("_RequestBody", bound=BaseModel)
 _logger = logging.getLogger(__name__)
+_EVIDENCE_CONTENT = {
+    kind: {
+        "schema": (
+            {"$ref": "#/components/schemas/EvidenceMeasurements"}
+            if kind == "application/json"
+            else {"type": "string", "format": "binary"}
+        )
+    }
+    for kind in EVIDENCE_LIMITS
+}
 
 
 def _discussion_reviewer_key(review_id: str) -> str:
@@ -167,15 +184,20 @@ def _candidate_intent(run_id: str, finding_key: str, digest: str) -> str:
 async def _bounded_json(
     request: Request, model: type[_RequestBody], *, limit: int
 ) -> _RequestBody:
+    payload = await _bounded_body(request, limit=limit)
+    try:
+        return model.model_validate_json(payload, strict=True)
+    except ValidationError as exc:
+        raise HTTPException(422, "The request body is invalid") from exc
+
+
+async def _bounded_body(request: Request, *, limit: int) -> bytearray:
     payload = bytearray()
     async for chunk in request.stream():
         if len(chunk) > limit - len(payload):
             raise HTTPException(413, f"Request exceeds {limit // 1024} KiB")
         payload.extend(chunk)
-    try:
-        return model.model_validate_json(payload, strict=True)
-    except ValidationError as exc:
-        raise HTTPException(422, "The request body is invalid") from exc
+    return payload
 
 
 def _discussion_request_schema(model: type[BaseModel]) -> dict[str, object]:
@@ -549,10 +571,12 @@ def create_studio_reviews_router(
     auth_provider: AuthProvider | None = None,
     permission_store: PermissionStore | None = None,
     project_store: ProjectStore | None = None,
+    artifact_store: ArtifactStore | None = None,
 ) -> APIRouter:
     """Expose owner-private captures, native starts and saved review reports."""
     router = APIRouter()
     service = ReviewService(review_store)
+    evidence_transfers = asyncio.Semaphore(4)
 
     async def owned_review(request: Request, review_id: str) -> ReviewPass:
         user_id = require_user(request, auth_provider)
@@ -1353,6 +1377,123 @@ def create_studio_reviews_router(
                 if entry.finding_key == finding_key:
                     return run, owner, entry.finding
         raise HTTPException(404, "The finding was not found in this captured diff")
+
+    @router.get(
+        "/studio/review-runs/{run_id}/findings/{finding_key}/evidence",
+        response_model=list[FindingArtifact],
+    )
+    async def list_finding_evidence(
+        request: Request, response: Response, run_id: str, finding_key: FindingKey
+    ) -> list[FindingArtifact]:
+        run, owner, _ = await require_saved_finding(
+            request, run_id, finding_key, allow_collaborator=True
+        )
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return await asyncio.to_thread(
+                review_store.list_finding_artifacts,
+                run.id,
+                finding_key,
+                owner=owner,
+                actor=require_user(request, auth_provider),
+            )
+        except ReviewNotFoundError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+    @router.get(
+        "/studio/review-runs/{run_id}/findings/{finding_key}/evidence/{digest}",
+        response_class=Response,
+        responses={200: {"content": _EVIDENCE_CONTENT}},
+    )
+    async def read_finding_evidence(
+        request: Request, run_id: str, finding_key: FindingKey, digest: FindingKey
+    ) -> Response:
+        run, owner, _ = await require_saved_finding(
+            request, run_id, finding_key, allow_collaborator=True
+        )
+        if artifact_store is None:
+            raise HTTPException(503, "Review evidence storage is unavailable")
+        try:
+            async with evidence_transfers:
+                metadata, content = await asyncio.to_thread(
+                    review_store.read_finding_artifact,
+                    run.id,
+                    finding_key,
+                    digest,
+                    owner=owner,
+                    actor=require_user(request, auth_provider),
+                    artifacts=artifact_store,
+                )
+        except ReviewNotFoundError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ReviewConflictError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except EvidenceStorageError as exc:
+            raise HTTPException(503, str(exc)) from exc
+        return Response(
+            content,
+            media_type=metadata.media_type,
+            headers={
+                "Cache-Control": "no-store",
+                "Content-Disposition": "attachment",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
+    @router.post(
+        "/studio/review-runs/{run_id}/findings/{finding_key}/evidence",
+        response_model=FindingArtifact,
+        dependencies=[Depends(require_trusted_origin)],
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": _EVIDENCE_CONTENT,
+            }
+        },
+    )
+    async def attach_finding_evidence(
+        request: Request,
+        response: Response,
+        run_id: str,
+        finding_key: FindingKey,
+        patch_sha256: Annotated[str, Query(pattern=r"^[0-9a-f]{64}$")],
+    ) -> FindingArtifact:
+        run, owner, _ = await require_saved_finding(request, run_id, finding_key)
+        if run.patch_sha256 != patch_sha256:
+            raise HTTPException(409, "The evidence does not match the saved diff")
+        if artifact_store is None:
+            raise HTTPException(503, "Review evidence storage is unavailable")
+        media_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        if media_type not in EVIDENCE_LIMITS:
+            raise HTTPException(415, "Attach PNG, JPEG, MP4, WebM, or measurements JSON")
+        evidence_type = cast(EvidenceMediaType, media_type)
+        try:
+            async with evidence_transfers:
+                payload = await _bounded_body(request, limit=EVIDENCE_LIMITS[evidence_type])
+                result = await asyncio.to_thread(
+                    review_store.attach_finding_artifact,
+                    run.id,
+                    finding_key,
+                    patch_sha256,
+                    evidence_type,
+                    bytes(payload),
+                    owner=owner,
+                    artifacts=artifact_store,
+                )
+        except ReviewNotFoundError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ReviewConflictError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except EvidenceStorageError as exc:
+            raise HTTPException(503, str(exc)) from exc
+        except ValidationError as exc:
+            raise HTTPException(
+                422, "Provide a method and uniquely labeled numeric measurements"
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        response.headers["Cache-Control"] = "no-store"
+        return result
 
     @router.get(
         "/studio/review-runs/{run_id}/findings/{finding_key}/reproductions",

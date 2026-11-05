@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 from omnigent.db.account_authority import account_generation, require_active_account
 from omnigent.db.compression import encode
 from omnigent.db.db_models import (
+    SqlStudioFindingArtifact,
     SqlStudioInlineDraft,
     SqlStudioReviewCollaborator,
     SqlStudioReviewComment,
@@ -36,6 +37,13 @@ from omnigent.db.utils import (
     get_or_create_engine,
     make_named_managed_session_maker,
     run_write_transaction,
+)
+from omnigent.stores.artifact_store import ArtifactStore
+from omnigent.studio.reviews.artifacts import (
+    EvidenceMediaType,
+    EvidenceStorageError,
+    FindingArtifact,
+    inspect_evidence,
 )
 from omnigent.studio.reviews.discussion import (
     CreateReviewComment,
@@ -129,6 +137,8 @@ _HASH = re.compile(r"^[0-9a-f]{64}$")
 _MAX_SNAPSHOT_BYTES = 12_000
 _MAX_RECEIPTS_PER_RUN = 24
 _MAX_RECEIPTS_PER_FINDING = 4
+_MAX_ARTIFACTS_PER_RUN = 12
+_MAX_ARTIFACTS_PER_FINDING = 6
 _MAX_COLLABORATORS = 32
 _MAX_DISCUSSION_COMMENTS = 200
 _MAX_DISCUSSION_QUESTIONS = 32
@@ -632,6 +642,150 @@ class StudioReviewStore:
             return run.model_copy(update={"plan": plan})
 
         return run_write_transaction(self._write, "approve_review_run_plan", write)
+
+    @staticmethod
+    def _finding_artifact_key(run_id: str, finding_key: str, digest: str) -> str:
+        return f"studio-evidence/{current_workspace_id()}/{run_id}/{finding_key}/{digest}"
+
+    def attach_finding_artifact(
+        self,
+        run_id: str,
+        finding_key: str,
+        patch_sha256: str,
+        media_type: EvidenceMediaType,
+        content: bytes,
+        *,
+        owner: str | None,
+        artifacts: ArtifactStore,
+    ) -> FindingArtifact:
+        measurements = inspect_evidence(media_type, content)
+        digest = hashlib.sha256(content).hexdigest()
+        binary_key, binary_digest = bytes.fromhex(finding_key), bytes.fromhex(digest)
+
+        def write(session: Session) -> FindingArtifact:
+            self._lock_discussion_writer(session, run_id, owner, owner)
+            run = self._run_row(session, run_id, _owner_scope(owner))
+            if run is None:
+                raise ReviewNotFoundError("Review run not found")
+            if run.patch_sha256 != patch_sha256:
+                raise ReviewConflictError("The evidence does not match the saved diff")
+            target = ReviewTarget.model_validate_json(run.target_json)
+            artifact = SqlStudioFindingArtifact
+            scope = (artifact.workspace_id == current_workspace_id(), artifact.run_id == run_id)
+            keys = list(
+                session.execute(
+                    select(artifact.finding_key, artifact.digest)
+                    .where(*scope)
+                    .limit(_MAX_ARTIFACTS_PER_RUN + 1)
+                )
+            )
+            if (binary_key, binary_digest) in keys:
+                row = session.get(
+                    artifact, (current_workspace_id(), run_id, binary_key, binary_digest)
+                )
+                assert row is not None
+                return FindingArtifact.model_validate_json(row.metadata_json)
+            if (
+                len(keys) >= _MAX_ARTIFACTS_PER_RUN
+                or sum(key == binary_key for key, _ in keys) >= _MAX_ARTIFACTS_PER_FINDING
+            ):
+                raise ReviewConflictError("This review has reached its evidence file limit")
+            metadata = FindingArtifact(
+                digest=digest,
+                source=ReproductionSource(
+                    run_id=run_id,
+                    pr_url=target.pr_url,
+                    patch_sha256=patch_sha256,
+                    base_sha=target.base_sha,
+                    head_sha=target.head_sha,
+                ),
+                media_type=media_type,
+                byte_size=len(content),
+                attached_at=time.time_ns() // 1_000_000,
+                measurements=measurements,
+            )
+            serialized = metadata.model_dump_json()
+            encoded = encode(serialized)
+            if encoded is None or len(encoded) > 16_383:
+                raise ValueError("Evidence metadata exceeds its size limit")
+            # Write the deterministic key before publishing metadata. Retrying after
+            # a transaction rollback writes the same bytes to the same key.
+            try:
+                artifacts.put(self._finding_artifact_key(run_id, finding_key, digest), content)
+            except Exception as exc:
+                raise EvidenceStorageError("The evidence file could not be stored") from exc
+            session.add(
+                artifact(
+                    workspace_id=current_workspace_id(),
+                    run_id=run_id,
+                    finding_key=binary_key,
+                    digest=binary_digest,
+                    attached_at=metadata.attached_at,
+                    metadata_json=serialized,
+                )
+            )
+            return metadata
+
+        return run_write_transaction(self._write, "attach_finding_artifact", write)
+
+    def list_finding_artifacts(
+        self,
+        run_id: str,
+        finding_key: str,
+        *,
+        owner: str | None,
+        actor: str | None,
+    ) -> list[FindingArtifact]:
+        with self._session("list_finding_artifacts") as session:
+            self._require_discussion_access(session, run_id, actor, owner, lock=False)
+            artifact = SqlStudioFindingArtifact
+            rows = session.scalars(
+                select(artifact.metadata_json)
+                .where(
+                    artifact.workspace_id == current_workspace_id(),
+                    artifact.run_id == run_id,
+                    artifact.finding_key == bytes.fromhex(finding_key),
+                )
+                .order_by(artifact.attached_at.desc(), artifact.digest)
+                .limit(_MAX_ARTIFACTS_PER_FINDING)
+            )
+            return [FindingArtifact.model_validate_json(row) for row in rows]
+
+    def read_finding_artifact(
+        self,
+        run_id: str,
+        finding_key: str,
+        digest: str,
+        *,
+        owner: str | None,
+        actor: str | None,
+        artifacts: ArtifactStore,
+    ) -> tuple[FindingArtifact, bytes]:
+        with self._session("read_finding_artifact") as session:
+            self._require_discussion_access(session, run_id, actor, owner, lock=False)
+            row = session.get(
+                SqlStudioFindingArtifact,
+                (
+                    current_workspace_id(),
+                    run_id,
+                    bytes.fromhex(finding_key),
+                    bytes.fromhex(digest),
+                ),
+            )
+            if row is None:
+                raise ReviewNotFoundError("Evidence file not found")
+            metadata = FindingArtifact.model_validate_json(row.metadata_json)
+        try:
+            content = artifacts.get(self._finding_artifact_key(run_id, finding_key, digest))
+        except Exception as exc:
+            raise EvidenceStorageError("The evidence file could not be retrieved") from exc
+        if (
+            metadata.digest != digest
+            or len(content) != metadata.byte_size
+            or hashlib.sha256(content).hexdigest() != digest
+        ):
+            raise ReviewConflictError("The evidence file failed its integrity check")
+        return metadata, content
 
     def attach_reproduction(
         self,
