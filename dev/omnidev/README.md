@@ -111,6 +111,10 @@ canonical checkout path. Per-process logs are written through to
 `--vite-host 0.0.0.0` exposes the Vite dev server on all interfaces for device
 testing. Vite still proxies API traffic to the pod backend through `127.0.0.1`.
 
+With `--no-vite`, open the printed `server` URL to use the built web UI.
+Build it first from the checkout root with `pnpm --filter web run build`.
+The backend binds to `127.0.0.1` for local access.
+
 ### Testing from a phone or tablet
 
 `--vite-host 0.0.0.0` alone lets a device load the UI, but the backend runs in
