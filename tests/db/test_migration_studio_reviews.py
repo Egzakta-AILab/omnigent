@@ -31,6 +31,7 @@ _RUN_REPORTS = "3792ec30b1de"
 _INLINE_DRAFTS = "4bf0aa1e9173"
 _INLINE_DELIVERY = "7a2594cfe931"
 _FINDING_ARTIFACTS = "ba9152e8d96f"
+_HOSTED_CHECKS = "b51ac8e4d231"
 _TABLES = {"studio_review_passes", "studio_review_operations", "studio_review_events"}
 
 
@@ -78,7 +79,7 @@ def test_upgrade_and_downgrade_preserve_existing_database(tmp_path: Path) -> Non
         _migrate(uri, engine, "upgrade", _RUN_REPORTS)
         assert "studio_inline_drafts" not in sa.inspect(engine).get_table_names()
         _migrate(uri, engine, "upgrade", _INLINE_DRAFTS)
-        _migrate(uri, engine, "upgrade", _FINDING_ARTIFACTS)
+        _migrate(uri, engine, "upgrade", _HOSTED_CHECKS)
         for model in (
             SqlStudioReviewPass,
             SqlStudioReviewOperation,
@@ -100,6 +101,26 @@ def test_upgrade_and_downgrade_preserve_existing_database(tmp_path: Path) -> Non
             assert connection.execute(
                 sa.text("SELECT source_session_id, source_project_id FROM studio_review_passes")
             ).one() == (b"s" * 16, None)
+        questions = SqlStudioReviewQuestion.__table__
+        with engine.begin() as connection:
+            connection.execute(
+                questions.insert().values(
+                    workspace_id=0,
+                    run_id="a" * 32,
+                    id="b" * 32,
+                    actor_scope=b"a" * 32,
+                    intent_hash=b"b" * 32,
+                    input_json="{}",
+                    state="accepted",
+                    created_at=1,
+                    updated_at=1,
+                    check_job_json="{}",
+                )
+            )
+        with pytest.raises(RuntimeError, match="sandbox check dispatches exist"):
+            _migrate(uri, engine, "downgrade", _FINDING_ARTIFACTS)
+        with engine.begin() as connection:
+            connection.execute(questions.delete())
         artifacts = SqlStudioFindingArtifact.__table__
         with engine.begin() as connection:
             connection.execute(
