@@ -23,7 +23,7 @@ _PREVIOUS = "d0a1f879a01d"
 _REVISION = "e6a2b4c8d013"
 _PROJECT_ORIGIN = "5f9ca09e07cd"
 _RUNS = "8f4b6c20a115"
-_RUN_REPORTS = "4a5dfb4cc915"
+_RUN_REPORTS = "18b794326fcb"
 _TABLES = {"studio_review_passes", "studio_review_operations", "studio_review_events"}
 
 
