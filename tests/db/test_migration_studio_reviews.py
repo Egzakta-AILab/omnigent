@@ -28,6 +28,7 @@ _PROJECT_ORIGIN = "5f9ca09e07cd"
 _RUNS = "8f4b6c20a115"
 _RUN_REPORTS = "3792ec30b1de"
 _INLINE_DRAFTS = "4bf0aa1e9173"
+_INLINE_DELIVERY = "7a2594cfe931"
 _TABLES = {"studio_review_passes", "studio_review_operations", "studio_review_events"}
 
 
@@ -75,6 +76,7 @@ def test_upgrade_and_downgrade_preserve_existing_database(tmp_path: Path) -> Non
         _migrate(uri, engine, "upgrade", _RUN_REPORTS)
         assert "studio_inline_drafts" not in sa.inspect(engine).get_table_names()
         _migrate(uri, engine, "upgrade", _INLINE_DRAFTS)
+        _migrate(uri, engine, "upgrade", _INLINE_DELIVERY)
         for model in (
             SqlStudioReviewPass,
             SqlStudioReviewOperation,
@@ -113,6 +115,15 @@ def test_upgrade_and_downgrade_preserve_existing_database(tmp_path: Path) -> Non
                     updated_at=1,
                 )
             )
+        with engine.begin() as connection:
+            assert (
+                connection.execute(sa.select(drafts.c.publication_state)).scalar_one() == "draft"
+            )
+            connection.execute(drafts.update().values(publication_state="posted"))
+        with pytest.raises(RuntimeError, match="inline publication records"):
+            _migrate(uri, engine, "downgrade", _INLINE_DRAFTS)
+        with engine.begin() as connection:
+            connection.execute(drafts.update().values(publication_state="draft"))
         with pytest.raises(RuntimeError, match="saved inline drafts"):
             _migrate(uri, engine, "downgrade", _RUN_REPORTS)
         with engine.begin() as connection:
