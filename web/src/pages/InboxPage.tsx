@@ -124,6 +124,7 @@ import { userColor, userInitials } from "@/lib/userBadge";
 import { cn } from "@/lib/utils";
 import { FileViewerContext } from "@/shell/FileViewerContext";
 import { conversationDisplayLabel, getConversationAgentType } from "@/shell/sidebarNav";
+import { SharedReviewsInbox } from "@/studio/reviews/SharedReviewsInbox";
 
 /** Optimistic verdicts keyed by elicitation id, mirroring the chat store's flip. */
 type RespondedMap = Record<
@@ -889,6 +890,8 @@ export function InboxPage() {
           ))}
         </TabsList>
       </Tabs>
+
+      {filter === "all" && <SharedReviewsInbox />}
 
       {failedSessionCount > 0 && (
         <div

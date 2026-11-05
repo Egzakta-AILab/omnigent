@@ -23,6 +23,7 @@ from omnigent.studio.reviews.models import (
 from omnigent.studio.reviews.report import ReportState, ReviewFinding
 
 AccountId = Annotated[str, StringConstraints(pattern=r"^[^\s\x00-\x1f\x7f]{1,128}$")]
+MAX_REVIEW_COLLABORATORS = 32
 
 
 class FindingDiscussionAnchor(FrozenModel):
@@ -252,6 +253,20 @@ class SharedReviewAnswer(FrozenModel):
 
 class ReviewCollaboratorInput(FrozenModel):
     user_id: AccountId
+
+
+class SharedReviewEntry(FrozenModel):
+    id: str
+    project_name: str
+    repository: str
+    pr_number: int
+    head_sha: Sha
+    created_at: int
+
+
+class SharedReviewPage(FrozenModel):
+    entries: list[SharedReviewEntry]
+    next_cursor: str | None = None
 
 
 class ReviewDiscussionFinding(FrozenModel):

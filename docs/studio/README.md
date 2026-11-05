@@ -166,6 +166,7 @@ Keep drafts and fork PRs disabled unless you want that route to review them.
       "host_id": "22222222222222222222222222222222",
       "workspace": "/srv/egzakta-org",
       "repository": "KVARK",
+      "collaborators": ["reviewer@example.com"],
       "reviewers": [
         {
           "agent_id": "33333333333333333333333333333333",
@@ -196,11 +197,19 @@ Route GitHub's JSON **Pull requests** webhook over HTTPS to
 checks the HMAC-SHA256 signature on the original request body and acknowledges
 after saving the eligible delivery. [GitHub webhook validation](https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries)
 
-Opened, reopened, ready-for-review, and synchronized PRs create one private
-Studio run per base and head pair. A coordinator, if configured, starts a
-planning session and waits for roster approval in Studio. Find the run in
-the project's PR history. GitHub comment publication remains an explicit
-approval in Omnigent.
+Opened, reopened, ready-for-review, and synchronized PRs create one Studio run
+per base and head pair. A coordinator, if configured, starts a planning session
+and waits for roster approval in Studio. The bot finds the run in its project's
+PR history.
+
+Optional `collaborators` lists existing Omnigent account IDs for that route.
+Each run saves its access grants with its captured revision. Coworkers open
+**Inbox → All → Shared PR reviews** to read the review, inspect attached
+evidence, discuss a finding, or ask an agent using their own connected host.
+The bot keeps ownership of its workspace and its publication approval.
+Sharing must be **On** to grant access. Leaving the list empty keeps new runs
+private. Removing an ID from the route affects future runs. Revoke access to
+earlier runs from **Share this review** as the review owner.
 
 ```sh
 uv run --no-sync python -m omnigent.studio.pr_webhook \

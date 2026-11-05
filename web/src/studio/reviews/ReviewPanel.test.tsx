@@ -275,6 +275,7 @@ it.each(["single", "run", "coordinated"] as const)(
           return Response.json({ detail: "Access changed" }, { status: 404 });
         return Response.json(receiptAttached ? [evidence, unsafe] : []);
       }
+      if (path === `${runPath}/findings/${findingKey}/evidence`) return Response.json([]);
       if (path === `${runPath}/report`) {
         if (mode === "coordinated") {
           return Response.json(

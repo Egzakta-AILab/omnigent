@@ -92,6 +92,7 @@ from omnigent.studio.reviews.discussion import (
     ReviewDiscussionReport,
     ReviewDiscussionView,
     ReviewQuestion,
+    SharedReviewPage,
 )
 from omnigent.studio.reviews.evidence import (
     MAX_REVIEW_PATCH_BYTES,
@@ -795,6 +796,29 @@ def create_studio_reviews_router(
         patch = await saved_run_patch(run_id, owner)
         return changed_anchors(patch) if patch is not None else None
 
+    async def resolve_collaborators(
+        request: Request, owner: str | None, collaborators: list[str]
+    ) -> dict[str, str | None]:
+        mode = getattr(request.app.state, "sharing_mode", lambda: SharingMode.ON)()
+        reserved = (RESERVED_USER_LOCAL, RESERVED_USER_PUBLIC)
+        if (
+            owner is None
+            or len(owner) > 128
+            or owner in reserved
+            or mode != SharingMode.ON
+            or permission_store is None
+        ):
+            raise HTTPException(403, "Review sharing is unavailable on this instance")
+        generations = {}
+        for user_id in collaborators:
+            if user_id == owner or user_id in reserved:
+                raise HTTPException(422, "Choose another Omnigent account")
+            account = await asyncio.to_thread(permission_store.get_user, user_id)
+            if account is None or account.id != user_id:
+                raise HTTPException(404, "Omnigent account not found")
+            generations[account.id] = account.account_generation
+        return generations
+
     @router.post(
         "/projects/{project_id}/studio/review-runs",
         response_model=ReviewRun,
@@ -819,6 +843,11 @@ def create_studio_reviews_router(
             )
             if existing is not None:
                 return existing
+            collaborators = (
+                await resolve_collaborators(request, user_id, body.collaborators)
+                if body.collaborators
+                else None
+            )
             first = body.reviewers[0]
             workspace = await resolve_project_workspace(
                 request,
@@ -861,6 +890,7 @@ def create_studio_reviews_router(
                 patch=patch,
                 coordinator=coordinator,
                 required_indices=frozenset(body.required_reviewer_indices),
+                collaborators=collaborators,
             )
         except ReviewConflictError as exc:
             raise HTTPException(409, str(exc)) from exc
@@ -888,6 +918,33 @@ def create_studio_reviews_router(
                 project_id=project_id,
                 owner_user_id=user_id,
                 pr_url=ref.url,
+                limit=limit,
+                after_id=_identifier(after_id) if after_id else None,
+            )
+        except ReviewNotFoundError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+    @router.get("/studio/shared-reviews", response_model=SharedReviewPage)
+    async def list_shared_reviews(
+        request: Request,
+        response: Response,
+        limit: Annotated[int, Query(ge=1, le=25)] = 15,
+        after_id: str | None = None,
+    ) -> SharedReviewPage:
+        actor = require_user(request, auth_provider)
+        response.headers["Cache-Control"] = "no-store"
+        mode = getattr(request.app.state, "sharing_mode", lambda: SharingMode.ON)()
+        if (
+            actor is None
+            or actor in (RESERVED_USER_LOCAL, RESERVED_USER_PUBLIC)
+            or project_store is None
+            or mode not in (SharingMode.ON, SharingMode.READ_ONLY)
+        ):
+            return SharedReviewPage(entries=[])
+        try:
+            return await asyncio.to_thread(
+                review_store.list_shared_reviews,
+                actor,
                 limit=limit,
                 after_id=_identifier(after_id) if after_id else None,
             )
@@ -2338,30 +2395,18 @@ def create_studio_reviews_router(
     async def share_review_discussion(request: Request, run_id: str) -> Response:
         run = await owned_run(request, run_id)
         owner = require_user(request, auth_provider)
-        mode = getattr(request.app.state, "sharing_mode", lambda: SharingMode.ON)()
-        if (
-            owner is None
-            or len(owner) > 128
-            or owner in (RESERVED_USER_LOCAL, RESERVED_USER_PUBLIC)
-            or mode != SharingMode.ON
-            or permission_store is None
-        ):
-            raise HTTPException(403, "Review sharing is unavailable on this instance")
         if run.patch_sha256 is None:
             raise HTTPException(404, "This review has no captured diff")
         body = await _bounded_json(request, ReviewCollaboratorInput, limit=2 * 1024)
-        if body.user_id in (owner, RESERVED_USER_PUBLIC, RESERVED_USER_LOCAL):
-            raise HTTPException(422, "Choose another Omnigent account")
-        account = await asyncio.to_thread(permission_store.get_user, body.user_id)
-        if account is None or account.id != body.user_id:
-            raise HTTPException(404, "Omnigent account not found")
+        generations = await resolve_collaborators(request, owner, [body.user_id])
+        assert owner is not None
         try:
             await asyncio.to_thread(
                 review_store.set_review_collaborator,
                 run.id,
-                account.id,
+                body.user_id,
                 owner=owner,
-                target_generation=account.account_generation,
+                target_generation=generations[body.user_id],
             )
         except ReviewNotFoundError as exc:
             raise HTTPException(404, str(exc)) from exc

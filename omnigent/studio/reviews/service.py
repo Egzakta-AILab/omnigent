@@ -22,6 +22,7 @@ from omnigent.stores.studio_review_store import (
     ReviewConflictError,
     StudioReviewStore,
 )
+from omnigent.studio.reviews.discussion import MAX_REVIEW_COLLABORATORS, AccountId
 from omnigent.studio.reviews.models import (
     MAX_RUN_REVIEWERS,
     BoundedText,
@@ -120,6 +121,16 @@ class CaptureReviewRunRequest(BaseModel):
     required_reviewer_indices: list[Annotated[int, Field(strict=True, ge=0)]] = Field(
         default_factory=list, max_length=MAX_RUN_REVIEWERS
     )
+    collaborators: Annotated[list[AccountId], Field(max_length=MAX_REVIEW_COLLABORATORS)] = Field(
+        default_factory=list
+    )
+
+    @field_validator("collaborators")
+    @classmethod
+    def canonical_collaborators(cls, value: list[str]) -> list[str]:
+        if len(set(value)) != len(value):
+            raise ValueError("Choose distinct review collaborators")
+        return sorted(value)
 
     @model_validator(mode="after")
     def validate_roster(self) -> CaptureReviewRunRequest:
@@ -148,7 +159,9 @@ class CaptureReviewRunRequest(BaseModel):
 
 
 def review_run_fingerprint(project_id: str, body: CaptureReviewRunRequest) -> str:
-    excluded = {"coordinator", "required_reviewer_indices"} if body.coordinator is None else None
+    excluded = {"coordinator", "required_reviewer_indices"} if body.coordinator is None else set()
+    if not body.collaborators:
+        excluded.add("collaborators")
     payload = json.dumps(
         ["review.run.capture", project_id, body.model_dump(mode="json", exclude=excluded)],
         sort_keys=True,

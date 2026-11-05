@@ -943,8 +943,14 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
             "reviewers": [
                 reviewer_input,
                 {**reviewer_input, "model": "second-review-model"},
-            ]
+            ],
+            "collaborators": ["bob"],
         }
+        unknown_collaborator = await auth_client.post(runs_path, headers=headers, json=roster)
+        assert unknown_collaborator.status_code == 404, unknown_collaborator.text
+        empty_history = await auth_client.get(runs_path, params={"pr_url": pr_url})
+        assert empty_history.json()["entries"] == []
+        permissions.ensure_user("bob")
         run_capture = await auth_client.post(runs_path, headers=headers, json=roster)
         assert run_capture.status_code == 200, run_capture.text
         run = run_capture.json()
@@ -967,6 +973,40 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
         }
 
         run_path = f"/v1/studio/review-runs/{run['id']}"
+        shared_path = "/v1/studio/shared-reviews"
+        bob_headers = {"X-Forwarded-Email": "bob"}
+        shared = await auth_client.get(shared_path, headers=bob_headers)
+        assert shared.status_code == 200, shared.text
+        assert shared.headers["Cache-Control"] == "no-store"
+        assert shared.json() == {
+            "entries": [
+                {
+                    "id": run["id"],
+                    "project_name": expected_project_name,
+                    "repository": run["target"]["repository"],
+                    "pr_number": run["target"]["pr_number"],
+                    "head_sha": current_head,
+                    "created_at": run["created_at"],
+                }
+            ],
+            "next_cursor": None,
+        }
+        outsider = {"X-Forwarded-Email": "eve"}
+        assert (await auth_client.get(shared_path, headers=outsider)).json()["entries"] == []
+        discussion = f"{run_path}/discussion"
+        assert (await auth_client.get(discussion, headers=outsider)).status_code == 404
+        shared_view = await auth_client.get(discussion, headers=bob_headers)
+        assert shared_view.status_code == 200, shared_view.text
+        assert shared_view.json()["can_ask"]
+        assert not shared_view.json()["can_publish_inline"]
+        assert not shared_view.json()["can_use_review_workspace"]
+        revoked = await auth_client.delete(
+            f"{discussion}/collaborators", params={"user_id": "bob"}
+        )
+        assert revoked.status_code == 204
+        assert (await auth_client.post(runs_path, headers=headers, json=roster)).json() == run
+        assert (await auth_client.get(shared_path, headers=bob_headers)).json()["entries"] == []
+        assert (await auth_client.get(discussion, headers=bob_headers)).status_code == 404
         frozen = await auth_client.get(f"{run_path}/patch")
         assert frozen.status_code == 200, frozen.text
         assert frozen.json()["patch"] == captured_patch

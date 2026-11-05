@@ -356,6 +356,23 @@ export function getReviewDiscussion(runId: string, signal: AbortSignal) {
   return reviewRequest<ReviewDiscussion>(`${reviewRunPath(runId)}/discussion`, { signal });
 }
 
+interface SharedReviewPage {
+  entries: {
+    id: string;
+    project_name: string;
+    repository: string;
+    pr_number: number;
+    head_sha: string;
+    created_at: number;
+  }[];
+  next_cursor: string | null;
+}
+
+export function listSharedReviews(afterId: string | null, signal: AbortSignal) {
+  const query = afterId ? `?after_id=${encodeURIComponent(afterId)}` : "";
+  return reviewRequest<SharedReviewPage>(`/v1/studio/shared-reviews${query}`, { signal });
+}
+
 export function postReviewDiscussionComment(
   runId: string,
   comment: Pick<ReviewDiscussionComment, "id" | "anchor" | "body">,

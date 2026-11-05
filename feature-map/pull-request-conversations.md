@@ -50,6 +50,8 @@ links findings to their captured changes.
   and reveal a finding in the captured diff. Incomplete results link back to
   the reviewer for repair. An earlier revision keeps its findings separate
   from the current diff.
+- `shared-review-inbox`: Named collaborators can open the saved review and its
+  evidence from Inbox. Each entry shows the captured head.
 
 ## How to get to it (user POV)
 
@@ -58,6 +60,8 @@ links findings to their captured changes.
 - `composer-mobile`: Tap the composer's PR link, then open Changes in the drawer.
 - `canvas`: Open a conversation beside Canvas, click its composer PR link,
   then open Changes.
+- `shared-review-inbox`: Open **Inbox → All → Shared PR reviews** as a named
+  collaborator. Select the PR revision to open its discussion.
 
 A session with one PR opens its details directly. With multiple PRs, select a
 request from the list first; **All pull requests** returns to that list.
@@ -125,6 +129,15 @@ The other cases choose a native skill. The rail also checks that an earlier
 report stays separate from the updated diff.
 Use the [local review walkthrough](../docs/studio/README.md#run-a-review-locally)
 for the native skill, transcript and saved-report checks.
+
+For the shared-review entry, configure a [review route with collaborators](../docs/studio/README.md#trigger-a-private-review-from-github)
+on an isolated authenticated server. Trigger one run and sign in as the listed
+collaborator. Open its Inbox entry, select a finding and check the captured
+diff and evidence. Verify that the account can discuss the finding and that
+publication controls are hidden. Revoke the grant as the owner, then reload the
+collaborator's Inbox and the direct discussion URL. Both should lose access.
+The project case in `tests/server/integration/test_session_orchestration.py`
+covers grant, discovery, direct access, revocation and replay through the API.
 
 Render recovery has component coverage in
 `web/src/components/RenderErrorBoundary.test.tsx` and
