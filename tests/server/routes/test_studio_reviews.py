@@ -8,6 +8,7 @@ import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, Mock
 
@@ -17,8 +18,9 @@ import pytest_asyncio
 from fastapi import FastAPI, HTTPException, Request
 
 from omnigent.db.utils import builtin_agent_id
+from omnigent.entities.conversation import MessageData, NewConversationItem
 from omnigent.host.frames import HostHelloFrame
-from omnigent.native.native_coding_agents import CODEX_NATIVE_AGENT_NAME
+from omnigent.native.native_coding_agents import CLAUDE_NATIVE_AGENT_NAME, CODEX_NATIVE_AGENT_NAME
 from omnigent.runtime.agent_cache import AgentCache
 from omnigent.server.app import create_app
 from omnigent.server.auth import LEVEL_EDIT, LEVEL_OWNER, LEVEL_READ, UnifiedAuthProvider
@@ -29,6 +31,7 @@ from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConver
 from omnigent.stores.file_store.sqlalchemy_store import SqlAlchemyFileStore
 from omnigent.stores.host_store import HostStore
 from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
+from omnigent.stores.project_store.sqlalchemy_store import SqlAlchemyProjectStore
 from omnigent.stores.session_pull_request_store import PullRequestReport, SessionPullRequestStore
 from omnigent.stores.studio_review_store import StudioReviewStore
 from omnigent.studio.reviews.models import ReviewTarget
@@ -53,6 +56,8 @@ class ReviewHarness:
     captured: list[tuple[str, str | None]] = field(default_factory=list)
     read_patch: AsyncMock = field(default_factory=AsyncMock)
     create_reviewer: AsyncMock = field(default_factory=AsyncMock)
+    send_review: AsyncMock = field(default_factory=AsyncMock)
+    project_store: SqlAlchemyProjectStore | None = None
 
 
 @pytest.fixture
@@ -86,6 +91,7 @@ def review_harness(
     harness = ReviewHarness(
         store, conversations, agents, permissions, source.id, reviewer.id, target
     )
+    harness.project_store = SqlAlchemyProjectStore(db_uri)
 
     async def capture_context(
         _request: Request, source_session_id: str, pr_url: str | None
@@ -103,9 +109,10 @@ def review_harness(
         capture_context=capture_context,
         read_patch=harness.read_patch,
         create_reviewer=harness.create_reviewer,
-        send_review=AsyncMock(),
+        send_review=harness.send_review,
         auth_provider=auth,
         permission_store=permissions,
+        project_store=harness.project_store,
     )
     artifacts = LocalArtifactStore(str(tmp_path / "artifacts"))
     harness.app = create_app(
@@ -494,6 +501,236 @@ async def test_source_identifier_is_canonicalized(
     )
     assert response.status_code == 201
     assert response.json()["review"]["target"]["source_session_id"] == review_harness.source_id
+
+
+async def test_coordinator_approval_checks_revision_and_dispatches_only_selected_reviewers(
+    review_harness: ReviewHarness,
+    review_client: httpx.AsyncClient,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = review_harness
+    target = harness.target
+    assert harness.app is not None and harness.project_store is not None
+    project = harness.project_store.create(uuid.uuid4().hex, "Review project", ALICE, {})
+    hosts = HostStore(db_uri)
+    hosts.upsert_on_connect(
+        target.host_id,
+        "Review host",
+        ALICE,
+        configured_harnesses={"codex-native": True, "claude-native": True},
+    )
+    harness.app.state.host_store = hosts
+    harness.app.state.host_registry.register(
+        target.host_id,
+        Mock(),
+        HostHelloFrame(version="0.1.0", frame_protocol_version=1, name="Review host"),
+        owner=ALICE,
+    )
+    monkeypatch.setattr(
+        "omnigent.server.routes._studio_project_workspace.validate_workspace",
+        AsyncMock(return_value=target.workspace),
+    )
+    codex, claude = [
+        harness.agents.create(builtin_agent_id(name), name, "reviewer-bundle")
+        for name in (CODEX_NATIVE_AGENT_NAME, CLAUDE_NATIVE_AGENT_NAME)
+    ]
+    provider_head = HEAD_SHA
+    patch = (
+        "diff --git a/check.py b/check.py\n--- a/check.py\n+++ b/check.py\n"
+        "@@ -1 +1 @@\n-old\n+new\n"
+    )
+    profile_digest = "3" * 64
+
+    async def host_read(*, op, params, **_):
+        if op == "studio_review_profiles":
+            profile = params["profile_id"]
+            return {
+                "id": profile,
+                "label": profile.title(),
+                "description": "",
+                "digest": profile_digest,
+                "instructions": f"Inspect the {profile} scope.",
+            }
+        if op == "studio_project_pull_request":
+            return {
+                "pr": {
+                    "url": target.pr_url,
+                    "number": target.pr_number,
+                    "base_sha": BASE_SHA,
+                    "head_sha": provider_head,
+                }
+            }
+        assert op == "studio_project_pull_request_patch"
+        return {
+            "object": "session.github.pr_diff",
+            "base_sha": BASE_SHA,
+            "head_sha": provider_head,
+            "patch": patch,
+        }
+
+    monkeypatch.setattr(
+        "omnigent.server.routes.studio_reviews.read_workspace_from_host", host_read
+    )
+
+    async def create_reviewer(_request, owner, review, session_id):
+        session = harness.conversations.create_conversation(
+            conversation_id=session_id,
+            agent_id=review.profile.agent_id,
+            host_id=target.host_id,
+            workspace=target.workspace,
+            project_id=project.id,
+            runner_id=uuid.uuid4().hex,
+        )
+        harness.permissions.grant(owner, session.id, LEVEL_OWNER)
+        return SimpleNamespace(
+            id=session.id,
+            runner_id=session.runner_id,
+            agent_id=session.agent_id,
+            host_id=session.host_id,
+            workspace=session.workspace,
+            harness=review.profile.harness,
+        )
+
+    harness.create_reviewer.side_effect = create_reviewer
+    harness.send_review.return_value = {"queued": True, "pending_id": "accepted"}
+
+    def selection(profile, agent, native_harness):
+        return _body(
+            harness,
+            host_id=target.host_id,
+            workspace=target.workspace,
+            repository=".",
+            pr_url=target.pr_url,
+            agent_id=agent.id,
+            harness=native_harness,
+            skill=None,
+            profile_id=profile,
+            profile_digest=profile_digest,
+        )
+
+    headers = {"X-Forwarded-Email": ALICE, "Idempotency-Key": "coordinated-run"}
+    captured = await review_client.post(
+        f"/v1/projects/{project.id}/studio/review-runs",
+        headers=headers,
+        json={
+            "coordinator": selection("coordinator", codex, "codex-native"),
+            "reviewers": [
+                selection("backend", codex, "codex-native"),
+                selection("security", claude, "claude-native"),
+                selection("frontend", codex, "codex-native"),
+            ],
+            "required_reviewer_indices": [0],
+        },
+    )
+    assert captured.is_success, captured.text
+    run = captured.json()
+    path = f"/v1/studio/review-runs/{run['id']}"
+    started = await review_client.post(f"{path}/start", headers=headers, json={})
+    assert started.is_success and started.json()["errors"] == {}, started.text
+    coordinator = started.json()["run"]["coordinator"]
+    assert harness.send_review.await_count == 1
+    assert all(item["reviewer_session_id"] is None for item in started.json()["run"]["reviewers"])
+
+    def append_reply(session_id, fence, data):
+        harness.conversations.append(
+            session_id,
+            [
+                NewConversationItem(
+                    type="message",
+                    response_id=uuid.uuid4().hex,
+                    data=MessageData(
+                        role="assistant",
+                        agent="scripted-native-reviewer",
+                        content=[
+                            {"type": "output_text", "text": f"```{fence}\n{json.dumps(data)}\n```"}
+                        ],
+                    ),
+                )
+            ],
+        )
+
+    decisions = [
+        {
+            "review_id": member["id"],
+            "selected": member["profile"]["role"]["id"] != "frontend",
+            "reason": "No frontend changes"
+            if member["profile"]["role"]["id"] == "frontend"
+            else "Backend scope",
+        }
+        for member in run["reviewers"]
+    ]
+    revision = {"base_sha": BASE_SHA, "head_sha": HEAD_SHA}
+    append_reply(
+        coordinator["reviewer_session_id"],
+        "studio-review-plan-v1",
+        {"coordinator_id": coordinator["id"], **revision, "decisions": decisions},
+    )
+    plan = (await review_client.get(f"{path}/report", headers=headers)).json()["proposal"]
+    assert plan["state"] == "ready", plan
+    assert plan["plan"]["decisions"] == decisions
+
+    provider_head = "c" * 40
+    approval = {"proposal_digest": plan["digest"]}
+    stale = await review_client.post(f"{path}/start", headers=headers, json=approval)
+    assert stale.status_code == 409
+    assert (await review_client.get(path, headers=headers)).json()["plan"] is None
+    assert harness.send_review.await_count == 1
+
+    provider_head = HEAD_SHA
+    approved = await review_client.post(f"{path}/start", headers=headers, json=approval)
+    assert approved.is_success and approved.json()["errors"] == {}, approved.text
+    members = approved.json()["run"]["reviewers"]
+    selected = [member for member in members if member["reviewer_session_id"] is not None]
+    assert {member["profile"]["role"]["id"] for member in selected} == {"backend", "security"}
+    assert {member["profile"]["harness"] for member in selected} == {
+        "codex-native",
+        "claude-native",
+    }
+    assert approved.json()["run"]["plan"]["decisions"] == decisions
+    assert harness.send_review.await_count == 3
+    assert (await review_client.post(f"{path}/start", headers=headers, json=approval)).is_success
+    assert harness.send_review.await_count == 3
+
+    finding = {
+        "title": "Unexpected behavior",
+        "detail": "The changed line no longer checks the documented precondition.",
+        "severity": "high",
+        "path": "check.py",
+        "side": "head",
+        "line": 1,
+    }
+    for member in selected:
+        append_reply(
+            member["reviewer_session_id"],
+            "studio-review-v1",
+            {
+                "review_id": member["id"],
+                **revision,
+                "summary": "Checked the change",
+                "findings": [finding],
+            },
+        )
+    report = (await review_client.get(f"{path}/report", headers=headers)).json()
+    assert [row["report"]["state"] for row in report["reviewers"]] == ["ready", "ready"]
+    assert len(report["findings"]) == 1
+    assert set(report["findings"][0]["review_ids"]) == {member["id"] for member in selected}
+
+    drafts = f"{path}/discussion/inline-drafts/from-report"
+    for created in (1, 0):
+        prepared = await review_client.post(drafts, headers=headers, json={})
+        assert prepared.is_success, prepared.text
+        assert prepared.json() == {"state": "prepared", "eligible": 1, "created": created}
+    discussion = (await review_client.get(f"{path}/discussion", headers=headers)).json()
+    (draft,) = discussion["inline_drafts"]
+    assert draft["publication_state"] == "draft"
+    assert draft["anchor"] == {
+        "kind": "diff",
+        "path": "check.py",
+        "side": "head",
+        "start": 1,
+        "end": 1,
+    }
 
 
 @pytest.mark.parametrize("synced", [True, False], ids=["associated", "not-yet-synced"])
