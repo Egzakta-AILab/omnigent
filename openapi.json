@@ -6616,6 +6616,17 @@
             "title": "Repository",
             "type": "string"
           },
+          "review_workspace_host_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Review Workspace Host Id"
+          },
           "sharing_available": {
             "title": "Sharing Available",
             "type": "boolean"

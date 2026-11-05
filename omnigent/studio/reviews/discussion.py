@@ -184,5 +184,6 @@ class ReviewDiscussionView(FrozenModel):
     can_comment: bool
     can_ask: bool = False
     can_use_review_workspace: bool = False
+    review_workspace_host_id: str | None = None
     collaborators: list[str] | None = None
     sharing_available: bool

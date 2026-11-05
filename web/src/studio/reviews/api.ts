@@ -257,6 +257,7 @@ export interface ReviewDiscussion {
   can_comment: boolean;
   can_ask?: boolean;
   can_use_review_workspace?: boolean;
+  review_workspace_host_id?: string | null;
   collaborators: string[] | null;
   sharing_available: boolean;
 }
