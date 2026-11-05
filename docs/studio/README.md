@@ -428,6 +428,13 @@ and the matching patch, and select **Attach receipt**. The attached check
 shows both results, the export scope, and the proposed diff. People with
 access to the saved review can inspect the attachment.
 
+When the candidate passes the check, the review owner can select
+**Re-review candidate**. Omnigent checks that the original PR still matches
+the capture and starts a separate private run with the original selected
+reviewers. This run reviews the proposed delta from the captured PR head to
+the candidate snapshot. Open it from the fix attachment or the review run
+list. Its discussion links back to the original finding.
+
 ### Discuss a saved review
 
 Select **Discuss finding** to open its thread, or **Discuss review** to open

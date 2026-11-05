@@ -142,6 +142,19 @@ class ReviewProfile(FrozenModel):
         return require_uuid(value)
 
 
+class CandidateReviewOrigin(FrozenModel):
+    run_id: str
+    finding_key: ReviewRoleDigest
+    attachment_digest: ReviewRoleDigest
+    finding_title: Annotated[str, StringConstraints(min_length=1, max_length=200)]
+    finding_detail: Annotated[str, StringConstraints(min_length=1, max_length=2000)]
+
+    @field_validator("run_id")
+    @classmethod
+    def normalize_run(cls, value: str) -> str:
+        return require_uuid(value)
+
+
 class ReviewTarget(FrozenModel):
     source_session_id: str | None = None
     source_project_id: str | None = None
@@ -153,6 +166,7 @@ class ReviewTarget(FrozenModel):
     pr_number: int = Field(gt=0)
     base_sha: Sha
     head_sha: Sha
+    candidate: CandidateReviewOrigin | None = None
 
     @field_validator("source_session_id", "source_project_id", "host_id")
     @classmethod
@@ -165,6 +179,10 @@ class ReviewTarget(FrozenModel):
             raise ValueError("A review requires one origin")
         if (self.source_project_id is None) != (self.repository_path is None):
             raise ValueError("A project review requires a workspace repository path")
+        if self.candidate is not None and (
+            self.source_project_id is None or self.base_sha == self.head_sha
+        ):
+            raise ValueError("A candidate review requires two distinct project revisions")
         return self
 
     @property

@@ -56,6 +56,13 @@ function hasValidDefaults(defaults: ReviewProfileDefaults | null | undefined): b
   );
 }
 
+export interface CandidateReviewOrigin {
+  run_id: string;
+  finding_key: string;
+  attachment_digest: string;
+  finding_title: string;
+}
+
 export interface ReviewPass {
   id: string;
   run_id?: string | null;
@@ -70,6 +77,7 @@ export interface ReviewPass {
     head_sha: string;
     host_id: string;
     workspace: string;
+    candidate?: CandidateReviewOrigin | null;
   };
   profile: {
     agent_id: string;
@@ -201,6 +209,7 @@ export interface AttachedReproduction {
   digest: string;
   attached_at: number;
   provenance: "uploaded";
+  candidate_run_id?: string | null;
   receipt:
     (CheckReceiptSummary & { base: ReproductionSide; head: ReproductionSide }) | FixCheckSummary;
 }
@@ -267,6 +276,7 @@ export interface ReviewDiscussion {
   base_sha: string;
   head_sha: string;
   patch: string;
+  candidate?: CandidateReviewOrigin | null;
   reports: {
     key: string;
     label: string;
@@ -348,6 +358,14 @@ function reproductionPath(runId: string, findingKey: string) {
 
 export function listFindingReproductions(runId: string, findingKey: string, signal: AbortSignal) {
   return reviewRequest<AttachedReproduction[]>(reproductionPath(runId, findingKey), { signal });
+}
+
+export function reReviewCandidate(runId: string, findingKey: string, digest: string) {
+  return postReview<{ run: ReviewRun; errors: Record<string, string> }>(
+    `${reproductionPath(runId, findingKey)}/${encodeURIComponent(digest)}/re-review`,
+    `studio-candidate-${digest}`,
+    {},
+  );
 }
 
 export async function attachFindingReproduction(

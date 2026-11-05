@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { useIdentityReady, useViewerId } from "@/hooks/useViewerId";
 import { copyText } from "@/lib/clipboard";
 import { randomUUID } from "@/lib/randomUUID";
-import { useParams, useSearchParams } from "@/lib/routing";
+import { Link, useParams, useSearchParams } from "@/lib/routing";
 import {
   changeReviewCollaborator,
   getReviewDiscussion,
@@ -174,7 +174,9 @@ function DiscussionContent({
         <header className="flex flex-wrap items-start justify-between gap-2">
           <div>
             <p className="text-sm text-muted-foreground">{discussion.project_name}</p>
-            <h1 className="text-xl font-semibold">Review discussion</h1>
+            <h1 className="text-xl font-semibold">
+              {discussion.candidate ? "Candidate review" : "Review discussion"}
+            </h1>
             <a
               className="text-sm underline"
               href={discussion.pr_url}
@@ -186,6 +188,14 @@ function DiscussionContent({
             <p className="mt-1 font-mono text-xs text-muted-foreground">
               {discussion.base_sha.slice(0, 8)} → {discussion.head_sha.slice(0, 8)}
             </p>
+            {discussion.candidate && (
+              <Link
+                className="text-sm underline"
+                to={`/reviews/${encodeURIComponent(discussion.candidate.run_id)}/discussion?finding=${encodeURIComponent(discussion.candidate.finding_key)}`}
+              >
+                Original finding · {discussion.candidate.finding_title}
+              </Link>
+            )}
           </div>
           <div>
             <Button
@@ -283,6 +293,7 @@ function DiscussionContent({
                       findingKey={selectedFinding.key}
                       viewerId={viewerId}
                       canAttach={discussion.can_attach_evidence}
+                      canReReview={discussion.can_attach_evidence && !discussion.candidate}
                     />
                   </>
                 )}

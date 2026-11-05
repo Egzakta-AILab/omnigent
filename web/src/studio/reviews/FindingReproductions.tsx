@@ -3,9 +3,11 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { copyText } from "@/lib/clipboard";
 import { getCliServerUrl } from "@/lib/host";
+import { Link } from "@/lib/routing";
 import {
   attachFindingReproduction,
   listFindingReproductions,
+  reReviewCandidate,
   type AttachedReproduction,
   type FixCheckSummary,
   type ReproductionSide,
@@ -123,11 +125,13 @@ function Reproductions({
   findingKey,
   viewerId,
   canAttach = !!run.target,
+  canReReview = canAttach && !run.target?.candidate,
 }: {
   run: Pick<ReviewRun, "id"> & Partial<Pick<ReviewRun, "target">>;
   findingKey: string;
   viewerId: string | null;
   canAttach?: boolean;
+  canReReview?: boolean;
 }) {
   const queryClient = useQueryClient();
   const queryKey = ["studio-finding-reproductions", viewerId, run.id, findingKey] as const;
@@ -152,6 +156,15 @@ function Reproductions({
       if (fileInput.current) fileInput.current.value = "";
       if (patchInput.current) patchInput.current.value = "";
       await queryClient.invalidateQueries({ queryKey });
+    },
+  });
+  const reReview = useMutation({
+    mutationFn: (digest: string) => reReviewCandidate(run.id, findingKey, digest),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["studio-review-runs"] }),
+        queryClient.invalidateQueries({ queryKey }),
+      ]);
     },
   });
 
@@ -220,7 +233,7 @@ function Reproductions({
       )}
       {receipts.isSuccess &&
         !receipts.isFetching &&
-        receipts.data.map(({ digest, receipt }) => (
+        receipts.data.map(({ digest, receipt, candidate_run_id: candidateRunId }) => (
           <article key={digest} className="space-y-2 rounded-md border border-border p-2">
             <div className="flex flex-wrap items-center justify-between gap-1">
               <span className="text-xs font-medium">
@@ -252,7 +265,39 @@ function Reproductions({
               </p>
             )}
             {"patch" in receipt ? (
-              <FixCheckDetails receipt={receipt} />
+              <>
+                <FixCheckDetails receipt={receipt} />
+                {canReReview &&
+                  (receipt.outcome === "fail_to_pass" || receipt.outcome === "pass_to_pass") && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={reReview.isPending}
+                      onClick={() => reReview.mutate(digest)}
+                    >
+                      {reReview.isPending && reReview.variables === digest
+                        ? "Starting reviewers…"
+                        : "Re-review candidate"}
+                    </Button>
+                  )}
+                {reReview.variables === digest && reReview.error && (
+                  <p role="alert">{reReview.error.message}</p>
+                )}
+                {reReview.variables === digest &&
+                  reReview.data &&
+                  Object.entries(reReview.data.errors).map(([id, error]) => (
+                    <p key={id} role="alert">
+                      {error}
+                    </p>
+                  ))}
+                {candidateRunId && (
+                  <Button asChild size="sm" variant="ghost">
+                    <Link to={`/reviews/${encodeURIComponent(candidateRunId)}/discussion`}>
+                      Open candidate review
+                    </Link>
+                  </Button>
+                )}
+              </>
             ) : (
               <>
                 <ReproductionOutcome label="Base" side={receipt.base} />

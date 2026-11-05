@@ -1976,11 +1976,16 @@ def register_core_routes(
                 legacy_project = source.labels.get(PROJECT_LABEL_KEY)
         profile = review.profile
         is_coordinator = review.run_role == "coordinator"
+        task = "Review"
+        if is_coordinator:
+            task = "Plan review for"
+        elif target.candidate is not None:
+            task = "Re-review candidate for"
         body = SessionCreateRequest(
             agent_id=profile.agent_id,
             host_id=target.host_id,
             workspace=target.workspace,
-            title=f"{'Plan review for' if is_coordinator else 'Review'} PR #{target.pr_number}",
+            title=f"{task} PR #{target.pr_number}",
             labels={
                 **({} if is_coordinator else {"omnigent.studio.review": "true"}),
                 **({PROJECT_LABEL_KEY: legacy_project} if legacy_project else {}),

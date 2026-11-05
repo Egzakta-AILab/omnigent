@@ -3931,6 +3931,42 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
         assert saved_proposal["answer_state"] == "ready"
         assert (await auth_client.post(f"{fix_path}/share", json={})).status_code == 409
         assert (await auth_client.get(fix_path, headers=foreign_headers)).status_code == 404
+        fix_digest = fix_attachment.json()["digest"]
+        rereview_path = f"{reproduction_path}/{fix_digest}/re-review"
+        assert (
+            await auth_client.post(rereview_path, json={}, headers=foreign_headers)
+        ).status_code == 404
+        current_head = "c" * 40
+        assert (await auth_client.post(rereview_path, json={})).status_code == 409
+        assert send_review.await_count == 8
+        current_head = "b" * 40
+        rereviewed = await auth_client.post(rereview_path, json={})
+        assert rereviewed.status_code == 200, rereviewed.text
+        candidate = rereviewed.json()["run"]
+        assert rereviewed.json()["errors"] == {}
+        assert candidate["target"]["base_sha"] == current_head
+        assert candidate["target"]["head_sha"] == fix["after"]["commit"]
+        assert candidate["target"]["candidate"]["run_id"] == run["id"]
+        assert candidate["target"]["candidate"]["attachment_digest"] == fix_digest
+        candidate_members = candidate["reviewers"]
+        assert len(candidate_members) == len(run["reviewers"])
+        for delivery in send_review.await_args_list[-len(candidate_members) :]:
+            candidate_prompt = delivery.args[2].data["content"][0]["text"]
+            assert "This is a candidate re-review" in candidate_prompt
+            assert "+fixed" in candidate_prompt and "-before" not in candidate_prompt
+        assert (await auth_client.post(rereview_path, json={})).json()["run"]["id"] == candidate[
+            "id"
+        ]
+        assert send_review.await_count == 8 + len(candidate_members)
+        evidence = (await auth_client.get(reproduction_path)).json()
+        assert (
+            next(item for item in evidence if item["digest"] == fix_digest)["candidate_run_id"]
+            == candidate["id"]
+        )
+        candidate_path = f"/v1/studio/review-runs/{candidate['id']}"
+        assert (await auth_client.get(f"{candidate_path}/patch")).json()["patch"] == checked_patch
+        candidate_view = (await auth_client.get(f"{candidate_path}/discussion")).json()
+        assert candidate_view["candidate"]["finding_key"] == finding_key
         return
 
     created = await create_reviewer(request, "alice", review, review.id)

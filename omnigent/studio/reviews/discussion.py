@@ -10,6 +10,7 @@ from pydantic import Field, StringConstraints, field_validator, model_validator
 from omnigent.studio.reviews.evidence import Anchor, Side
 from omnigent.studio.reviews.models import (
     BoundedText,
+    CandidateReviewOrigin,
     FrozenModel,
     ReviewHarness,
     ReviewProfile,
@@ -200,6 +201,7 @@ class ReviewDiscussionView(FrozenModel):
     head_sha: Sha
     patch_sha256: ReviewRoleDigest
     patch: str
+    candidate: CandidateReviewOrigin | None = None
     reports: list[ReviewDiscussionReport]
     findings: list[ReviewDiscussionFinding]
     comments: list[ReviewComment]

@@ -76,6 +76,7 @@ from omnigent.studio.reviews.discussion import (
     ReviewQuestion,
 )
 from omnigent.studio.reviews.evidence import (
+    MAX_REVIEW_PATCH_BYTES,
     Anchor,
     Side,
     changed_anchors,
@@ -84,6 +85,7 @@ from omnigent.studio.reviews.evidence import (
 )
 from omnigent.studio.reviews.launch import SKILL_NAME, review_prompt, run_review, verified_patch
 from omnigent.studio.reviews.models import (
+    CandidateReviewOrigin,
     CaptureResult,
     ReviewEvent,
     ReviewHarness,
@@ -112,6 +114,7 @@ from omnigent.studio.reviews.report import (
 from omnigent.studio.reviews.reproduction import (
     MAX_REPRODUCTION_BYTES,
     AttachedReproduction,
+    FixCheckEvidence,
     ReviewCheckUpload,
     SharedAttachedReproduction,
 )
@@ -145,6 +148,10 @@ _logger = logging.getLogger(__name__)
 
 def _discussion_reviewer_key(review_id: str) -> str:
     return hashlib.sha256(f"discussion:{review_id}".encode()).hexdigest()
+
+
+def _candidate_intent(run_id: str, finding_key: str, digest: str) -> str:
+    return hashlib.sha256(f"{run_id}:{finding_key}:{digest}".encode()).hexdigest()
 
 
 async def _bounded_json(
@@ -937,6 +944,29 @@ def create_studio_reviews_router(
     async def current_project_patch(
         request: Request, target: ReviewTarget, owner: str | None, run_id: str | None
     ) -> str:
+        if (candidate := target.candidate) is not None:
+            parent = await asyncio.to_thread(
+                review_store.get_run, candidate.run_id, owner_user_id=owner
+            )
+            if (
+                run_id is None
+                or parent is None
+                or parent.target.candidate is not None
+                or parent.target.model_copy(
+                    update={
+                        "base_sha": parent.target.head_sha,
+                        "head_sha": target.head_sha,
+                        "candidate": candidate,
+                    }
+                )
+                != target
+            ):
+                raise HTTPException(409, "The candidate review has lost its original revision")
+            await current_project_patch(request, parent.target, owner, parent.id)
+            candidate_patch = await saved_run_patch(run_id, owner)
+            if candidate_patch is None:
+                raise HTTPException(409, "The candidate review has no saved diff")
+            return candidate_patch
         assert target.source_project_id is not None and target.repository_path is not None
         workspace = await resolve_project_workspace(
             request,
@@ -1240,7 +1270,7 @@ def create_studio_reviews_router(
 
     async def require_saved_finding(
         request: Request, run_id: str, finding_key: str, *, allow_collaborator: bool = False
-    ) -> tuple[ReviewRun, str | None]:
+    ) -> tuple[ReviewRun, str | None, ReviewFinding]:
         try:
             run = await owned_run(request, run_id)
             owner = require_user(request, auth_provider)
@@ -1252,8 +1282,9 @@ def create_studio_reviews_router(
         anchors = await run_anchors(run.id, owner)
         if anchors is not None:
             report = await read_consolidation(run, anchors, include_finding_keys=True)
-            if any(entry.finding_key == finding_key for entry in report.findings):
-                return run, owner
+            for entry in report.findings:
+                if entry.finding_key == finding_key:
+                    return run, owner, entry.finding
         raise HTTPException(404, "The finding was not found in this captured diff")
 
     @router.get(
@@ -1263,7 +1294,7 @@ def create_studio_reviews_router(
     async def get_finding_reproductions(
         request: Request, response: Response, run_id: str, finding_key: FindingKey
     ) -> list[AttachedReproduction | SharedAttachedReproduction]:
-        run, owner = await require_saved_finding(
+        run, owner, _ = await require_saved_finding(
             request, run_id, finding_key, allow_collaborator=True
         )
         response.headers["Cache-Control"] = "no-store"
@@ -1276,10 +1307,26 @@ def create_studio_reviews_router(
                 owner_user_id=owner,
                 actor=actor,
             )
-            return [
-                entry if actor == owner else SharedAttachedReproduction.from_attachment(entry)
-                for entry in entries
-            ]
+            if actor != owner:
+                return [SharedAttachedReproduction.from_attachment(entry) for entry in entries]
+
+            async def with_candidate(entry: AttachedReproduction) -> AttachedReproduction:
+                if not isinstance(entry.receipt, FixCheckEvidence):
+                    return entry
+                intent = _candidate_intent(run.id, finding_key, entry.digest)
+                candidate = await asyncio.to_thread(
+                    review_store.find_run_request,
+                    owner_user_id=owner,
+                    idempotency_key=f"studio-candidate-{intent}",
+                    request_hash=intent,
+                )
+                return (
+                    entry.model_copy(update={"candidate_run_id": candidate.id})
+                    if candidate
+                    else entry
+                )
+
+            return list(await asyncio.gather(*(with_candidate(entry) for entry in entries)))
         except ReviewNotFoundError as exc:
             raise HTTPException(404, str(exc)) from exc
         except ReviewConflictError as exc:
@@ -1364,6 +1411,7 @@ def create_studio_reviews_router(
             head_sha=target.head_sha,
             patch_sha256=run.patch_sha256,
             patch=patch,
+            candidate=target.candidate,
             reports=reports,
             findings=[
                 ReviewDiscussionFinding(key=entry.finding_key, finding=entry.finding)
@@ -1814,7 +1862,7 @@ def create_studio_reviews_router(
     async def attach_finding_reproduction(
         request: Request, response: Response, run_id: str, finding_key: FindingKey
     ) -> AttachedReproduction:
-        run, owner = await require_saved_finding(request, run_id, finding_key)
+        run, owner, _ = await require_saved_finding(request, run_id, finding_key)
         response.headers["Cache-Control"] = "no-store"
         upload = await _bounded_json(request, ReviewCheckUpload, limit=MAX_REPRODUCTION_BYTES)
         try:
@@ -1829,6 +1877,67 @@ def create_studio_reviews_router(
             raise HTTPException(404, str(exc)) from exc
         except ReviewConflictError as exc:
             raise HTTPException(409, str(exc)) from exc
+
+    @router.post(
+        "/studio/review-runs/{run_id}/findings/{finding_key}/reproductions/{digest}/re-review",
+        response_model=StartReviewRunResponse,
+        dependencies=_WRITE_GATES,
+    )
+    async def re_review_fix(
+        request: Request, run_id: str, finding_key: FindingKey, digest: FindingKey
+    ) -> StartReviewRunResponse:
+        await _bounded_json(request, StartReviewRequest, limit=1024)
+        run, owner, finding = await require_saved_finding(request, run_id, finding_key)
+        if run.target.candidate is not None:
+            raise HTTPException(409, "Start a candidate review from a captured pull request")
+        try:
+            entries = await asyncio.to_thread(
+                review_store.list_reproductions,
+                run.id,
+                finding_key,
+                owner_user_id=owner,
+                actor=owner,
+            )
+            receipt = next((entry.receipt for entry in entries if entry.digest == digest), None)
+            if not isinstance(receipt, FixCheckEvidence):
+                raise HTTPException(404, "The checked candidate was not found on this finding")
+            if receipt.outcome not in ("fail_to_pass", "pass_to_pass"):
+                raise HTTPException(409, "The candidate check must pass before re-review")
+            if len(receipt.patch.encode()) > MAX_REVIEW_PATCH_BYTES or not changed_anchors(
+                receipt.patch
+            ):
+                raise ValueError("Choose a candidate with a reviewable text diff of up to 48 KiB")
+            await current_project_patch(request, run.target, owner, run.id)
+            intent = _candidate_intent(run.id, finding_key, digest)
+            target = run.target.model_copy(
+                update={
+                    "base_sha": run.target.head_sha,
+                    "head_sha": receipt.after.commit,
+                    "candidate": CandidateReviewOrigin(
+                        run_id=run.id,
+                        finding_key=finding_key,
+                        attachment_digest=digest,
+                        finding_title=finding.title,
+                        finding_detail=finding.detail,
+                    ),
+                }
+            )
+            candidate_run = await asyncio.to_thread(
+                review_store.capture_run,
+                owner_user_id=owner,
+                idempotency_key=f"studio-candidate-{intent}",
+                request_hash=intent,
+                target=target,
+                profiles=[member.profile for member in run.selected_reviewers()],
+                patch=receipt.patch,
+            )
+        except ReviewNotFoundError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ReviewConflictError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        return await start_review_run(request, candidate_run.id, StartReviewRunRequest())
 
     @router.get(
         "/studio/reviews/{review_id}/operations/{operation_id}", response_model=ReviewOperation
