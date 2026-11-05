@@ -7,7 +7,8 @@ import pytest
 
 from omnigent.studio import setup
 from omnigent.studio.reviews.evidence import patch_digest
-from omnigent.studio.verify_review_run import collect_review_run
+from omnigent.studio.reviews.reproduction import ReproductionError
+from omnigent.studio.verify_review_run import collect_review_run, read_reproduction_source
 
 
 @pytest.mark.parametrize(
@@ -161,6 +162,18 @@ def test_verify_run_requires_evidence_and_attribution(monkeypatch, fault):
     def read(request):
         assert request.method == "GET"
         return httpx.Response(200, json=responses[request.url.path])
+
+    if fault == "none":
+        source_args = {
+            "mode": "local",
+            "server_url": "http://127.0.0.1:6767",
+            "run_id": run_id,
+            "transport": httpx.MockTransport(read),
+        }
+        source = read_reproduction_source(**source_args, pr_url=target["pr_url"])
+        assert (source.base_sha, source.head_sha, source.patch_sha256) == (base, head, digest)
+        with pytest.raises(ReproductionError, match="does not match"):
+            read_reproduction_source(**source_args, pr_url=target["pr_url"] + "0")
 
     receipt = collect_review_run(
         mode="local",

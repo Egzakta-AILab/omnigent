@@ -1,4 +1,4 @@
-"""Read-only setup checks for an explicitly selected studio execution target."""
+"""Studio setup, verification, and reproduction commands."""
 
 from __future__ import annotations
 
@@ -7,8 +7,10 @@ import contextlib
 import ipaddress
 import json
 import math
+import os
 import re
 import subprocess
+import tempfile
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -431,7 +433,67 @@ def main(argv: Sequence[str] | None = None) -> int:
     run.add_argument("--minimum-reviewers", type=int, default=1)
     run.add_argument("--output", type=Path, help="write a JSON receipt")
     run.add_argument("--json", action="store_true", help="print the JSON receipt")
+    reproduction = commands.add_parser("reproduce", help="compare two Git revisions in Docker")
+    reproduction.add_argument("--repository", type=Path, required=True)
+    reproduction.add_argument("--base", help="full base commit ID")
+    reproduction.add_argument("--head", help="full head commit ID")
+    reproduction.add_argument("--run-id", help="read both commits from a saved review run")
+    reproduction.add_argument("--mode", choices=("local", "server"))
+    reproduction.add_argument("--server", help="trusted instance URL for --run-id")
+    reproduction.add_argument("--pr", help="expected pull request URL for --run-id")
+    reproduction.add_argument("--image", required=True, help="locally installed test image")
+    reproduction.add_argument("--socket", type=Path, default=Path("/var/run/docker.sock"))
+    reproduction.add_argument("--timeout", type=int, default=60, help="seconds per revision")
+    reproduction.add_argument("--output", type=Path, required=True, help="new private JSON file")
+    reproduction.add_argument("argv", nargs=argparse.REMAINDER, help="command after --")
     args = parser.parse_args(argv)
+    if args.command == "reproduce":
+        from omnigent.studio.reviews.reproduction import ReproductionError, reproduce
+        from omnigent.studio.verify_review_run import read_reproduction_source
+
+        command = args.argv[1:] if args.argv[:1] == ["--"] else args.argv
+        if args.output.exists():
+            parser.error("Choose a new file for the reproduction receipt")
+        try:
+            source = None
+            if any((args.run_id, args.mode, args.server, args.pr)):
+                if not all((args.run_id, args.mode, args.server, args.pr)):
+                    parser.error("Use --run-id, --mode, --server and --pr together")
+                if args.base or args.head:
+                    parser.error("Use a saved review run or specify --base and --head")
+                source = read_reproduction_source(
+                    mode=args.mode, server_url=args.server, run_id=args.run_id, pr_url=args.pr
+                )
+                base, head = source.base_sha, source.head_sha
+            else:
+                if not args.base or not args.head:
+                    parser.error("Use a saved review run or specify --base and --head")
+                base, head = args.base, args.head
+            result = reproduce(
+                repository=args.repository.expanduser().resolve(),
+                base=base,
+                head=head,
+                image=args.image,
+                command=tuple(command),
+                socket=args.socket.expanduser(),
+                timeout=args.timeout,
+                source=source,
+            )
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=args.output.parent, prefix=".reproduction-"
+            ) as receipt_file:
+                receipt_file.write(result.model_dump_json(indent=2) + "\n")
+                receipt_file.flush()
+                os.link(receipt_file.name, args.output)
+        except (OSError, ReproductionError, ValueError) as exc:
+            parser.exit(2, f"Reproduction failed: {exc}\n")
+        for label, side in (("Base", result.base), ("Head", result.head)):
+            print(
+                f"{label} {side.commit[:8]}: {side.state}, "
+                f"exit {side.exit_code}, {side.elapsed_ms} ms"
+            )
+        return 0 if result.base.state == result.head.state == "exited" else 1
     if args.command == "contracts":
         from omnigent.studio.contracts import main as contracts_main
 

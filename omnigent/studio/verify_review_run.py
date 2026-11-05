@@ -16,7 +16,51 @@ from omnigent.studio.reviews.report import (
     ReviewReport,
     consolidate_reports,
 )
+from omnigent.studio.reviews.reproduction import ReproductionError, ReproductionSource
 from omnigent.studio.reviews.service import CaptureReviewRequest
+
+
+def read_reproduction_source(
+    *,
+    mode: str,
+    server_url: str,
+    run_id: str,
+    pr_url: str,
+    transport: httpx.BaseTransport | None = None,
+) -> ReproductionSource:
+    """Read the frozen revision and diff digest from an owned review run."""
+    server_url = setup.validate_server_url(server_url, mode)
+    run_id = require_uuid(run_id)
+    expected_pr = CaptureReviewRequest.safe_pr_url(pr_url)
+    try:
+        headers = setup._headers(server_url, None)
+    except Exception:  # noqa: BLE001 — credential errors may contain private values
+        raise ReproductionError("The instance credentials could not be loaded") from None
+    with httpx.Client(
+        base_url=f"{server_url}/",
+        headers=headers,
+        timeout=5,
+        follow_redirects=False,
+        trust_env=False,
+        transport=transport,
+    ) as client:
+        path = f"v1/studio/review-runs/{run_id}"
+        raw = setup._Probe(client, []).get("run.capture", path)
+    try:
+        run = ReviewRun.model_validate(raw, strict=True)
+        if run.id != run_id or run.target.pr_url != expected_pr or run.patch_sha256 is None:
+            raise ReproductionError(
+                "The saved run does not match the requested PR and captured diff"
+            )
+        return ReproductionSource(
+            run_id=run.id,
+            pr_url=run.target.pr_url,
+            patch_sha256=run.patch_sha256,
+            base_sha=run.target.base_sha,
+            head_sha=run.target.head_sha,
+        )
+    except ValidationError:
+        raise ReproductionError("A captured review run could not be read") from None
 
 
 def collect_review_run(

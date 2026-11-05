@@ -238,7 +238,7 @@ provenance needs.
 The reviewer runs in the captured workspace with the selected agent's normal
 permissions. It receives the PR diff at the captured base and head revisions.
 The first version accepts GitHub text diffs up to 48 KiB. A moved revision
-requires a fresh capture. Reports contain agent findings. Check evidence is A4.
+requires a fresh capture. Review reports and reproduction receipts are separate.
 See the [review API and state model](review-records.md) for retry behavior.
 
 ### Share reviewer profiles with a workspace
@@ -357,6 +357,38 @@ The receipt checks the selected roster, report coverage, the patch digest,
 changed-line citations, and attribution of consolidated findings. For
 coordinated runs it also checks the approved decisions, required reviewers, and
 whether a skipped candidate has a session.
+
+### Reproduce a finding on both revisions
+
+On the Mac or Linux machine that has Docker and a checkout containing both
+commits, choose a locally cached test image with `/bin/sh`, `tar`, `timeout`,
+and your test dependencies. Run the command you want to compare against the
+saved review run:
+
+```sh
+uv run --no-sync python scripts/verify_studio.py reproduce \
+  --mode local --server http://127.0.0.1:6767 --run-id RUN_ID \
+  --pr https://github.com/YOUR_ORG/YOUR_REPO/pull/17 \
+  --repository /path/to/repo --image python:3.12-alpine \
+  --output .omnigent/studio/reproduction.json -- python path/to/check.py
+```
+
+Use `--mode server` and the HTTPS instance URL for a hosted review run.
+The command runs on the machine where you invoke it. If its Docker socket is
+outside `/var/run/docker.sock`, pass the absolute socket path with `--socket`.
+For a Git-only check, use `--base` and `--head` with full commit IDs in place of
+the saved-run options.
+
+Each container gets a Git archive of one commit. Committed export attributes
+apply. Local checkout attributes, dirty files, Git history, and submodule
+contents are outside the input. Use an image with dependencies already
+installed because containers run with networking disabled. The
+private receipt records the selected image ID, each archive digest, elapsed
+time, exit code, and up to 8 KiB of combined output per side. Elapsed time
+includes container startup and extraction. Print measurements from your check
+to include them in the output. The CLI exits successfully when both commands
+ran to completion, even when a test reports a failure. Shell exit codes 126
+and 127 are reserved for invocation failures.
 
 For any workspace, open **Project settings → Repositories**, or open
 **Manage repositories** from the PR panel. The managers run on the connected
