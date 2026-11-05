@@ -447,6 +447,14 @@ line range. The draft records the path, side, and range on the captured PR.
 You can edit or discard your draft from the same thread. Each author sees
 their own drafts, including in a review shared with teammates.
 
+The review owner can select drafts in **Publish inline drafts**, choose
+**Preview selected**, and confirm with **Publish inline comments**. The preview
+shows the exact text, lines, and PR revision. Omnigent checks the revision again
+at confirmation and posts each selected draft as its own thread from the
+captured workspace's configured account. A posted draft links to its provider
+thread. If delivery is unconfirmed, check the PR for that comment before taking
+further action. The current Studio capture flow supports GitHub.
+
 On a multi-user instance with sharing enabled, the run owner can open **Share
 this review**, grant access to an existing Omnigent account ID, and send the
 link using **Copy review link**. A collaborator can see this review's captured

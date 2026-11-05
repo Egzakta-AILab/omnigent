@@ -4,8 +4,10 @@ import re
 from pathlib import Path
 from typing import Any
 
-from omnigent.runner import github_resource
+from omnigent.git_providers import ParsedRemote
+from omnigent.runner import github_resource, pr_resource
 from omnigent.runner.session_prs import PullRequestRef
+from omnigent.studio.reviews.discussion import DiffDiscussionAnchor
 from omnigent.workspace_fs import WorkspaceReaderError
 from omnigent.workspace_repositories import resolve_workspace_github_repository
 
@@ -36,18 +38,7 @@ def read_project_pull_requests(root: Path, op: str, params: dict[str, Any]) -> d
             "pull_requests": github_resource.list_workspace_pull_requests(str(checkout), remote)
         }
 
-    url = params.get("pr_url")
-    if not isinstance(url, str) or not 1 <= len(url) <= 2048:
-        raise ValueError("Choose a pull request URL.")
-    reference = PullRequestRef.from_url(url)
-    if (
-        reference.provider != remote.provider
-        or reference.host != remote.host
-        or reference.repository.casefold() != remote.repository.casefold()
-    ):
-        raise WorkspaceReaderError(
-            400, "pr_repository_mismatch", "This pull request belongs to another repository."
-        )
+    reference = _workspace_pr_reference(params.get("pr_url"), remote)
     if op == "studio_project_pull_request":
         result = github_resource.read_workspace_pull_request(
             str(checkout), reference, include_files=params.get("include_files") is True
@@ -69,3 +60,46 @@ def read_project_pull_requests(root: Path, op: str, params: dict[str, Any]) -> d
         return result
     patch = result["patch"]
     return {"patch": patch[:_PATCH_PREVIEW_CHARS], "truncated": len(patch) > _PATCH_PREVIEW_CHARS}
+
+
+def _workspace_pr_reference(url: object, remote: ParsedRemote) -> PullRequestRef:
+    if not isinstance(url, str) or not 1 <= len(url) <= 2048:
+        raise ValueError("Choose a pull request URL.")
+    reference = PullRequestRef.from_url(url)
+    if (
+        reference.provider != remote.provider
+        or reference.host != remote.host
+        or reference.repository.casefold() != remote.repository.casefold()
+    ):
+        raise WorkspaceReaderError(
+            400, "pr_repository_mismatch", "This pull request belongs to another repository."
+        )
+    return reference
+
+
+def publish_project_inline_comment(root: Path, params: dict[str, Any]) -> dict[str, Any]:
+    """Publish one confirmed draft using the selected active repository."""
+    checkout, remote, review_available = resolve_workspace_github_repository(
+        root, params.get("repository")
+    )
+    if not review_available:
+        raise WorkspaceReaderError(
+            409, "reference_repository", "Mark this repository Active to publish a comment."
+        )
+    reference = _workspace_pr_reference(params.get("pr_url"), remote)
+    anchor = DiffDiscussionAnchor.model_validate(params.get("anchor"))
+    with pr_resource.server_tracking(True):
+        return pr_resource.create_pr_review_thread(
+            str(checkout),
+            session_id=params["session_id"],
+            pr_url=reference.url,
+            body=params.get("body"),
+            anchor={
+                "path": anchor.path,
+                "side": "LEFT" if anchor.side == "base" else "RIGHT",
+                "line": anchor.end,
+                "start_line": anchor.start if anchor.start < anchor.end else None,
+                "base_sha": params.get("base_sha"),
+                "head_sha": params.get("head_sha"),
+            },
+        )

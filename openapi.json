@@ -4232,6 +4232,28 @@
             "title": "Id",
             "type": "string"
           },
+          "provider_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider Url"
+          },
+          "publication_state": {
+            "default": "draft",
+            "enum": [
+              "draft",
+              "sending",
+              "posted",
+              "unknown"
+            ],
+            "title": "Publication State",
+            "type": "string"
+          },
           "thread": {
             "discriminator": {
               "mapping": {
@@ -4273,6 +4295,62 @@
           "updated_at"
         ],
         "title": "InlineDraft",
+        "type": "object"
+      },
+      "InlinePublicationPreview": {
+        "additionalProperties": false,
+        "properties": {
+          "base_sha": {
+            "pattern": "^[0-9a-f]{40}(?:[0-9a-f]{24})?$",
+            "title": "Base Sha",
+            "type": "string"
+          },
+          "digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Digest",
+            "type": "string"
+          },
+          "drafts": {
+            "items": {
+              "$ref": "#/components/schemas/InlineDraft"
+            },
+            "title": "Drafts",
+            "type": "array"
+          },
+          "head_sha": {
+            "pattern": "^[0-9a-f]{40}(?:[0-9a-f]{24})?$",
+            "title": "Head Sha",
+            "type": "string"
+          },
+          "patch_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Patch Sha256",
+            "type": "string"
+          },
+          "pr_url": {
+            "title": "Pr Url",
+            "type": "string"
+          },
+          "provider": {
+            "title": "Provider",
+            "type": "string"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "provider",
+          "pr_url",
+          "base_sha",
+          "head_sha",
+          "patch_sha256",
+          "digest",
+          "drafts"
+        ],
+        "title": "InlinePublicationPreview",
         "type": "object"
       },
       "LaunchRunnerRequest": {
@@ -6799,6 +6877,11 @@
           "can_draft_inline": {
             "default": false,
             "title": "Can Draft Inline",
+            "type": "boolean"
+          },
+          "can_publish_inline": {
+            "default": false,
+            "title": "Can Publish Inline",
             "type": "boolean"
           },
           "can_use_review_workspace": {
@@ -23960,6 +24043,154 @@
           }
         },
         "summary": "Discard Inline Draft",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/studio/review-runs/{run_id}/discussion/inline-publication/confirm": {
+      "post": {
+        "operationId": "confirm_inline_publication_v1_studio_review_runs__run_id__discussion_inline_publication_confirm_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "confirm": {
+                    "const": true,
+                    "title": "Confirm",
+                    "type": "boolean"
+                  },
+                  "digest": {
+                    "pattern": "^[0-9a-f]{64}$",
+                    "title": "Digest",
+                    "type": "string"
+                  },
+                  "selected": {
+                    "items": {
+                      "$ref": "#/components/schemas/InlineDraftSelection"
+                    },
+                    "maxItems": 8,
+                    "minItems": 1,
+                    "title": "Selected",
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "selected",
+                  "digest",
+                  "confirm"
+                ],
+                "title": "ConfirmInlinePublication",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InlinePublicationPreview"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Confirm Inline Publication",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/studio/review-runs/{run_id}/discussion/inline-publication/preview": {
+      "post": {
+        "operationId": "preview_inline_publication_v1_studio_review_runs__run_id__discussion_inline_publication_preview_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "selected": {
+                    "items": {
+                      "$ref": "#/components/schemas/InlineDraftSelection"
+                    },
+                    "maxItems": 8,
+                    "minItems": 1,
+                    "title": "Selected",
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "selected"
+                ],
+                "title": "InlinePublicationRequest",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InlinePublicationPreview"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Preview Inline Publication",
         "tags": [
           "sessions"
         ]

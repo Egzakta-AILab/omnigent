@@ -841,7 +841,7 @@ def test_inline_reply_checks_membership_and_posts_once_to_original_comment(
 
 
 @pytest.mark.parametrize("side,start", [("LEFT", 10), ("RIGHT", None)])
-@pytest.mark.parametrize("transport", ["runner", "host"])
+@pytest.mark.parametrize("transport", ["runner", "host", "studio"])
 async def test_new_review_thread_publishes_once_with_canonical_identity(
     tracked: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -898,9 +898,40 @@ async def test_new_review_thread_publishes_once_with_canonical_identity(
     else:
         from omnigent.host.connect import HostProcess
 
-        result = HostProcess._dispatch_fs_write_op(
-            tracked, "github_review_thread_create", {**params, "session_id": "session"}
-        )
+        if transport == "studio":
+            from omnigent.git_providers import resolve_remote
+            from omnigent.studio import workspace
+
+            remote = resolve_remote("https://github.com/acme/widgets.git")
+            assert remote is not None
+            monkeypatch.setattr(
+                workspace,
+                "resolve_workspace_github_repository",
+                lambda root, repository: (root / repository, remote, True),
+            )
+            result = HostProcess._dispatch_fs_write_op(
+                tracked,
+                "studio_project_pull_request_publish_inline",
+                {
+                    "session_id": "project",
+                    "repository": ".",
+                    "pr_url": PR_URL,
+                    "body": body,
+                    "base_sha": anchor["base_sha"],
+                    "head_sha": anchor["head_sha"],
+                    "anchor": {
+                        "kind": "diff",
+                        "path": anchor["path"],
+                        "side": "base" if side == "LEFT" else "head",
+                        "start": start or anchor["line"],
+                        "end": anchor["line"],
+                    },
+                },
+            )
+        else:
+            result = HostProcess._dispatch_fs_write_op(
+                tracked, "github_review_thread_create", {**params, "session_id": "session"}
+            )
     assert result["thread"]["id"] == "thread-1"
     assert result["thread"]["comments"]["data"][0]["id"] == "comment-1"
     assert result["thread"]["side"] == side

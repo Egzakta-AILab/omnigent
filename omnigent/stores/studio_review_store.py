@@ -42,6 +42,8 @@ from omnigent.studio.reviews.discussion import (
     DiffDiscussionAnchor,
     DiscussionAnchor,
     InlineDraft,
+    InlineDraftSelection,
+    InlinePublicationState,
     QuestionAnswer,
     QuestionDispatch,
     QuestionInput,
@@ -1006,6 +1008,8 @@ class StudioReviewStore:
             version=row.version,
             created_at=row.created_at,
             updated_at=row.updated_at,
+            publication_state=cast(InlinePublicationState, row.publication_state),
+            provider_url=row.provider_url,
         )
 
     def list_inline_drafts(
@@ -1074,6 +1078,7 @@ class StudioReviewStore:
                 body=request.body,
                 version=1,
                 discarded=False,
+                publication_state="draft",
                 created_at=now,
                 updated_at=now,
             )
@@ -1104,6 +1109,8 @@ class StudioReviewStore:
                 if body is None and row.version == version + 1:
                     return None
                 raise ReviewNotFoundError("Inline draft not found")
+            if row.publication_state != "draft":
+                raise ReviewConflictError("This draft is locked for publication")
             if body is not None and row.version in (version, version + 1) and row.body == body:
                 return self._inline_draft(row)
             if row.version != version:
@@ -1115,6 +1122,62 @@ class StudioReviewStore:
             return None if row.discarded else self._inline_draft(row)
 
         return run_write_transaction(self._write, "change_inline_review_draft", write)
+
+    def claim_inline_publication(
+        self,
+        run_id: str,
+        *,
+        owner: str | None,
+        selected: list[InlineDraftSelection],
+        digest: str,
+    ) -> tuple[list[InlineDraft], bool]:
+        token = bytes.fromhex(digest)
+
+        def write(session: Session) -> tuple[list[InlineDraft], bool]:
+            generation = self._lock_discussion_writer(session, run_id, owner, owner)
+            rows = []
+            for choice in selected:
+                row = session.get(
+                    SqlStudioInlineDraft, (current_workspace_id(), run_id, choice.id)
+                )
+                if (
+                    row is None
+                    or row.discarded
+                    or (row.actor_scope, row.actor_generation) != (_owner_scope(owner), generation)
+                    or row.version != choice.version
+                ):
+                    raise ReviewConflictError("The selected drafts changed. Create a new preview.")
+                rows.append(row)
+            if all(row.publication_digest == token for row in rows):
+                return [self._inline_draft(row) for row in rows], False
+            if any(row.publication_state != "draft" for row in rows):
+                raise ReviewConflictError("A selected draft is already claimed for publication")
+            for row in rows:
+                row.publication_digest = token
+                row.publication_state = "sending"
+                row.updated_at = time.time_ns() // 1_000_000
+            return [self._inline_draft(row) for row in rows], True
+
+        return run_write_transaction(self._write, "claim_inline_review_publication", write)
+
+    def finish_inline_publication(
+        self, run_id: str, draft_id: str, *, digest: str, provider_url: str | None
+    ) -> InlineDraft:
+        def write(session: Session) -> InlineDraft:
+            row = session.get(
+                SqlStudioInlineDraft,
+                (current_workspace_id(), run_id, draft_id),
+                with_for_update=True,
+            )
+            if row is None or row.publication_digest != bytes.fromhex(digest):
+                raise ReviewConflictError("The publication reservation was lost")
+            if row.publication_state == "sending":
+                row.publication_state = "posted" if provider_url else "unknown"
+                row.provider_url = provider_url
+                row.updated_at = time.time_ns() // 1_000_000
+            return self._inline_draft(row)
+
+        return run_write_transaction(self._write, "finish_inline_review_publication", write)
 
     @staticmethod
     def _question_record(row: SqlStudioReviewQuestion) -> QuestionRecord:

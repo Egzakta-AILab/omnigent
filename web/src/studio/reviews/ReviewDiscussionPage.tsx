@@ -15,6 +15,7 @@ import {
 } from "./api";
 import { FindingReproductions } from "./FindingReproductions";
 import { InlineDrafts, type DraftAttempt } from "./InlineDrafts";
+import { InlinePublication } from "./InlinePublication";
 import { DiscussionQuestions, type QuestionAttempt } from "./DiscussionQuestions";
 import { ReviewDiff } from "./ReviewDiff";
 
@@ -221,6 +222,13 @@ function DiscussionContent({
           </div>
         </header>
         <Sharing discussion={discussion} refresh={refresh} />
+        {discussion.can_publish_inline && !!discussion.inline_drafts?.length && (
+          <InlinePublication
+            runId={discussion.id}
+            drafts={discussion.inline_drafts}
+            refresh={refresh}
+          />
+        )}
         <div className="grid min-w-0 gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(320px,0.8fr)]">
           <section className="min-w-0 space-y-3" aria-label="Review context">
             <details className="rounded-md border p-3">

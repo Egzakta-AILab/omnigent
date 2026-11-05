@@ -4484,6 +4484,10 @@ class HostProcess:
 
         from omnigent.runner import pr_resource
 
+        if op == "studio_project_pull_request_publish_inline":
+            from omnigent.studio.workspace import publish_project_inline_comment
+
+            return publish_project_inline_comment(Path(workspace), params)
         if op == "studio_review_profile_editor":
             from omnigent.studio.reviews.profiles import write_review_profile_editor
 
