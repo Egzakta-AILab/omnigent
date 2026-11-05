@@ -260,6 +260,7 @@ from omnigent.server.schemas import (
     ReadStatePutRequest,
     ResetSessionModelOverrideRequest,
     ResetSessionModelOverrideResponse,
+    SessionCreateInput,
     SessionCreateRequest,
     SessionEventInput,
     SessionFamily,
@@ -309,6 +310,7 @@ from omnigent.util.claude_launch_args import (
     claude_legacy_launch_prompt,
     without_claude_session_id_arg,
 )
+from omnigent.studio.reviews.models import ReviewPass, ReviewProfile
 from omnigent.util.cost_plan import (
     reserved_cost_control_keys,
 )
@@ -339,6 +341,8 @@ ClearSessionIntoFreshSession = Callable[
     [Request, Conversation, Callable[[], Awaitable[None]]], Awaitable[str]
 ]
 _SESSION_LIST_BATCH_SIZE = 1000
+
+ReviewCreate = Callable[[Request, str | None, ReviewPass, str], Awaitable[SessionResponse]]
 
 
 def _require_attachment_compatible_history(
@@ -591,6 +595,7 @@ def register_core_routes(
     project_store: ProjectStore | None = None,
     background_title_coordinator: BackgroundSessionTitleCoordinator | None = None,
     pull_request_refresher: server_prs.PullRequestRefresher | None = None,
+    register_review_create: Callable[[ReviewCreate], None] | None = None,
 ) -> ClearSessionIntoFreshSession:
     """Register the core session routes on router.
 
@@ -1629,6 +1634,17 @@ def register_core_routes(
                         "Sender host/workspace is invalid for independent creation",
                         code=ErrorCode.INVALID_INPUT,
                     ) from exc
+        return await _create_existing_session(request, user_id, body, source=source)
+
+    async def _create_existing_session(
+        request: Request,
+        user_id: str | None,
+        body: SessionCreateInput,
+        *,
+        source: Conversation | None = None,
+        review_profile: ReviewProfile | None = None,
+        reviewer_session_id: str | None = None,
+    ) -> SessionResponse:
         agent_sibling = False
         if source is not None and request.app.state.feature_flags.enabled(
             Feature.SIBLING_SESSIONS
@@ -1704,6 +1720,8 @@ def register_core_routes(
             launched_by_scheduled_task_id=(
                 launching_task.id if launching_task is not None else None
             ),
+            review_profile=review_profile,
+            conversation_id=reviewer_session_id,
         )
         # Notify the runner about the new session so it can resolve
         # the spec and cache sub_agent_name before the first turn.
@@ -1865,6 +1883,11 @@ def register_core_routes(
                     _publish_terminal_pending(resp.id, False)
                 resp.runner_id = runner_id
                 resp.host_id = launch_host_id
+            if review_profile is not None and (launched is None or launched[1]):
+                raise OmnigentError(
+                    "The reviewer runner launch could not be confirmed",
+                    code=ErrorCode.RUNNER_UNAVAILABLE,
+                )
 
         # Default-public grant only once every launch step has been accepted, so a
         # rejected request never leaves a public session behind. Sub-agent
@@ -1872,8 +1895,9 @@ def register_core_routes(
         if (
             user_id is not None
             and body.parent_session_id is None
-            and orchestration_source is None
+            and source is None
             and body.sibling_source_id is None
+            and review_profile is None
         ):
             await _grant_default_public(
                 request.app.state,
@@ -1892,6 +1916,36 @@ def register_core_routes(
             resp.family = families.get(conv.id)
         add_audit_attrs(session_id=resp.id, agent=resp.agent_id)
         return resp
+
+    async def _create_reviewer_session(
+        request: Request,
+        user_id: str | None,
+        review: ReviewPass,
+        session_id: str,
+    ) -> SessionResponse:
+        """Create an independent reviewer with the captured host, workspace and profile."""
+        if user_id != review.owner_user_id or user_id != _require_user(request, auth_provider):
+            raise OmnigentError("Review is not owned by the caller", code=ErrorCode.FORBIDDEN)
+        if session_id == review.target.source_session_id:
+            raise OmnigentError("A reviewer requires its own session", code=ErrorCode.CONFLICT)
+        profile = review.profile
+        return await _create_existing_session(
+            request,
+            user_id,
+            SessionCreateRequest(
+                agent_id=profile.agent_id,
+                host_id=review.target.host_id,
+                workspace=review.target.workspace,
+                title=f"Review PR #{review.target.pr_number}",
+                model_override=profile.model,
+                reasoning_effort=profile.reasoning_effort,
+            ),
+            review_profile=profile,
+            reviewer_session_id=session_id,
+        )
+
+    if register_review_create is not None:
+        register_review_create(_create_reviewer_session)
 
     async def _create_bundled_session_from_multipart(
         request: Request,

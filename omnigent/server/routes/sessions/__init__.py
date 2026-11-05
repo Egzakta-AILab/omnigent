@@ -909,9 +909,9 @@ def create_sessions_router(
 
     from omnigent.server.routes.sessions.routes_agent import register_agent_routes
     from omnigent.server.routes.sessions.routes_browser import register_browser_routes
-    from omnigent.server.routes.sessions.routes_core import register_core_routes
+    from omnigent.server.routes.sessions.routes_core import ReviewCreate, register_core_routes
     from omnigent.server.routes.sessions.routes_elicitations import register_elicitations_routes
-    from omnigent.server.routes.sessions.routes_events import register_events_routes
+    from omnigent.server.routes.sessions.routes_events import ReviewSend, register_events_routes
     from omnigent.server.routes.sessions.routes_hooks import register_hooks_routes
     from omnigent.server.routes.sessions.routes_items import register_items_routes
     from omnigent.server.routes.sessions.routes_permissions import register_permissions_routes
@@ -920,6 +920,17 @@ def create_sessions_router(
 
     if pull_request_refresher is None:
         pull_request_refresher = PullRequestRefresher()
+    review_create: ReviewCreate | None = None
+    review_send: ReviewSend | None = None
+
+    def register_review_create(handler: ReviewCreate) -> None:
+        nonlocal review_create
+        review_create = handler
+
+    def register_review_send(handler: ReviewSend) -> None:
+        nonlocal review_send
+        review_send = handler
+
     clear_session_into_fresh_session = register_core_routes(
         router,
         conversation_store=conversation_store,
@@ -938,6 +949,7 @@ def create_sessions_router(
         project_store=project_store,
         background_title_coordinator=background_title_coordinator,
         pull_request_refresher=pull_request_refresher,
+        register_review_create=register_review_create if studio_review_store is not None else None,
     )
 
     register_hooks_routes(
@@ -957,21 +969,6 @@ def create_sessions_router(
         auth_provider=auth_provider,
         permission_store=permission_store,
         liveness_lookup=liveness_lookup,
-    )
-
-    register_resources_routes(
-        router,
-        conversation_store=conversation_store,
-        agent_store=agent_store,
-        file_store=file_store,
-        artifact_store=artifact_store,
-        runner_router=runner_router,
-        auth_provider=auth_provider,
-        permission_store=permission_store,
-        host_registry=host_registry,
-        register_initial_file_upload=register_initial_file_upload,
-        pull_request_refresher=pull_request_refresher,
-        studio_review_store=studio_review_store,
     )
 
     register_ui_routes(
@@ -1015,6 +1012,24 @@ def create_sessions_router(
         register_runner_ingest=register_runner_ingest,
         register_startup_dispatch=register_startup_dispatch,
         clear_session_into_fresh_session=clear_session_into_fresh_session,
+        register_review_send=register_review_send if studio_review_store is not None else None,
+    )
+
+    register_resources_routes(
+        router,
+        conversation_store=conversation_store,
+        agent_store=agent_store,
+        file_store=file_store,
+        artifact_store=artifact_store,
+        runner_router=runner_router,
+        auth_provider=auth_provider,
+        permission_store=permission_store,
+        host_registry=host_registry,
+        register_initial_file_upload=register_initial_file_upload,
+        pull_request_refresher=pull_request_refresher,
+        studio_review_store=studio_review_store,
+        create_reviewer=review_create,
+        send_review=review_send,
     )
 
     register_permissions_routes(

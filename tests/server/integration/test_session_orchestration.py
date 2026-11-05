@@ -3076,3 +3076,153 @@ async def test_explicit_host_endpoint_refuses_without_capability_or_source(
     )
     assert response.status_code == 403, response.text
     assert {session.id for session in store.list_conversations().data} == before
+
+
+@pytest.mark.parametrize("agent_version_changed", [False, True])
+async def test_studio_reviewer_uses_private_session_and_original_runner(
+    auth_app, peers, db_uri, monkeypatch, agent_version_changed
+):
+    from unittest.mock import AsyncMock
+
+    from fastapi import APIRouter, Request
+
+    from omnigent.db.utils import builtin_agent_id
+    from omnigent.errors import ErrorCode, OmnigentError
+    from omnigent.harness_plugins import native_provider_for_key
+    from omnigent.host.frames import HostLaunchRunnerFrame, HostStatFrame, decode_host_frame
+    from omnigent.native.native_coding_agents import CODEX_NATIVE_AGENT_NAME
+    from omnigent.runtime import _globals
+    from omnigent.server.app import _build_native_bundle, _ensure_builtin_agent
+    from omnigent.server.auth import LEVEL_OWNER, RESERVED_USER_PUBLIC, UnifiedAuthProvider
+    from omnigent.server.routes.sessions import routes_core, routes_events
+    from omnigent.server.schemas import SessionEventInput
+    from omnigent.server.sharing_settings import DefaultPublicSessions
+    from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
+    from omnigent.studio.reviews.models import ReviewPass, ReviewProfile, ReviewTarget
+    from tests.server.integration.test_sessions_permissions import _register_online_host
+
+    source, _, _ = peers
+    agents = SqlAlchemyAgentStore(db_uri)
+    provider = native_provider_for_key("codex")
+    assert provider is not None and _globals._artifact_store is not None
+    _ensure_builtin_agent(
+        agents,
+        _globals._artifact_store,
+        _globals._agent_cache,
+        name=CODEX_NATIVE_AGENT_NAME,
+        bundle_bytes=_build_native_bundle(provider),
+    )
+    reviewer = agents.get(builtin_agent_id(CODEX_NATIVE_AGENT_NAME))
+    assert reviewer is not None
+    conversations = SqlAlchemyConversationStore(db_uri)
+    permissions = SqlAlchemyPermissionStore(db_uri)
+    permissions.grant(RESERVED_USER_PUBLIC, source["id"], LEVEL_READ)
+    host_id = uuid4().hex
+    _register_online_host(auth_app, host_id, "alice")
+    workspace = "/review-workspace"
+    conversations.set_host_id(source["id"], host_id, workspace=workspace)
+    auth_app.state.default_public_sessions = lambda: DefaultPublicSessions.ALL
+    launches = []
+
+    def answer_host(connection, payload):
+        frame = decode_host_frame(payload)
+        if isinstance(frame, HostStatFrame):
+            connection.pending_stats[frame.request_id].set_result(
+                {"status": "ok", "exists": True, "type": "directory", "canonical_path": frame.path}
+            )
+        elif isinstance(frame, HostLaunchRunnerFrame):
+            launches.append(frame)
+            connection.pending_launches[frame.request_id].set_result({"status": "launched"})
+        else:
+            pytest.fail(f"Unexpected host frame: {frame}")
+
+    monkeypatch.setattr(auth_app.state.host_registry, "send_text", answer_host)
+    review = ReviewPass(
+        id=uuid4().hex,
+        owner_user_id="alice",
+        target=ReviewTarget(
+            source_session_id=source["id"],
+            host_id=host_id,
+            workspace=workspace,
+            pr_url="https://github.com/example/project/pull/42",
+            repository="example/project",
+            pr_number=42,
+            base_sha="a" * 40,
+            head_sha="b" * 40,
+        ),
+        profile=ReviewProfile(
+            agent_id=reviewer.id,
+            agent_version=str(reviewer.version + int(agent_version_changed)),
+            harness="codex-native",
+            skill="review",
+        ),
+        state="prepared",
+        dispatch_status="not_requested",
+        reviewer_session_id=None,
+        created_at=1,
+        updated_at=1,
+        version=1,
+    )
+    request = Request(
+        {"type": "http", "app": auth_app, "headers": [(b"x-forwarded-email", b"alice")]}
+    )
+    auth_provider = UnifiedAuthProvider(source="header", local_single_user=False)
+    create_callbacks: list[routes_core.ReviewCreate] = []
+    routes_core.register_core_routes(
+        APIRouter(),
+        conversation_store=conversations,
+        agent_store=agents,
+        agent_cache=_globals._agent_cache,
+        auth_provider=auth_provider,
+        permission_store=permissions,
+        register_review_create=create_callbacks.append,
+    )
+    create_reviewer = create_callbacks[0]
+    if agent_version_changed:
+        with pytest.raises(OmnigentError) as stale:
+            await create_reviewer(request, "alice", review, review.id)
+        assert stale.value.code == ErrorCode.CONFLICT
+        assert conversations.get_conversation(review.id) is None
+        assert not launches
+        return
+
+    created = await create_reviewer(request, "alice", review, review.id)
+    assert created.id == review.id
+    assert created.harness == review.profile.harness
+    assert created.runner_id is not None
+    conv = conversations.get_conversation(review.id)
+    assert conv is not None
+    assert (conv.host_id, conv.workspace, conv.parent_conversation_id, conv.project_id) == (
+        host_id,
+        workspace,
+        None,
+        None,
+    )
+    owner = permissions.get("alice", conv.id)
+    assert owner is not None and owner.level == LEVEL_OWNER
+    assert permissions.get(RESERVED_USER_PUBLIC, conv.id) is None
+    assert [frame.session_id for frame in launches] == [conv.id]
+
+    send_callbacks: list[routes_events.ReviewSend] = []
+    routes_events.register_events_routes(
+        APIRouter(),
+        conversation_store=conversations,
+        agent_store=agents,
+        auth_provider=auth_provider,
+        permission_store=permissions,
+        register_review_send=send_callbacks.append,
+    )
+    wait_for_runner = AsyncMock(return_value=None)
+    monkeypatch.setattr(routes_events, "_get_runner_client", AsyncMock(return_value=None))
+    monkeypatch.setattr(routes_events, "_wait_for_runner_client", wait_for_runner)
+    event = SessionEventInput(
+        type="message",
+        data={"role": "user", "content": [{"type": "input_text", "text": "Review this diff."}]},
+    )
+    with pytest.raises(OmnigentError) as unavailable:
+        await send_callbacks[0](request, conv.id, event, created.runner_id)
+    assert unavailable.value.code == ErrorCode.RUNNER_UNAVAILABLE
+    assert wait_for_runner.await_args.kwargs["runner_id"] == created.runner_id
+    assert [frame.session_id for frame in launches] == [conv.id]
+
+
