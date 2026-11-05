@@ -163,7 +163,7 @@ export interface ReviewRunPage {
 
 export interface ReviewRunReport {
   reviewers: { review_id: string; report: ReviewReport }[];
-  findings: { finding: ReviewFinding; review_ids: string[] }[];
+  findings: { finding: ReviewFinding; review_ids: string[]; finding_key?: string | null }[];
   proposal?: {
     state: "pending" | "incomplete" | "ready";
     plan: ReviewPlan | null;
@@ -172,8 +172,49 @@ export interface ReviewRunReport {
   } | null;
 }
 
+export interface ReproductionSide {
+  commit: string;
+  state: "exited" | "timed_out" | "setup_error";
+  exit_code: number | null;
+  elapsed_ms: number;
+  oom_killed: boolean;
+  output: string;
+  output_truncated: boolean;
+}
+
+export interface AttachedReproduction {
+  digest: string;
+  attached_at: number;
+  provenance: "uploaded";
+  receipt: {
+    observed_at: string;
+    image_id: string;
+    command: string[];
+    timeout_seconds: number;
+    base: ReproductionSide;
+    head: ReproductionSide;
+  };
+}
+
 function reviewRunPath(runId: string) {
   return `/v1/studio/review-runs/${encodeURIComponent(runId)}`;
+}
+
+function reproductionPath(runId: string, findingKey: string) {
+  return `${reviewRunPath(runId)}/findings/${encodeURIComponent(findingKey)}/reproductions`;
+}
+
+export function listFindingReproductions(runId: string, findingKey: string, signal: AbortSignal) {
+  return reviewRequest<AttachedReproduction[]>(reproductionPath(runId, findingKey), { signal });
+}
+
+export async function attachFindingReproduction(runId: string, findingKey: string, file: File) {
+  if (file.size > 192 * 1024) throw new Error("Choose a receipt smaller than 192 KiB.");
+  return reviewRequest<AttachedReproduction>(reproductionPath(runId, findingKey), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: await file.text(),
+  });
 }
 
 function projectReviewRunsPath(projectId: string) {
@@ -235,7 +276,10 @@ export async function getCapturedReviewDiff(
 }
 
 export function getReviewRunReport(runId: string, signal: AbortSignal) {
-  return reviewRequest<ReviewRunReport>(`${reviewRunPath(runId)}/report`, { signal });
+  return reviewRequest<ReviewRunReport>(
+    `${reviewRunPath(runId)}/report?include_finding_keys=true`,
+    { signal },
+  );
 }
 
 export interface ProjectReviewWorkspace {

@@ -7,6 +7,7 @@ import json
 import re
 import time
 import uuid
+from itertools import groupby
 from typing import Any, Literal, TypeVar, cast
 
 from sqlalchemy import select, tuple_, update
@@ -20,6 +21,7 @@ from omnigent.db.db_models import (
     SqlStudioReviewOperation,
     SqlStudioReviewPass,
     SqlStudioReviewPatchChunk,
+    SqlStudioReviewReceiptChunk,
     SqlStudioReviewRun,
     current_workspace_id,
 )
@@ -54,6 +56,14 @@ from omnigent.studio.reviews.models import (
     ReviewState,
     ReviewTarget,
     require_uuid,
+)
+from omnigent.studio.reviews.reproduction import (
+    MAX_REPRODUCTION_BYTES,
+    MAX_REPRODUCTION_CHUNKS,
+    REPRODUCTION_CHUNK_BYTES,
+    AttachedReproduction,
+    ReproductionReceipt,
+    ReproductionSource,
 )
 
 _ACTIONS: dict[ReviewAction, int] = {
@@ -92,6 +102,8 @@ _DISPATCH_STATES: dict[DispatchStatus, int] = {
 _T = TypeVar("_T")
 _HASH = re.compile(r"^[0-9a-f]{64}$")
 _MAX_SNAPSHOT_BYTES = 12_000
+_MAX_RECEIPTS_PER_RUN = 24
+_MAX_RECEIPTS_PER_FINDING = 4
 
 
 class ReviewConflictError(RuntimeError):
@@ -525,16 +537,21 @@ class StudioReviewStore:
                     raise
                 return existing
 
+    @staticmethod
+    def _run_row(
+        session: Session, run_id: str, owner: bytes, *, lock: bool = False
+    ) -> SqlStudioReviewRun | None:
+        query = select(SqlStudioReviewRun).where(
+            SqlStudioReviewRun.workspace_id == current_workspace_id(),
+            SqlStudioReviewRun.owner_scope == owner,
+            SqlStudioReviewRun.id == require_uuid(run_id),
+        )
+        return session.scalar(query.with_for_update() if lock else query)
+
     def get_run(self, run_id: str, *, owner_user_id: str | None) -> ReviewRun | None:
         owner = _owner_scope(owner_user_id)
         with self._session("get_owned_review_run") as session:
-            row = session.scalar(
-                select(SqlStudioReviewRun).where(
-                    SqlStudioReviewRun.workspace_id == current_workspace_id(),
-                    SqlStudioReviewRun.owner_scope == owner,
-                    SqlStudioReviewRun.id == require_uuid(run_id),
-                )
-            )
+            row = self._run_row(session, run_id, owner)
             return self._materialize_runs(session, [row], owner)[0] if row else None
 
     def approve_run_plan(
@@ -548,15 +565,7 @@ class StudioReviewStore:
             raise ReviewConflictError("The review plan exceeds its stored byte budget")
 
         def write(session: Session) -> ReviewRun:
-            row = session.scalar(
-                select(SqlStudioReviewRun)
-                .where(
-                    SqlStudioReviewRun.workspace_id == current_workspace_id(),
-                    SqlStudioReviewRun.owner_scope == owner,
-                    SqlStudioReviewRun.id == require_uuid(run_id),
-                )
-                .with_for_update()
-            )
+            row = self._run_row(session, run_id, owner, lock=True)
             if row is None:
                 raise ReviewNotFoundError("Review run not found")
             run = self._materialize_runs(session, [row], owner)[0]
@@ -591,6 +600,127 @@ class StudioReviewStore:
             return run.model_copy(update={"plan": plan})
 
         return run_write_transaction(self._write, "approve_review_run_plan", write)
+
+    def attach_reproduction(
+        self,
+        run_id: str,
+        finding_key: str,
+        receipt: ReproductionReceipt,
+        *,
+        owner_user_id: str | None,
+    ) -> AttachedReproduction:
+        owner = _owner_scope(owner_user_id)
+        key = bytes.fromhex(finding_key)
+        payload = receipt.model_dump_json().encode("utf-8")
+        if not 1 <= len(payload) <= MAX_REPRODUCTION_BYTES:
+            raise ReviewConflictError("The reproduction receipt exceeds its stored byte budget")
+        digest = hashlib.sha256(payload).digest()
+
+        def write(session: Session) -> AttachedReproduction:
+            run = self._run_row(session, run_id, owner, lock=True)
+            if run is None:
+                raise ReviewNotFoundError("Review run not found")
+            target = ReviewTarget.model_validate_json(run.target_json)
+            source = receipt.source
+            if (
+                run.patch_sha256 is None
+                or source
+                != ReproductionSource(
+                    run_id=run.id,
+                    pr_url=target.pr_url,
+                    patch_sha256=run.patch_sha256,
+                    base_sha=target.base_sha,
+                    head_sha=target.head_sha,
+                )
+                or (receipt.base.commit, receipt.head.commit) != (target.base_sha, target.head_sha)
+            ):
+                raise ReviewConflictError(
+                    "The receipt does not match this saved PR revision and diff"
+                )
+            headers = list(
+                session.execute(
+                    select(
+                        SqlStudioReviewReceiptChunk.finding_key,
+                        SqlStudioReviewReceiptChunk.receipt_digest,
+                        SqlStudioReviewReceiptChunk.attached_at,
+                    )
+                    .where(
+                        SqlStudioReviewReceiptChunk.workspace_id == current_workspace_id(),
+                        SqlStudioReviewReceiptChunk.run_id == run.id,
+                        SqlStudioReviewReceiptChunk.position == 0,
+                    )
+                    .limit(_MAX_RECEIPTS_PER_RUN + 1)
+                )
+            )
+            matching = [entry for entry in headers if entry.finding_key == key]
+            for entry in matching:
+                if entry.receipt_digest == digest:
+                    return AttachedReproduction(
+                        digest=digest.hex(), attached_at=entry.attached_at, receipt=receipt
+                    )
+            if len(headers) >= _MAX_RECEIPTS_PER_RUN or len(matching) >= _MAX_RECEIPTS_PER_FINDING:
+                raise ReviewConflictError("This review has reached its reproduction receipt limit")
+            attached = time.time_ns() // 1_000_000
+            session.add_all(
+                SqlStudioReviewReceiptChunk(
+                    workspace_id=current_workspace_id(),
+                    run_id=run.id,
+                    finding_key=key,
+                    receipt_digest=digest,
+                    position=position,
+                    attached_at=attached,
+                    payload=payload[offset : offset + REPRODUCTION_CHUNK_BYTES],
+                )
+                for position, offset in enumerate(range(0, len(payload), REPRODUCTION_CHUNK_BYTES))
+            )
+            return AttachedReproduction(digest=digest.hex(), attached_at=attached, receipt=receipt)
+
+        return run_write_transaction(self._write, "attach_review_reproduction", write)
+
+    def list_reproductions(
+        self, run_id: str, finding_key: str, *, owner_user_id: str | None
+    ) -> list[AttachedReproduction]:
+        with self._session("list_review_reproductions") as session:
+            run = self._run_row(session, run_id, _owner_scope(owner_user_id))
+            if run is None:
+                raise ReviewNotFoundError("Review run not found")
+            chunk = SqlStudioReviewReceiptChunk
+            rows = list(
+                session.scalars(
+                    select(chunk)
+                    .where(
+                        chunk.workspace_id == current_workspace_id(),
+                        chunk.run_id == run.id,
+                        chunk.finding_key == bytes.fromhex(finding_key),
+                    )
+                    .order_by(chunk.attached_at.desc(), chunk.receipt_digest, chunk.position)
+                    .limit(_MAX_RECEIPTS_PER_FINDING * MAX_REPRODUCTION_CHUNKS + 1)
+                )
+            )
+            results = []
+            for digest, parts in groupby(rows, key=lambda row: row.receipt_digest):
+                chunks = list(parts)
+                payload = b"".join(part.payload for part in chunks)
+                if (
+                    len(results) >= _MAX_RECEIPTS_PER_FINDING
+                    or any(
+                        part.position != index
+                        or not 1 <= len(part.payload) <= REPRODUCTION_CHUNK_BYTES
+                        for index, part in enumerate(chunks)
+                    )
+                    or hashlib.sha256(payload).digest() != digest
+                ):
+                    raise ReviewConflictError(
+                        "The reproduction receipt failed its integrity check"
+                    )
+                results.append(
+                    AttachedReproduction(
+                        digest=digest.hex(),
+                        attached_at=chunks[0].attached_at,
+                        receipt=ReproductionReceipt.model_validate_json(payload),
+                    )
+                )
+            return results
 
     def get_run_patch(self, run_id: str, *, owner_user_id: str | None) -> str | None:
         run_id = require_uuid(run_id)

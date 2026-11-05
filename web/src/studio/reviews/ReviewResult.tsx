@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ExternalLinkIcon } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -44,6 +45,7 @@ export function FindingCard({
   headRepoUrl,
   onOpenSource,
   onOpenCapturedSource,
+  children,
 }: {
   finding: ReviewFinding;
   review: ReviewPass;
@@ -51,6 +53,7 @@ export function FindingCard({
   headRepoUrl?: string | null;
   onOpenSource?: (source: ReviewSource) => void;
   onOpenCapturedSource?: (source: ReviewSource) => void;
+  children?: ReactNode;
 }) {
   const source = reviewSource(review, finding);
   // GitHub's old diff side uses the merge base, which can differ from the PR base tip.
@@ -108,6 +111,7 @@ export function FindingCard({
           )}
         </div>
       )}
+      {children}
     </li>
   );
 }

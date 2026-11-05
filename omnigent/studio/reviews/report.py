@@ -18,7 +18,7 @@ from omnigent.entities.conversation import (
 )
 from omnigent.errors import StaleCursorError
 from omnigent.stores.conversation_store import ConversationStore
-from omnigent.studio.reviews.evidence import Anchor
+from omnigent.studio.reviews.evidence import Anchor, patch_digest
 from omnigent.studio.reviews.models import FrozenModel, ReviewPass, ReviewPlanProposal, Sha
 
 _REPORT_FENCE = "```studio-review-v1"
@@ -104,6 +104,7 @@ class ReviewerRunReport(FrozenModel):
 class ConsolidatedFinding(FrozenModel):
     finding: ReviewFinding
     review_ids: list[str]
+    finding_key: str | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class ConsolidatedReviewReport(FrozenModel):
@@ -112,7 +113,9 @@ class ConsolidatedReviewReport(FrozenModel):
     proposal: ReviewPlanProposal | None = None
 
 
-def consolidate_reports(reports: list[ReviewerRunReport]) -> ConsolidatedReviewReport:
+def consolidate_reports(
+    reports: list[ReviewerRunReport], *, include_finding_keys: bool = False
+) -> ConsolidatedReviewReport:
     """Group exact duplicates and keep disagreements at the same line separate."""
     grouped: dict[str, tuple[ReviewFinding, list[str]]] = {}
     for entry in reports:
@@ -125,8 +128,12 @@ def consolidate_reports(reports: list[ReviewerRunReport]) -> ConsolidatedReviewR
     return ConsolidatedReviewReport(
         reviewers=reports,
         findings=[
-            ConsolidatedFinding(finding=finding, review_ids=sources)
-            for finding, sources in grouped.values()
+            ConsolidatedFinding(
+                finding=finding,
+                review_ids=sources,
+                finding_key=patch_digest(key) if include_finding_keys else None,
+            )
+            for key, (finding, sources) in grouped.items()
         ],
     )
 

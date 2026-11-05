@@ -573,6 +573,37 @@
         "title": "AgentObject",
         "type": "object"
       },
+      "AttachedReproduction": {
+        "additionalProperties": false,
+        "properties": {
+          "attached_at": {
+            "format": "int64",
+            "title": "Attached At",
+            "type": "integer"
+          },
+          "digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Digest",
+            "type": "string"
+          },
+          "provenance": {
+            "const": "uploaded",
+            "default": "uploaded",
+            "title": "Provenance",
+            "type": "string"
+          },
+          "receipt": {
+            "$ref": "#/components/schemas/ReproductionReceipt"
+          }
+        },
+        "required": [
+          "digest",
+          "attached_at",
+          "receipt"
+        ],
+        "title": "AttachedReproduction",
+        "type": "object"
+      },
       "AutomaticSessionRenameRequest": {
         "additionalProperties": false,
         "description": "Proposed title for a framework or agent-initiated rename.",
@@ -1911,6 +1942,17 @@
         "properties": {
           "finding": {
             "$ref": "#/components/schemas/ReviewFinding"
+          },
+          "finding_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finding Key"
           },
           "review_ids": {
             "items": {
@@ -5734,6 +5776,203 @@
           "delta"
         ],
         "title": "ReasoningTextDeltaEvent",
+        "type": "object"
+      },
+      "ReproductionReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "base": {
+            "$ref": "#/components/schemas/ReproductionSide"
+          },
+          "command": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 8192,
+            "minItems": 1,
+            "title": "Command",
+            "type": "array"
+          },
+          "head": {
+            "$ref": "#/components/schemas/ReproductionSide"
+          },
+          "image_id": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "Image Id",
+            "type": "string"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "title": "Observed At",
+            "type": "string"
+          },
+          "runtime": {
+            "const": "docker-no-network",
+            "default": "docker-no-network",
+            "title": "Runtime",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": "omnigent.studio.reproduction.v1",
+            "default": "omnigent.studio.reproduction.v1",
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReproductionSource"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "timeout_seconds": {
+            "format": "int64",
+            "maximum": 300.0,
+            "minimum": 1.0,
+            "title": "Timeout Seconds",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "observed_at",
+          "image_id",
+          "command",
+          "timeout_seconds",
+          "base",
+          "head"
+        ],
+        "title": "ReproductionReceipt",
+        "type": "object"
+      },
+      "ReproductionSide": {
+        "additionalProperties": false,
+        "properties": {
+          "archive_bytes": {
+            "exclusiveMinimum": 0.0,
+            "format": "int64",
+            "maximum": 134217728.0,
+            "title": "Archive Bytes",
+            "type": "integer"
+          },
+          "archive_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Archive Sha256",
+            "type": "string"
+          },
+          "commit": {
+            "pattern": "^[0-9a-f]{40}(?:[0-9a-f]{24})?$",
+            "title": "Commit",
+            "type": "string"
+          },
+          "elapsed_ms": {
+            "format": "int64",
+            "minimum": 0.0,
+            "title": "Elapsed Ms",
+            "type": "integer"
+          },
+          "exit_code": {
+            "anyOf": [
+              {
+                "format": "int64",
+                "maximum": 255.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exit Code"
+          },
+          "oom_killed": {
+            "default": false,
+            "title": "Oom Killed",
+            "type": "boolean"
+          },
+          "output": {
+            "maxLength": 8192,
+            "title": "Output",
+            "type": "string"
+          },
+          "output_bytes": {
+            "format": "int64",
+            "maximum": 9.223372036854776e+18,
+            "minimum": 0.0,
+            "title": "Output Bytes",
+            "type": "integer"
+          },
+          "output_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Output Sha256",
+            "type": "string"
+          },
+          "output_truncated": {
+            "title": "Output Truncated",
+            "type": "boolean"
+          },
+          "state": {
+            "enum": [
+              "exited",
+              "timed_out",
+              "setup_error"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "commit",
+          "archive_sha256",
+          "archive_bytes",
+          "state",
+          "elapsed_ms",
+          "output",
+          "output_sha256",
+          "output_bytes",
+          "output_truncated"
+        ],
+        "title": "ReproductionSide",
+        "type": "object"
+      },
+      "ReproductionSource": {
+        "additionalProperties": false,
+        "properties": {
+          "base_sha": {
+            "pattern": "^[0-9a-f]{40}(?:[0-9a-f]{24})?$",
+            "title": "Base Sha",
+            "type": "string"
+          },
+          "head_sha": {
+            "pattern": "^[0-9a-f]{40}(?:[0-9a-f]{24})?$",
+            "title": "Head Sha",
+            "type": "string"
+          },
+          "patch_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Patch Sha256",
+            "type": "string"
+          },
+          "pr_url": {
+            "title": "Pr Url",
+            "type": "string"
+          },
+          "run_id": {
+            "pattern": "^[0-9a-f]{32}$",
+            "title": "Run Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "pr_url",
+          "patch_sha256",
+          "base_sha",
+          "head_sha"
+        ],
+        "title": "ReproductionSource",
         "type": "object"
       },
       "ResetSessionModelOverrideRequest": {
@@ -22285,6 +22524,122 @@
         ]
       }
     },
+    "/v1/studio/review-runs/{run_id}/findings/{finding_key}/reproductions": {
+      "get": {
+        "operationId": "get_finding_reproductions_v1_studio_review_runs__run_id__findings__finding_key__reproductions_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "finding_key",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{64}$",
+              "title": "Finding Key",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/AttachedReproduction"
+                  },
+                  "title": "Response Get Finding Reproductions V1 Studio Review Runs  Run Id  Findings  Finding Key  Reproductions Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Finding Reproductions",
+        "tags": [
+          "sessions"
+        ]
+      },
+      "post": {
+        "operationId": "attach_finding_reproduction_v1_studio_review_runs__run_id__findings__finding_key__reproductions_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "finding_key",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{64}$",
+              "title": "Finding Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReproductionReceipt"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttachedReproduction"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Attach Finding Reproduction",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
     "/v1/studio/review-runs/{run_id}/patch": {
       "get": {
         "operationId": "get_review_run_patch_v1_studio_review_runs__run_id__patch_get",
@@ -22394,6 +22749,16 @@
             "schema": {
               "title": "Run Id",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_finding_keys",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include Finding Keys",
+              "type": "boolean"
             }
           }
         ],

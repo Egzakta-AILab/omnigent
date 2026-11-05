@@ -1007,6 +1007,68 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
             and entry["report"]["unverified_findings"][0]["line"] == 200
             for entry in ready.json()["reviewers"]
         )
+        assert "finding_key" not in ready.json()["findings"][0]
+        keyed_report = await auth_client.get(
+            f"{run_path}/report", params={"include_finding_keys": True}
+        )
+        finding_key = keyed_report.json()["findings"][0]["finding_key"]
+        reproduction_path = f"{run_path}/findings/{finding_key}/reproductions"
+        assert (await auth_client.get(reproduction_path)).json() == []
+        side = {
+            "archive_sha256": "e" * 64,
+            "archive_bytes": 10_240,
+            "state": "exited",
+            "exit_code": 0,
+            "oom_killed": False,
+            "elapsed_ms": 250,
+            "output": "x" * 8192,
+            "output_sha256": "f" * 64,
+            "output_bytes": 8192,
+            "output_truncated": False,
+        }
+        receipt = {
+            "schema_version": "omnigent.studio.reproduction.v1",
+            "observed_at": "2026-11-05T00:00:00Z",
+            "runtime": "docker-no-network",
+            "image_id": "sha256:" + "1" * 64,
+            "command": ["python", "check.py"],
+            "timeout_seconds": 60,
+            "source": {
+                "run_id": run["id"],
+                "pr_url": pr_url,
+                "patch_sha256": run["patch_sha256"],
+                "base_sha": base_sha,
+                "head_sha": current_head,
+            },
+            "base": {**side, "commit": base_sha},
+            "head": {**side, "commit": current_head, "exit_code": 1},
+        }
+        stale_receipt = {
+            **receipt,
+            "source": {**receipt["source"], "patch_sha256": "0" * 64},
+        }
+        assert (await auth_client.post(reproduction_path, json=stale_receipt)).status_code == 409
+        unknown_finding = f"{run_path}/findings/{'0' * 64}/reproductions"
+        assert (await auth_client.post(unknown_finding, json=receipt)).status_code == 404
+        too_large = await auth_client.post(
+            reproduction_path,
+            content=b" " * (192 * 1024 + 1),
+            headers={"Content-Type": "application/json"},
+        )
+        assert too_large.status_code == 413
+        attached = await auth_client.post(reproduction_path, json=receipt)
+        assert attached.status_code == 200, attached.text
+        evidence = attached.json()
+        assert evidence["provenance"] == "uploaded" and evidence["receipt"] == receipt
+        assert (await auth_client.post(reproduction_path, json=receipt)).json() == evidence
+        assert (await auth_client.get(reproduction_path)).json() == [evidence]
+        foreign_headers = {"X-Forwarded-Email": "bob"}
+        assert (
+            await auth_client.get(reproduction_path, headers=foreign_headers)
+        ).status_code == 404
+        assert (
+            await auth_client.post(reproduction_path, json=receipt, headers=foreign_headers)
+        ).status_code == 404
         review_store = StudioReviewStore(db_uri)
         for member_id in members:
             member = review_store.get(member_id, owner_user_id="alice")
@@ -1016,6 +1078,7 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
             assert set(json.loads(snapshot)) == {"state", "summary", "findings", "message_id"}
         save_assistant_message(next(iter(members)), "A later response from the reviewer.")
         assert (await auth_client.get(f"{run_path}/report")).json() == ready.json()
+        assert (await auth_client.get(reproduction_path)).json() == [evidence]
 
         private_run = await auth_client.get(run_path, headers={"X-Forwarded-Email": "bob"})
         assert private_run.status_code == 404, private_run.text

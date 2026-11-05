@@ -160,8 +160,12 @@ it.each(["single", "run", "coordinated"] as const)(
     const security = { id: "security", label: "Security", digest: "c".repeat(64) };
     const runsPath = "/v1/projects/project/studio/review-runs";
     const runPath = "/v1/studio/review-runs/run";
+    const findingKey = "f".repeat(64);
+    const reproductionPath = `${runPath}/findings/${findingKey}/reproductions`;
     let runWasStarted = false;
     let planWasApproved = false;
+    let receiptAttached = false;
+    let receiptAccessDenied = false;
     const captured = {
       id: "review",
       target: {
@@ -187,6 +191,7 @@ it.each(["single", "run", "coordinated"] as const)(
       target: captured.target,
       reviewers: [launched, second],
       created_at: 0,
+      patch_sha256: "e".repeat(64),
     };
     const plan = {
       coordinator_id: "coordinator",
@@ -218,6 +223,32 @@ it.each(["single", "run", "coordinated"] as const)(
       line: 12,
       severity: "high",
     };
+    const receipt = {
+      observed_at: "2026-11-05T10:30:00Z",
+      image_id: `sha256:${"7".repeat(64)}`,
+      command: ["python", "check.py"],
+      timeout_seconds: 60,
+      base: {
+        commit: baseSha,
+        state: "exited",
+        exit_code: 0,
+        elapsed_ms: 200,
+        output: "1 request",
+      },
+      head: {
+        commit: headSha,
+        state: "exited",
+        exit_code: 1,
+        elapsed_ms: 250,
+        output: "3 requests",
+      },
+    };
+    const evidence = { digest: "8".repeat(64), provenance: "uploaded", attached_at: 0, receipt };
+    const unsafe = {
+      ...evidence,
+      digest: "9".repeat(64),
+      receipt: { ...receipt, command: ["check", "\u001b[201~"] },
+    };
     const posts: { path: string; body: unknown }[] = [];
     vi.mocked(authenticatedFetch).mockImplementation(async (input, init) => {
       const url = new URL(String(input), "http://localhost");
@@ -227,6 +258,10 @@ it.each(["single", "run", "coordinated"] as const)(
         if (path === capturePath) return Response.json({ review: captured });
         if (path === launchPath) return Response.json(launched);
         if (path === runsPath) return Response.json(visibleRun());
+        if (path === reproductionPath) {
+          receiptAttached = true;
+          return Response.json(evidence);
+        }
         if (path === `${runPath}/start`) {
           runWasStarted = true;
           if (JSON.parse(String(init.body)).proposal_digest === digest) planWasApproved = true;
@@ -235,6 +270,11 @@ it.each(["single", "run", "coordinated"] as const)(
       }
       if (path === runsPath)
         return Response.json({ entries: runWasStarted ? [visibleRun()] : [], next_cursor: null });
+      if (path === reproductionPath) {
+        if (receiptAccessDenied)
+          return Response.json({ detail: "Access changed" }, { status: 404 });
+        return Response.json(receiptAttached ? [evidence, unsafe] : []);
+      }
       if (path === `${runPath}/report`) {
         if (mode === "coordinated") {
           return Response.json(
@@ -262,7 +302,7 @@ it.each(["single", "run", "coordinated"] as const)(
               report: { state: "ready", summary: "Security report", findings: [finding] },
             },
           ],
-          findings: [{ finding, review_ids: ["review", "other"] }],
+          findings: [{ finding, review_ids: ["review", "other"], finding_key: findingKey }],
         });
       }
       if (path === capturePath) {
@@ -343,6 +383,23 @@ it.each(["single", "run", "coordinated"] as const)(
           { profile_id: "security", host_id: "selected-host", expected_head_sha: headSha },
         ],
       });
+      await user.click(screen.getByText("Reproductions"));
+      const input = await screen.findByLabelText("Reproduction receipt");
+      const file = new File([JSON.stringify(receipt)], "receipt.json", {
+        type: "application/json",
+      });
+      Object.defineProperty(file, "text", { value: async () => JSON.stringify(receipt) });
+      await user.upload(input, file);
+      await user.click(screen.getByRole("button", { name: "Attach receipt" }));
+      expect(await screen.findAllByText(/Uploaded receipt/)).toHaveLength(2);
+      expect(posts[2]).toEqual({ path: reproductionPath, body: receipt });
+      expect(screen.getAllByRole("button", { name: "Copy rerun command" })[1]).toBeDisabled();
+      await user.click(screen.getAllByText(/Exit 1/)[0]);
+      expect(screen.getAllByText("3 requests")[0]).toBeVisible();
+      receiptAccessDenied = true;
+      await client.invalidateQueries({ queryKey: ["studio-finding-reproductions"] });
+      expect(await screen.findByRole("alert")).toHaveTextContent("Access changed");
+      expect(screen.queryAllByText(/Uploaded receipt/)).toHaveLength(0);
       await user.click(screen.getAllByRole("button", { name: "Security · Codex" })[0]);
       expect(screen.getByText("Security report")).toBeVisible();
       expect(screen.getByRole("link", { name: "Open reviewer report" })).toHaveAttribute(
@@ -350,6 +407,7 @@ it.each(["single", "run", "coordinated"] as const)(
         "/c/other?view=review",
       );
       expect(onReviewStarted).not.toHaveBeenCalled();
+      expect(screen.getByText("Reproductions")).toBeVisible();
       return;
     }
     await user.click(screen.getByRole("button", { name: "Run review" }));

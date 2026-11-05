@@ -192,7 +192,7 @@ def collect_review_run(
         probe.check("run.diff", "pass", "verified_patch_digest")
         receipt["patch_sha256"] = run.patch_sha256
 
-        raw = probe.get("run.report", f"{path}/report")
+        raw = probe.get("run.report", f"{path}/report", params={"include_finding_keys": "true"})
         if raw is None:
             return receipt
         try:
@@ -270,7 +270,13 @@ def collect_review_run(
             "pass" if bindings_valid else "fail",
             "matching_reviewer_sessions_and_reports",
         )
-        lineage = consolidate_reports(reports).findings == consolidated.findings
+        expected_findings = consolidate_reports(reports, include_finding_keys=True).findings
+        lineage = len(expected_findings) == len(consolidated.findings) and all(
+            actual.finding == expected.finding
+            and actual.review_ids == expected.review_ids
+            and actual.finding_key in (None, expected.finding_key)
+            for actual, expected in zip(consolidated.findings, expected_findings, strict=True)
+        )
         probe.check("run.consolidation", "pass" if lineage else "fail", "exact_finding_lineage")
         receipt.update(
             run_ready=bool(

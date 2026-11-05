@@ -3,6 +3,7 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tansta
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Link } from "@/lib/routing";
+import { FindingReproductions } from "./FindingReproductions";
 import {
   getCapturedReviewDiff,
   getReviewRunReport,
@@ -176,6 +177,9 @@ export function ReviewRunsPanel({
   const memberReport = report.data?.reviewers.find(
     (entry) => entry.review_id === member?.id,
   )?.report;
+  const findingKeys = new Map(
+    report.data?.findings.map(({ finding, finding_key }) => [JSON.stringify(finding), finding_key]),
+  );
   const unverifiedCount =
     report.data?.reviewers.reduce(
       (total, entry) => total + (entry.report.unverified_findings?.length ?? 0),
@@ -191,6 +195,18 @@ export function ReviewRunsPanel({
       : launchErrors?.run.id === run.id
         ? launchErrors.errors
         : undefined;
+
+  function reproductions(findingKey: string | null | undefined) {
+    if (!findingKey || !run?.patch_sha256) return null;
+    return (
+      <FindingReproductions
+        key={JSON.stringify([viewerId, run.id, findingKey])}
+        run={run}
+        findingKey={findingKey}
+        viewerId={viewerId}
+      />
+    );
+  }
 
   return (
     <section aria-label="Review runs" className="space-y-3 border-t border-border pt-3">
@@ -445,7 +461,9 @@ export function ReviewRunsPanel({
                       current={current}
                       onOpenSource={run.patch_sha256 ? undefined : onOpenSource}
                       onOpenCapturedSource={openCapturedSource}
-                    />
+                    >
+                      {reproductions(findingKeys.get(findingKey))}
+                    </FindingCard>
                   ),
                 )}
               </ol>
@@ -473,7 +491,7 @@ export function ReviewRunsPanel({
                 <p className="text-muted-foreground">The available reports contain no findings.</p>
               )}
               <ol className="space-y-3">
-                {report.data.findings.map(({ finding, review_ids }) => {
+                {report.data.findings.map(({ finding, review_ids, finding_key }) => {
                   const origin = run.reviewers.find((entry) => entry.id === review_ids[0]);
                   if (!origin) return null;
                   return (
@@ -485,7 +503,9 @@ export function ReviewRunsPanel({
                           current={current}
                           onOpenSource={run.patch_sha256 ? undefined : onOpenSource}
                           onOpenCapturedSource={openCapturedSource}
-                        />
+                        >
+                          {reproductions(finding_key)}
+                        </FindingCard>
                       </ol>
                       <div className="flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
                         <span>Reported by</span>
