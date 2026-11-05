@@ -7501,6 +7501,15 @@
       "ReviewQuestion": {
         "additionalProperties": false,
         "properties": {
+          "action": {
+            "default": "question",
+            "enum": [
+              "question",
+              "propose_fix"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
           "anchor": {
             "discriminator": {
               "mapping": {
@@ -7569,6 +7578,17 @@
           "id": {
             "title": "Id",
             "type": "string"
+          },
+          "proposed_patch": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Proposed Patch"
           },
           "published_at": {
             "anyOf": [
@@ -23581,6 +23601,15 @@
               "schema": {
                 "additionalProperties": false,
                 "properties": {
+                  "action": {
+                    "default": "question",
+                    "enum": [
+                      "question",
+                      "propose_fix"
+                    ],
+                    "title": "Action",
+                    "type": "string"
+                  },
                   "agent_id": {
                     "anyOf": [
                       {

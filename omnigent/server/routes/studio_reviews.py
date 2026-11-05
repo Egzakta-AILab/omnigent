@@ -1497,6 +1497,7 @@ def create_studio_reviews_router(
             workspace=canonical,
             project_id=project_id,
             pr_number=target.pr_number,
+            action=body.action,
             profile=ReviewProfile(
                 agent_id=agent.id,
                 agent_version=str(agent.version),
@@ -1557,7 +1558,8 @@ def create_studio_reviews_router(
         if create_reviewer is None or send_review is None:
             raise HTTPException(503, "Native question sessions are unavailable")
         body = await _bounded_json(request, AskReviewQuestion, limit=44 * 1024)
-        intent = hashlib.sha256(body.model_dump_json().encode()).hexdigest()
+        exclude = {"action"} if body.action == "question" else None
+        intent = hashlib.sha256(body.model_dump_json(exclude=exclude).encode()).hexdigest()
         existing = await question_record(access, body.id, intent=intent)
         if existing is not None:
             return existing.view
@@ -1686,6 +1688,7 @@ def create_studio_reviews_router(
             updated_at=view.updated_at,
             running=view.status == "accepted",
             captured_patch=captured_patch,
+            action=record.snapshot.execution.action,
         )
         if answer is None:
             return view.model_copy(update={"answer_state": state})

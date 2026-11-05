@@ -1008,6 +1008,8 @@ class StudioReviewStore:
                 answer_state="ready" if answer else "pending",
                 answer=answer.answer if answer else None,
                 citations=answer.citations if answer else None,
+                action=snapshot.execution.action,
+                proposed_patch=answer.proposed_patch if answer else None,
                 published_at=row.published_at,
                 updated_at=row.updated_at,
             ),
@@ -1123,6 +1125,11 @@ class StudioReviewStore:
             if answer is not None and row.answer_json is None:
                 row.answer_json = answer.model_dump_json()
             if publish and row.published_at is None:
+                if (
+                    QuestionInput.model_validate_json(row.input_json).execution.action
+                    == "propose_fix"
+                ):
+                    raise ReviewConflictError("Attach a checked patch to share a fix proposal")
                 if row.answer_json is None:
                     raise ReviewConflictError("The question has no confirmed answer to share")
                 row.published_at = time.time_ns() // 1_000_000

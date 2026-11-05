@@ -72,7 +72,12 @@ class ReviewComment(CreateReviewComment):
     created_at: int
 
 
+QuestionAction = Literal["question", "propose_fix"]
+MAX_PROPOSED_PATCH_BYTES = 24 * 1024
+
+
 class AskReviewQuestion(CreateReviewComment):
+    action: QuestionAction = "question"
     agent_id: str | None = None
     reviewer_key: ReviewRoleDigest | None = None
     host_id: str | None = None
@@ -87,6 +92,8 @@ class AskReviewQuestion(CreateReviewComment):
 
     @model_validator(mode="after")
     def validate_selection(self) -> AskReviewQuestion:
+        if self.action == "propose_fix" and not isinstance(self.anchor, FindingDiscussionAnchor):
+            raise ValueError("Choose a finding for the fix proposal")
         if (self.agent_id is None) == (self.reviewer_key is None):
             raise ValueError("Choose an agent or a saved reviewer")
         if (self.host_id is None) != (self.workspace is None):
@@ -102,6 +109,7 @@ class QuestionExecution(FrozenModel):
     project_id: str | None = None
     pr_number: int
     profile: ReviewProfile
+    action: QuestionAction = "question"
 
 
 class QuestionInput(FrozenModel):
@@ -128,6 +136,9 @@ class QuestionAnswer(FrozenModel):
     head_sha: Sha
     answer: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)]
     citations: list[QuestionCitation] | None = Field(default=None, max_length=6)
+    proposed_patch: str | None = Field(
+        default=None, min_length=1, max_length=MAX_PROPOSED_PATCH_BYTES
+    )
 
 
 class ReviewQuestion(FrozenModel):
@@ -140,6 +151,8 @@ class ReviewQuestion(FrozenModel):
     answer_state: ReportState = "pending"
     answer: str | None = None
     citations: list[QuestionCitation] | None = None
+    action: QuestionAction = "question"
+    proposed_patch: str | None = None
     published_at: int | None = None
     updated_at: int
 

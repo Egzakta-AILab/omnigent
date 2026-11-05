@@ -1301,12 +1301,13 @@ def register_core_routes(
             raise OmnigentError("Review is not owned by the caller", code=ErrorCode.FORBIDDEN)
         if isinstance(review, QuestionExecution):
             profile = review.profile
+            task = "Fix proposal for" if review.action == "propose_fix" else "Question about"
             body = SessionCreateRequest(
                 agent_id=profile.agent_id,
                 host_id=review.host_id,
                 workspace=review.workspace,
                 project_id=review.project_id,
-                title=f"Question about PR #{review.pr_number}",
+                title=f"{task} PR #{review.pr_number}",
                 labels={"omnigent.studio.question": "true"},
                 model_override=profile.model,
                 reasoning_effort=profile.reasoning_effort,

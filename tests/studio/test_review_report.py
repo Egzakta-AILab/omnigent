@@ -288,6 +288,48 @@ def test_checks_question_citations_against_the_exact_row(
     assert (answer is not None) == (expected == "ready")
 
 
+@pytest.mark.parametrize("path", ["readme", "../readme"])
+def test_proposed_fix_requires_repository_relative_text_hunks(
+    review: ReviewPass, path: str
+) -> None:
+    captured = (
+        "diff --git a/readme b/readme\n--- a/readme\n+++ b/readme\n@@ -1 +1 @@\n-old\n+new\n"
+    )
+    prompt = "Propose the fix for this finding"
+    payload = {
+        "question_id": review.id,
+        "base_sha": review.target.base_sha,
+        "head_sha": review.target.head_sha,
+        "answer": "Fix the wording.",
+        "citations": [{"path": "readme", "side": "head", "line": 1, "quote": "new"}],
+        "proposed_patch": (
+            f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n"
+            "@@ -1 +1 @@\n-new\n+fixed\n"
+        ),
+    }
+    store = _transcript(
+        review,
+        _message(prompt, user=True),
+        _message(f"```studio-fix-proposal-v1\n{json.dumps(payload)}\n```"),
+    )
+    assert review.reviewer_session_id is not None
+    state, answer = read_question_answer(
+        store,
+        session_id=review.reviewer_session_id,
+        question_id=review.id,
+        target=review.target,
+        prompt_digest=hashlib.sha256(prompt.encode()).hexdigest(),
+        updated_at=0,
+        running=True,
+        captured_patch=captured,
+        action="propose_fix",
+    )
+    assert state == ("ready" if path == "readme" else "incomplete")
+    assert (answer.proposed_patch if answer else None) == (
+        payload["proposed_patch"] if path == "readme" else None
+    )
+
+
 def test_reads_a_claude_report_split_across_persisted_text_blocks(review: ReviewPass) -> None:
     start, end = _report(review).rsplit("\n", 1)
     store = _transcript(

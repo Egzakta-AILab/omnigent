@@ -399,9 +399,10 @@ checkout. Attached receipts follow the review run's private access rules.
 
 ### Check a proposed fix
 
-Save the proposed change as a Git text patch against the review's captured
-head. Run the same check on that head and on a temporary snapshot with the
-patch applied.
+Open **Discuss finding → Propose a fix** and choose an agent. Preview its
+private proposal and select **Download patch**. You can also supply your own
+Git text patch against the review's captured head. Run the same check on that
+head and on a temporary snapshot with the patch applied.
 
 ```sh
 uv run --no-sync python scripts/verify_studio.py reproduce \

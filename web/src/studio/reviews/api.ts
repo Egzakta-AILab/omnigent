@@ -217,7 +217,10 @@ export interface ReviewDiscussionComment {
   created_at: number;
 }
 
+export type QuestionAction = "question" | "propose_fix";
+
 export interface AskReviewQuestion extends Pick<ReviewDiscussionComment, "id" | "anchor" | "body"> {
+  action?: QuestionAction;
   agent_id?: string;
   reviewer_key?: string;
   host_id?: string;
@@ -232,11 +235,13 @@ export interface QuestionCitation {
 }
 
 export interface ReviewQuestion extends Pick<ReviewDiscussionComment, "id" | "anchor" | "body"> {
+  action?: QuestionAction;
   session_id: string;
   harness: ReviewHarness;
   status: "dispatching" | "accepted" | "unknown";
   answer_state: "pending" | "incomplete" | "ready";
   answer: string | null;
+  proposed_patch?: string | null;
   citations?: QuestionCitation[] | null;
   published_at: number | null;
   updated_at: number;

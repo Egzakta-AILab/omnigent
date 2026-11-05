@@ -3,6 +3,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { nativeEffortOptions } from "@/components/HarnessConfigControls";
 import { Button } from "@/components/ui/button";
 import { useAvailableAgents } from "@/hooks/useAvailableAgents";
+import { triggerBrowserDownload } from "@/hooks/useFileContent";
 import { useHostModelOptions, useHosts } from "@/hooks/useHosts";
 import { nativeCodingAgentForAgentName } from "@/lib/nativeCodingAgents";
 import { randomUUID } from "@/lib/randomUUID";
@@ -15,6 +16,7 @@ import {
   type AskReviewQuestion,
   type DiscussionAnchor,
   type QuestionCitation,
+  type QuestionAction,
   type ReviewDiscussion,
   type ReviewQuestion,
   type SharedReviewAnswer,
@@ -84,6 +86,8 @@ function QuestionCard({
     onSuccess: async () => refresh(),
   });
   const question = initial.answer ? initial : (result.data ?? initial);
+  const isProposal = question.action === "propose_fix";
+  const proposedPatch = question.proposed_patch;
   if (question.published_at || share.isSuccess) return null;
   const pending =
     !result.isError &&
@@ -91,7 +95,10 @@ function QuestionCard({
     Date.now() - question.updated_at < 120_000;
   return (
     <article className="space-y-2 rounded-md border p-2 text-sm">
-      <p className="text-xs font-medium">Private · {REVIEW_HARNESS_LABELS[question.harness]}</p>
+      <p className="text-xs font-medium">
+        {isProposal ? "Private fix proposal" : "Private"} ·{" "}
+        {REVIEW_HARNESS_LABELS[question.harness]}
+      </p>
       <p className="whitespace-pre-wrap break-words">{question.body}</p>
       {question.answer ? (
         <>
@@ -99,6 +106,20 @@ function QuestionCard({
             {question.answer}
           </p>
           <AnswerCitations citations={question.citations} />
+          {proposedPatch && (
+            <>
+              <details className="rounded-md border p-2">
+                <summary className="cursor-pointer">Preview proposed patch</summary>
+                <pre className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-all text-xs">
+                  {proposedPatch}
+                </pre>
+              </details>
+              <p className="text-xs text-muted-foreground">
+                Run an isolated fix check with this patch, then attach the receipt under
+                Reproductions.
+              </p>
+            </>
+          )}
         </>
       ) : result.isError ? (
         <p role="alert">{result.error.message}</p>
@@ -107,8 +128,12 @@ function QuestionCard({
           {question.status === "unknown"
             ? "Delivery unconfirmed. Check the private session."
             : pending
-              ? "Waiting for an answer…"
-              : "No answer confirmed for the saved question."}
+              ? isProposal
+                ? "Waiting for a fix proposal…"
+                : "Waiting for an answer…"
+              : isProposal
+                ? "No fix proposal confirmed. Open the private session for details."
+                : "No answer confirmed for the saved question."}
         </p>
       )}
       <div className="flex flex-wrap gap-2">
@@ -122,12 +147,26 @@ function QuestionCard({
             onClick={() => void result.refetch()}
             disabled={result.isFetching}
           >
-            Check for answer
+            {isProposal ? "Check for proposal" : "Check for answer"}
           </Button>
         )}
-        {question.answer && canShare && (
+        {question.answer && canShare && !isProposal && (
           <Button size="sm" onClick={() => share.mutate()} disabled={share.isPending}>
             Share answer
+          </Button>
+        )}
+        {proposedPatch && (
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() =>
+              triggerBrowserDownload(
+                new Blob([proposedPatch], { type: "text/x-diff" }),
+                `proposed-fix-${question.id.slice(0, 8)}.patch`,
+              )
+            }
+          >
+            Download patch
           </Button>
         )}
       </div>
@@ -139,16 +178,19 @@ function QuestionCard({
 function AskForm({
   discussion,
   anchor,
+  action,
   attempt,
   refresh,
 }: {
   discussion: ReviewDiscussion;
   anchor: DiscussionAnchor;
+  action: QuestionAction;
   attempt: RefObject<QuestionAttempt | undefined>;
   refresh: () => Promise<void>;
 }) {
   const [selection, setSelection] = useState("");
-  const [body, setBody] = useState("");
+  const isProposal = action === "propose_fix";
+  const [body, setBody] = useState(isProposal ? "Propose a focused patch for this finding." : "");
   const [reviewWorkspace, setReviewWorkspace] = useState(!!discussion.can_use_review_workspace);
   const [hostId, setHostId] = useState("");
   const [workspace, setWorkspace] = useState("");
@@ -206,6 +248,7 @@ function AskForm({
         const input = {
           anchor,
           body: body.trim(),
+          ...(isProposal ? { action } : {}),
           ...(reviewerKey
             ? { reviewer_key: reviewerKey }
             : {
@@ -221,8 +264,9 @@ function AskForm({
       }}
     >
       <p className="text-xs text-muted-foreground">
-        The agent receives the captured diff in a private session on the selected host, using its
-        native permissions. Read its answer before sharing it.
+        {isProposal
+          ? "The agent drafts a patch from the captured diff in a private session using its native permissions. Review the patch before running a fix check."
+          : "The agent receives the captured diff in a private session on the selected host, using its native permissions. Read its answer before sharing it."}
       </p>
       <label className="grid gap-1">
         <span>Answer with</span>
@@ -349,16 +393,22 @@ function AskForm({
         </div>
       )}
       <textarea
-        aria-label="Question for agent"
+        aria-label={isProposal ? "Fix instructions" : "Question for agent"}
         className="min-h-16 w-full rounded-md border bg-background p-2"
-        placeholder="What should the agent explain?"
+        placeholder={
+          isProposal ? "What should the patch change?" : "What should the agent explain?"
+        }
         maxLength={2000}
         value={body}
         disabled={ask.isPending}
         onChange={(event) => setBody(event.target.value)}
       />
       <Button type="submit" size="sm" disabled={!ready || ask.isPending}>
-        {ask.isPending ? "Starting session…" : "Ask privately"}
+        {ask.isPending
+          ? "Starting session…"
+          : isProposal
+            ? "Request private proposal"
+            : "Ask privately"}
       </Button>
       {ask.error && <p role="alert">{ask.error.message}</p>}
     </form>
@@ -382,7 +432,7 @@ export function DiscussionQuestions({
   attempt: RefObject<QuestionAttempt | undefined>;
   refresh: () => Promise<void>;
 }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState<QuestionAction | null>(null);
   return (
     <div className="space-y-2">
       {answers.map((item) => (
@@ -409,11 +459,35 @@ export function DiscussionQuestions({
         ))}
       {discussion.can_ask && (
         <>
-          <Button size="sm" variant="outline" aria-expanded={open} onClick={() => setOpen(!open)}>
-            Ask an agent
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              aria-expanded={open === "question"}
+              onClick={() => setOpen(open === "question" ? null : "question")}
+            >
+              Ask an agent
+            </Button>
+            {anchor.kind === "finding" && (
+              <Button
+                size="sm"
+                variant="outline"
+                aria-expanded={open === "propose_fix"}
+                onClick={() => setOpen(open === "propose_fix" ? null : "propose_fix")}
+              >
+                Propose a fix
+              </Button>
+            )}
+          </div>
           {open && (
-            <AskForm discussion={discussion} anchor={anchor} attempt={attempt} refresh={refresh} />
+            <AskForm
+              key={open}
+              action={open}
+              discussion={discussion}
+              anchor={anchor}
+              attempt={attempt}
+              refresh={refresh}
+            />
           )}
         </>
       )}
