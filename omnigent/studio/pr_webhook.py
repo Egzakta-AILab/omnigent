@@ -29,6 +29,7 @@ from pydantic import (
 )
 
 from omnigent.studio.pr_webhook_inbox import Delivery, InboxFull, WebhookInbox
+from omnigent.studio.reviews.discussion import MAX_REVIEW_COLLABORATORS, AccountId
 from omnigent.studio.reviews.models import (
     MAX_RUN_REVIEWERS,
     FrozenModel,
@@ -77,6 +78,9 @@ class WebhookRoute(FrozenModel):
     reviewers: list[ReviewerSettings] = Field(min_length=1, max_length=MAX_RUN_REVIEWERS)
     coordinator: ReviewerSettings | None = None
     required_reviewer_indices: list[int] = Field(default_factory=list)
+    collaborators: Annotated[list[AccountId], Field(max_length=MAX_REVIEW_COLLABORATORS)] = Field(
+        default_factory=list
+    )
 
     @field_validator("project_id", "host_id")
     @classmethod
@@ -94,7 +98,8 @@ class WebhookRoute(FrozenModel):
 
     @property
     def policy_digest(self) -> str:
-        return hashlib.sha256(self.model_dump_json().encode()).hexdigest()
+        excluded = {"collaborators"} if not self.collaborators else None
+        return hashlib.sha256(self.model_dump_json(exclude=excluded).encode()).hexdigest()
 
     def capture(self, number: int, base: str, head: str) -> CaptureReviewRunRequest:
         target = {
@@ -112,6 +117,7 @@ class WebhookRoute(FrozenModel):
                 if self.coordinator
                 else None,
                 "required_reviewer_indices": self.required_reviewer_indices,
+                "collaborators": self.collaborators,
             }
         )
 
@@ -284,7 +290,7 @@ class WebhookWorker:
             async with asyncio.timeout(_REQUEST_SECONDS):
                 response = await self.studio.post(
                     f"v1/projects/{route.project_id}/studio/review-runs",
-                    json=request.model_dump(mode="json"),
+                    json=request.model_dump(mode="json", exclude_defaults=True),
                     headers={"Idempotency-Key": f"studio-webhook-{job.key}"},
                 )
             response.raise_for_status()
@@ -414,7 +420,11 @@ def create_receiver(
         key = route.revision_key(pr.number, pr.base.sha, pr.head.sha)
         try:
             await asyncio.to_thread(
-                inbox.enqueue, key, route_id, route.policy_digest, capture.model_dump_json()
+                inbox.enqueue,
+                key,
+                route_id,
+                route.policy_digest,
+                capture.model_dump_json(exclude_defaults=True),
             )
         except (InboxFull, sqlite3.Error) as exc:
             raise HTTPException(503, "Webhook inbox is unavailable") from exc

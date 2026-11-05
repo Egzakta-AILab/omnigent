@@ -14,11 +14,12 @@ from pydantic import TypeAdapter
 from sqlalchemy import func, select, tuple_, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
 from omnigent.db.account_authority import account_generation, require_active_account
 from omnigent.db.compression import encode
 from omnigent.db.db_models import (
+    SqlProject,
     SqlStudioFindingArtifact,
     SqlStudioInlineDraft,
     SqlStudioReviewCollaborator,
@@ -47,6 +48,7 @@ from omnigent.studio.reviews.artifacts import (
     inspect_evidence,
 )
 from omnigent.studio.reviews.discussion import (
+    MAX_REVIEW_COLLABORATORS,
     CreateReviewComment,
     DiffDiscussionAnchor,
     DiscussionAnchor,
@@ -61,6 +63,8 @@ from omnigent.studio.reviews.discussion import (
     ReviewComment,
     ReviewQuestion,
     SharedReviewAnswer,
+    SharedReviewEntry,
+    SharedReviewPage,
 )
 from omnigent.studio.reviews.evidence import (
     MAX_PATCH_CHUNKS,
@@ -148,7 +152,6 @@ _MAX_RECEIPTS_PER_RUN = 24
 _MAX_RECEIPTS_PER_FINDING = 4
 _MAX_ARTIFACTS_PER_RUN = 12
 _MAX_ARTIFACTS_PER_FINDING = 6
-_MAX_COLLABORATORS = 32
 _MAX_DISCUSSION_COMMENTS = 200
 _MAX_DISCUSSION_QUESTIONS = 32
 _MAX_INLINE_DRAFTS = 128
@@ -485,6 +488,7 @@ class StudioReviewStore:
         patch: str,
         coordinator: ReviewProfile | None = None,
         required_indices: frozenset[int] = frozenset(),
+        collaborators: dict[str, str | None] | None = None,
     ) -> ReviewRun:
         """Persist the complete roster and its capture receipts in one transaction."""
         project_id = target.source_project_id
@@ -494,6 +498,12 @@ class StudioReviewStore:
             coordinator is None or not required_indices.issubset(range(len(profiles)))
         ):
             raise ValueError("Required reviewers must be members of an orchestrated run")
+        if collaborators and (
+            owner_user_id is None
+            or owner_user_id in collaborators
+            or len(collaborators) > MAX_REVIEW_COLLABORATORS
+        ):
+            raise ValueError("A shared run requires an owner and a bounded collaborator list")
         owner = _owner_scope(owner_user_id)
         key = hashlib.sha256(idempotency_key.encode()).digest()
         digest = _request_values(idempotency_key, request_hash)
@@ -506,7 +516,9 @@ class StudioReviewStore:
             existing = self._run_request(session, owner, key, digest)
             if existing is not None:
                 return existing
-            owner_generation = require_active_account(session, owner_user_id)
+            owner_generation = require_active_account(
+                session, owner_user_id, related_accounts=collaborators
+            )
             now = time.time_ns() // 1_000_000
             run_id = uuid.uuid4().hex
             session.add(
@@ -537,6 +549,19 @@ class StudioReviewStore:
                     )
                 ]
             )
+            if owner_user_id is not None and collaborators:
+                session.add_all(
+                    SqlStudioReviewCollaborator(
+                        workspace_id=current_workspace_id(),
+                        run_id=run_id,
+                        user_key=_owner_scope(user_id),
+                        user_id=user_id,
+                        owner_user_id=owner_user_id,
+                        user_generation=generation,
+                        owner_generation=owner_generation,
+                    )
+                    for user_id, generation in collaborators.items()
+                )
             members = [
                 self._insert_capture(
                     session,
@@ -1075,6 +1100,83 @@ class StudioReviewStore:
                 else None
             )
 
+    def list_shared_reviews(
+        self, actor: str, *, limit: int, after_id: str | None
+    ) -> SharedReviewPage:
+        if not 1 <= limit <= 25:
+            raise ValueError("Shared review page size must be between 1 and 25")
+        with self._session("list_shared_studio_reviews") as session:
+            workspace_id = current_workspace_id()
+            viewer = session.get(SqlUser, (workspace_id, actor))
+            if (
+                viewer is None
+                or viewer.id != actor
+                or viewer.deleted_at is not None
+                or account_generation(actor) not in (None, viewer.account_generation)
+            ):
+                return SharedReviewPage(entries=[])
+
+            grant = SqlStudioReviewCollaborator
+            run = SqlStudioReviewRun
+            project = SqlProject
+            owner = aliased(SqlUser)
+            # Users store generations as text while review grants use UUID bytes.
+            owner_generation = (
+                func.encode(grant.owner_generation, "hex")
+                if session.get_bind().dialect.name == "postgresql"
+                else func.nullif(func.lower(func.hex(grant.owner_generation)), "")
+            )
+            query = (
+                select(run, project.name)
+                .select_from(grant)
+                .join(run, (run.workspace_id == grant.workspace_id) & (run.id == grant.run_id))
+                .join(
+                    project,
+                    (project.workspace_id == run.workspace_id)
+                    & (project.id == run.project_id)
+                    & (project.user_id == grant.owner_user_id),
+                )
+                .outerjoin(
+                    owner,
+                    (owner.workspace_id == grant.workspace_id) & (owner.id == grant.owner_user_id),
+                )
+                .where(
+                    grant.workspace_id == workspace_id,
+                    grant.user_key == _owner_scope(actor),
+                    grant.user_generation == viewer.account_generation,
+                    run.patch_sha256.is_not(None),
+                    run.owner_generation.is_not_distinct_from(grant.owner_generation),
+                    owner.account_generation.is_not_distinct_from(owner_generation),
+                    owner.deleted_at.is_(None),
+                )
+            )
+            if after_id is not None:
+                cursor = session.execute(query.where(run.id == after_id)).first()
+                if cursor is None:
+                    raise ReviewNotFoundError("Shared review cursor not found")
+                query = query.where(
+                    tuple_(run.created_at, run.id) < (cursor[0].created_at, after_id)
+                )
+            rows = session.execute(
+                query.order_by(run.created_at.desc(), run.id.desc()).limit(limit + 1)
+            ).all()
+            entries = []
+            for record, project_name in rows[:limit]:
+                target = ReviewTarget.model_validate_json(record.target_json)
+                entries.append(
+                    SharedReviewEntry(
+                        id=record.id,
+                        project_name=project_name,
+                        repository=target.repository,
+                        pr_number=target.pr_number,
+                        head_sha=target.head_sha,
+                        created_at=record.created_at,
+                    )
+                )
+            return SharedReviewPage(
+                entries=entries, next_cursor=entries[-1].id if len(rows) > limit else None
+            )
+
     def list_review_collaborators(self, run_id: str, *, owner: str) -> list[str]:
         with self._session("list_review_collaborators") as session:
             if self._run_row(session, run_id, _owner_scope(owner)) is None:
@@ -1087,7 +1189,7 @@ class StudioReviewStore:
                         SqlStudioReviewCollaborator.run_id == run_id,
                     )
                     .order_by(SqlStudioReviewCollaborator.user_id)
-                    .limit(_MAX_COLLABORATORS)
+                    .limit(MAX_REVIEW_COLLABORATORS)
                 )
             )
 
@@ -1121,7 +1223,7 @@ class StudioReviewStore:
                         SqlStudioReviewCollaborator.run_id == run_id,
                     )
                 )
-                if count is not None and count >= _MAX_COLLABORATORS:
+                if count is not None and count >= MAX_REVIEW_COLLABORATORS:
                     raise ReviewConflictError("This review has reached its collaborator limit")
                 grant = SqlStudioReviewCollaborator(
                     workspace_id=current_workspace_id(),

@@ -12,7 +12,7 @@ import sqlalchemy as sa
 from pydantic import ValidationError
 
 from omnigent.db.account_authority import account_authority_scope
-from omnigent.db.db_models import SqlUser, workspace_scope
+from omnigent.db.db_models import SqlProject, SqlUser, workspace_scope
 from omnigent.db.utils import get_or_create_engine
 from omnigent.stores.studio_review_store import (
     ReviewConflictError,
@@ -115,6 +115,16 @@ def test_review_discussion_access_does_not_survive_account_recreation(
     engine = get_or_create_engine(db_uri)
     with engine.begin() as connection:
         connection.execute(
+            sa.insert(SqlProject),
+            {
+                "workspace_id": 0,
+                "id": SESSION,
+                "name": "Shared",
+                "user_id": OWNER,
+                "created_at": 1,
+            },
+        )
+        connection.execute(
             sa.insert(SqlUser),
             [
                 {"workspace_id": 0, "id": OWNER, "account_generation": owner_generation},
@@ -131,12 +141,28 @@ def test_review_discussion_access_does_not_survive_account_recreation(
             patch="diff --git a/file b/file\n",
         )
         assert store.review_discussion_owner_current(run.id, OWNER)
+        second = store.capture_run(
+            owner_user_id=OWNER,
+            idempotency_key="auto-share",
+            request_hash="b" * 64,
+            target=run.target,
+            profiles=[_profile()],
+            patch="diff --git a/file b/file\n",
+            collaborators={OTHER: target_generation},
+        )
         store.set_review_collaborator(
             run.id, OTHER, owner=OWNER, target_generation=target_generation
         )
     with account_authority_scope(OTHER, target_generation):
         assert store.discussion_owner(run.id, OTHER) == OWNER
         assert store.list_discussion_comments(run.id, actor=OTHER, owner=OWNER) == []
+        page = store.list_shared_reviews(OTHER, limit=1, after_id=None)
+        assert page.next_cursor == page.entries[0].id
+        earlier = store.list_shared_reviews(OTHER, limit=1, after_id=page.next_cursor)
+        assert earlier.next_cursor is None
+        assert {entry.id for entry in [*page.entries, *earlier.entries]} == {run.id, second.id}
+    with account_authority_scope(OTHER, new_generation):
+        assert not store.list_shared_reviews(OTHER, limit=2, after_id=None).entries
     with engine.begin() as connection:
         connection.execute(
             sa.update(SqlUser).where(SqlUser.id == OWNER).values(account_generation=new_generation)
@@ -151,6 +177,7 @@ def test_review_discussion_access_does_not_survive_account_recreation(
             )
     with account_authority_scope(OTHER, target_generation):
         assert store.discussion_owner(run.id, OTHER) is None
+        assert not store.list_shared_reviews(OTHER, limit=2, after_id=None).entries
 
 
 def test_orchestrated_roster_stays_safe_for_older_dispatchers(
