@@ -25,6 +25,7 @@ from omnigent.db.db_models import (
     SqlStudioReviewOperation,
     SqlStudioReviewPass,
     SqlStudioReviewPatchChunk,
+    SqlStudioReviewQuestion,
     SqlStudioReviewReceiptChunk,
     SqlStudioReviewRun,
     SqlUser,
@@ -35,7 +36,17 @@ from omnigent.db.utils import (
     make_named_managed_session_maker,
     run_write_transaction,
 )
-from omnigent.studio.reviews.discussion import CreateReviewComment, DiscussionAnchor, ReviewComment
+from omnigent.studio.reviews.discussion import (
+    CreateReviewComment,
+    DiscussionAnchor,
+    QuestionAnswer,
+    QuestionDispatch,
+    QuestionInput,
+    QuestionRecord,
+    ReviewComment,
+    ReviewQuestion,
+    SharedReviewAnswer,
+)
 from omnigent.studio.reviews.evidence import (
     MAX_PATCH_CHUNKS,
     MAX_REVIEW_PATCH_BYTES,
@@ -63,6 +74,7 @@ from omnigent.studio.reviews.models import (
     ReviewTarget,
     require_uuid,
 )
+from omnigent.studio.reviews.questions import question_session_id
 from omnigent.studio.reviews.reproduction import (
     MAX_REPRODUCTION_BYTES,
     MAX_REPRODUCTION_CHUNKS,
@@ -112,6 +124,7 @@ _MAX_RECEIPTS_PER_RUN = 24
 _MAX_RECEIPTS_PER_FINDING = 4
 _MAX_COLLABORATORS = 32
 _MAX_DISCUSSION_COMMENTS = 200
+_MAX_DISCUSSION_QUESTIONS = 32
 _DISCUSSION_ANCHOR = TypeAdapter(DiscussionAnchor)
 
 
@@ -921,14 +934,7 @@ class StudioReviewStore:
             raise ReviewConflictError("The comment exceeds its stored byte budget")
 
         def write(session: Session) -> ReviewComment:
-            related = None
-            if actor != owner and owner is not None:
-                run = self._run_row(session, run_id, _owner_scope(owner))
-                if run is None:
-                    raise ReviewNotFoundError("Review run not found")
-                related = {owner: run.owner_generation}
-            generation = require_active_account(session, actor, related_accounts=related)
-            self._require_discussion_access(session, run_id, actor, owner, lock=True)
+            generation = self._lock_discussion_writer(session, run_id, actor, owner)
             existing = session.get(
                 SqlStudioReviewComment, (current_workspace_id(), run_id, comment.id)
             )
@@ -966,6 +972,196 @@ class StudioReviewStore:
             return self._comment(row)
 
         return run_write_transaction(self._write, "post_review_discussion_comment", write)
+
+    def _lock_discussion_writer(
+        self, session: Session, run_id: str, actor: str | None, owner: str | None
+    ) -> str | None:
+        related = None
+        if actor != owner and owner is not None:
+            run = self._run_row(session, run_id, _owner_scope(owner))
+            if run is None:
+                raise ReviewNotFoundError("Review run not found")
+            related = {owner: run.owner_generation}
+        generation = require_active_account(session, actor, related_accounts=related)
+        self._require_discussion_access(session, run_id, actor, owner, lock=True)
+        return generation
+
+    @staticmethod
+    def _question_record(row: SqlStudioReviewQuestion) -> QuestionRecord:
+        snapshot = QuestionInput.model_validate_json(row.input_json)
+        answer = QuestionAnswer.model_validate_json(row.answer_json) if row.answer_json else None
+        return QuestionRecord(
+            snapshot=snapshot,
+            view=ReviewQuestion(
+                id=row.id,
+                anchor=snapshot.anchor,
+                body=snapshot.body,
+                session_id=question_session_id(row.run_id, row.id),
+                harness=snapshot.execution.profile.harness,
+                status=cast(QuestionDispatch, row.state),
+                answer_state="ready" if answer else "pending",
+                answer=answer.answer if answer else None,
+                published_at=row.published_at,
+                updated_at=row.updated_at,
+            ),
+        )
+
+    @staticmethod
+    def _question_row(
+        session: Session, run_id: str, question_id: str, actor: str | None, generation: str | None
+    ) -> SqlStudioReviewQuestion | None:
+        row = session.get(
+            SqlStudioReviewQuestion, (current_workspace_id(), run_id, require_uuid(question_id))
+        )
+        if row is None or (row.actor_scope, row.actor_generation) != (
+            _owner_scope(actor),
+            generation,
+        ):
+            return None
+        return row
+
+    def get_discussion_question(
+        self,
+        run_id: str,
+        question_id: str,
+        *,
+        actor: str | None,
+        owner: str | None,
+        intent: str | None = None,
+    ) -> QuestionRecord | None:
+        with self._session("get_private_discussion_question") as session:
+            self._require_discussion_access(session, run_id, actor, owner, lock=False)
+            generation = account_generation(actor) if actor is not None else None
+            row = self._question_row(session, run_id, question_id, actor, generation)
+            if row is not None and intent is not None and row.intent_hash != bytes.fromhex(intent):
+                raise ReviewConflictError("This question ID was used for a different request")
+            return self._question_record(row) if row is not None else None
+
+    def claim_discussion_question(
+        self,
+        run_id: str,
+        question_id: str,
+        snapshot: QuestionInput,
+        intent: str,
+        *,
+        actor: str | None,
+        owner: str | None,
+    ) -> tuple[QuestionRecord, bool]:
+        serialized = snapshot.model_dump_json()
+        if len(serialized.encode("utf-8")) > _MAX_SNAPSHOT_BYTES:
+            raise ReviewConflictError("The captured question exceeds its stored byte budget")
+        intent_bytes = bytes.fromhex(intent)
+
+        def write(session: Session) -> tuple[QuestionRecord, bool]:
+            generation = self._lock_discussion_writer(session, run_id, actor, owner)
+            existing = session.get(
+                SqlStudioReviewQuestion, (current_workspace_id(), run_id, question_id)
+            )
+            if existing is not None:
+                if (existing.actor_scope, existing.actor_generation, existing.intent_hash) != (
+                    _owner_scope(actor),
+                    generation,
+                    intent_bytes,
+                ):
+                    raise ReviewConflictError("This question ID was used for a different request")
+                return self._question_record(existing), False
+            count = session.scalar(
+                select(func.count())
+                .select_from(SqlStudioReviewQuestion)
+                .where(
+                    SqlStudioReviewQuestion.workspace_id == current_workspace_id(),
+                    SqlStudioReviewQuestion.run_id == run_id,
+                )
+            )
+            if count is not None and count >= _MAX_DISCUSSION_QUESTIONS:
+                raise ReviewConflictError("This review has reached its question limit")
+            now = time.time_ns() // 1_000_000
+            row = SqlStudioReviewQuestion(
+                workspace_id=current_workspace_id(),
+                run_id=run_id,
+                id=question_id,
+                actor_scope=_owner_scope(actor),
+                actor_user_id=actor,
+                actor_generation=generation,
+                intent_hash=intent_bytes,
+                input_json=serialized,
+                state="dispatching",
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(row)
+            return self._question_record(row), True
+
+        return run_write_transaction(self._write, "claim_review_discussion_question", write)
+
+    def update_discussion_question(
+        self,
+        run_id: str,
+        question_id: str,
+        *,
+        actor: str | None,
+        owner: str | None,
+        status: QuestionDispatch | None = None,
+        answer: QuestionAnswer | None = None,
+        publish: bool = False,
+    ) -> ReviewQuestion:
+        def write(session: Session) -> ReviewQuestion:
+            generation = self._lock_discussion_writer(session, run_id, actor, owner)
+            row = self._question_row(session, run_id, question_id, actor, generation)
+            if row is None:
+                raise ReviewNotFoundError("Review question not found")
+            if status is not None and row.state == "dispatching":
+                row.state = status
+                row.updated_at = time.time_ns() // 1_000_000
+            if answer is not None and row.answer_json is None:
+                row.answer_json = answer.model_dump_json()
+            if publish and row.published_at is None:
+                if row.answer_json is None:
+                    raise ReviewConflictError("The question has no confirmed answer to share")
+                row.published_at = time.time_ns() // 1_000_000
+            return self._question_record(row).view
+
+        return run_write_transaction(self._write, "update_review_discussion_question", write)
+
+    def list_discussion_questions(
+        self, run_id: str, *, actor: str | None, owner: str | None
+    ) -> tuple[list[ReviewQuestion], list[SharedReviewAnswer]]:
+        with self._session("list_review_discussion_questions") as session:
+            self._require_discussion_access(session, run_id, actor, owner, lock=False)
+            actor_scope = _owner_scope(actor)
+            generation = account_generation(actor) if actor is not None else None
+            rows = session.scalars(
+                select(SqlStudioReviewQuestion)
+                .where(
+                    SqlStudioReviewQuestion.workspace_id == current_workspace_id(),
+                    SqlStudioReviewQuestion.run_id == run_id,
+                    (SqlStudioReviewQuestion.actor_scope == actor_scope)
+                    | SqlStudioReviewQuestion.published_at.is_not(None),
+                )
+                .order_by(SqlStudioReviewQuestion.created_at, SqlStudioReviewQuestion.id)
+                .limit(_MAX_DISCUSSION_QUESTIONS)
+            )
+            mine, shared = [], []
+            for row in rows:
+                owned = (row.actor_scope, row.actor_generation) == (actor_scope, generation)
+                if not owned and row.published_at is None:
+                    continue
+                question = self._question_record(row).view
+                if owned:
+                    mine.append(question)
+                if question.published_at is not None and question.answer is not None:
+                    shared.append(
+                        SharedReviewAnswer(
+                            id=question.id,
+                            anchor=question.anchor,
+                            question=question.body,
+                            answer=question.answer,
+                            harness=question.harness,
+                            requested_by=row.actor_user_id,
+                            published_at=question.published_at,
+                        )
+                    )
+            return mine, shared
 
     def get_run_patch(self, run_id: str, *, owner_user_id: str | None) -> str | None:
         run_id = require_uuid(run_id)

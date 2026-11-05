@@ -310,6 +310,7 @@ from omnigent.util.claude_launch_args import (
     claude_legacy_launch_prompt,
     without_claude_session_id_arg,
 )
+from omnigent.studio.reviews.discussion import QuestionExecution
 from omnigent.studio.reviews.models import ReviewPass, ReviewProfile
 from omnigent.util.cost_plan import (
     reserved_cost_control_keys,
@@ -342,7 +343,9 @@ ClearSessionIntoFreshSession = Callable[
 ]
 _SESSION_LIST_BATCH_SIZE = 1000
 
-ReviewCreate = Callable[[Request, str | None, ReviewPass, str], Awaitable[SessionResponse]]
+ReviewCreate = Callable[
+    [Request, str | None, ReviewPass | QuestionExecution, str], Awaitable[SessionResponse]
+]
 
 
 def _require_attachment_compatible_history(
@@ -1922,11 +1925,33 @@ def register_core_routes(
     async def _create_reviewer_session(
         request: Request,
         user_id: str | None,
-        review: ReviewPass,
+        review: ReviewPass | QuestionExecution,
         session_id: str,
     ) -> SessionResponse:
         """Create an independent reviewer with the captured host, workspace and profile."""
-        if user_id != review.owner_user_id or user_id != _require_user(request, auth_provider):
+        if user_id != _require_user(request, auth_provider):
+            raise OmnigentError("Review is not owned by the caller", code=ErrorCode.FORBIDDEN)
+        if isinstance(review, QuestionExecution):
+            profile = review.profile
+            body = SessionCreateRequest(
+                agent_id=profile.agent_id,
+                host_id=review.host_id,
+                workspace=review.workspace,
+                project_id=review.project_id,
+                title=f"Question about PR #{review.pr_number}",
+                labels={"omnigent.studio.question": "true"},
+                model_override=profile.model,
+                reasoning_effort=profile.reasoning_effort,
+                git=None,
+            )
+            return await _create_existing_session(
+                request,
+                user_id,
+                body,
+                review_profile=profile,
+                reviewer_session_id=session_id,
+            )
+        if user_id != review.owner_user_id:
             raise OmnigentError("Review is not owned by the caller", code=ErrorCode.FORBIDDEN)
         if session_id == review.target.source_session_id:
             raise OmnigentError("A reviewer requires its own session", code=ErrorCode.CONFLICT)

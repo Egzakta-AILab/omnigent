@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import TypedDict
 from unittest.mock import Mock
@@ -18,6 +19,7 @@ from omnigent.entities.conversation import (
 from omnigent.entities.pagination import PagedList
 from omnigent.stores.conversation_store import ConversationStore
 from omnigent.studio.reviews.models import ReviewPass, ReviewProfile, ReviewRole, ReviewTarget
+from omnigent.studio.reviews.questions import read_question_answer
 from omnigent.studio.reviews.report import (
     ReviewerRunReport,
     ReviewFinding,
@@ -192,6 +194,47 @@ def _claude_skill_items(
         ),
     )
     return result, call
+
+
+@pytest.mark.parametrize("matches_first_input", [True, False])
+def test_reads_only_the_first_turn_when_input_is_bound(
+    review: ReviewPass, matches_first_input: bool
+) -> None:
+    saved_input = "Read the saved PR diff"
+
+    def answer(text: str) -> str:
+        payload = {
+            "question_id": review.id,
+            "base_sha": review.target.base_sha,
+            "head_sha": review.target.head_sha,
+            "answer": text,
+        }
+        return f"```studio-review-answer-v1\n{json.dumps(payload)}\n```"
+
+    store = _transcript(
+        review,
+        _message(saved_input if matches_first_input else "Unrelated input", user=True),
+        _message(answer("First answer"), identifier="first"),
+        _message(saved_input, user=True),
+        _message(answer("Later answer"), identifier="later"),
+        live_status="running",
+    )
+    assert review.reviewer_session_id is not None
+    state, payload = read_question_answer(
+        store,
+        session_id=review.reviewer_session_id,
+        question_id=review.id,
+        target=review.target,
+        prompt_digest=hashlib.sha256(saved_input.encode()).hexdigest(),
+        updated_at=0,
+        running=True,
+    )
+    if matches_first_input:
+        assert state == "ready"
+        assert payload is not None and payload.answer == "First answer"
+    else:
+        assert state == "incomplete"
+        assert payload is None
 
 
 def test_reads_a_claude_report_split_across_persisted_text_blocks(review: ReviewPass) -> None:

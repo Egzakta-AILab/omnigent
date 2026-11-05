@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Annotated, Any, Literal, TypeVar
+from typing import TYPE_CHECKING, Annotated, Any, Literal, TypeVar, cast
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
@@ -41,6 +42,10 @@ from omnigent.server.routes._studio_project_workspace import (
     require_owned_project,
     resolve_project_workspace,
 )
+from omnigent.server.routes._workspace_validation import (
+    WorkspaceValidationError,
+    validate_workspace,
+)
 from omnigent.server.routes.skills import request_host_skills
 from omnigent.server.schemas import SessionEventInput
 from omnigent.server.session_orchestration import require_owned_session
@@ -55,13 +60,20 @@ from omnigent.stores.studio_review_store import (
 )
 from omnigent.studio.reviews.discussion import (
     AccountId,
+    AskReviewQuestion,
     CreateReviewComment,
+    DiscussionAnchor,
     FindingDiscussionAnchor,
+    QuestionDispatch,
+    QuestionExecution,
+    QuestionInput,
+    QuestionRecord,
     ReviewCollaboratorInput,
     ReviewComment,
     ReviewDiscussionFinding,
     ReviewDiscussionReport,
     ReviewDiscussionView,
+    ReviewQuestion,
 )
 from omnigent.studio.reviews.evidence import (
     Anchor,
@@ -74,6 +86,7 @@ from omnigent.studio.reviews.launch import SKILL_NAME, review_prompt, run_review
 from omnigent.studio.reviews.models import (
     CaptureResult,
     ReviewEvent,
+    ReviewHarness,
     ReviewOperation,
     ReviewPass,
     ReviewPlanProposal,
@@ -85,9 +98,11 @@ from omnigent.studio.reviews.models import (
     Sha,
 )
 from omnigent.studio.reviews.plan import plan_digest, plan_instructions, read_plan_proposal
+from omnigent.studio.reviews.questions import question_prompt, read_question_answer
 from omnigent.studio.reviews.report import (
     ConsolidatedReviewReport,
     ReviewerRunReport,
+    ReviewFinding,
     ReviewReport,
     consolidate_reports,
     qualify_citations,
@@ -125,6 +140,11 @@ IdempotencyKey = Annotated[
 ]
 FindingKey = Annotated[str, Path(pattern=r"^[0-9a-f]{64}$")]
 _RequestBody = TypeVar("_RequestBody", bound=BaseModel)
+_logger = logging.getLogger(__name__)
+
+
+def _discussion_reviewer_key(review_id: str) -> str:
+    return hashlib.sha256(f"discussion:{review_id}".encode()).hexdigest()
 
 
 async def _bounded_json(
@@ -1305,7 +1325,7 @@ def create_studio_reviews_router(
             profile = profiles[member.review_id]
             reports.append(
                 ReviewDiscussionReport(
-                    key=hashlib.sha256(f"discussion:{member.review_id}".encode()).hexdigest(),
+                    key=_discussion_reviewer_key(member.review_id),
                     label=profile.role.label if profile.role else profile.skill or profile.harness,
                     state=member.report.state,
                     summary=member.report.summary,
@@ -1314,6 +1334,12 @@ def create_studio_reviews_router(
         try:
             comments = await asyncio.to_thread(
                 review_store.list_discussion_comments,
+                run.id,
+                actor=access.actor,
+                owner=access.owner,
+            )
+            questions, answers = await asyncio.to_thread(
+                review_store.list_discussion_questions,
                 run.id,
                 actor=access.actor,
                 owner=access.owner,
@@ -1345,7 +1371,11 @@ def create_studio_reviews_router(
                 if entry.finding_key is not None
             ],
             comments=comments,
+            questions=questions,
+            agent_answers=answers,
             can_comment=access.can_comment,
+            can_ask=access.can_comment and create_reviewer is not None and send_review is not None,
+            can_use_review_workspace=access.actor == access.owner,
             collaborators=collaborators,
             sharing_available=(
                 access.actor == access.owner
@@ -1354,6 +1384,20 @@ def create_studio_reviews_router(
                 and permission_store is not None
             ),
         )
+
+    async def validate_discussion_anchor(
+        run: ReviewRun, anchor: DiscussionAnchor, patch: str
+    ) -> ReviewFinding | None:
+        if isinstance(anchor, FindingDiscussionAnchor):
+            report = await read_consolidation(
+                run, changed_anchors(patch), include_finding_keys=True
+            )
+            for entry in report.findings:
+                if entry.finding_key == anchor.finding_key:
+                    return entry.finding
+        elif anchor.is_in(displayed_anchors(patch)):
+            return None
+        raise HTTPException(422, "The discussion anchor is outside the captured diff")
 
     @router.post(
         "/studio/review-runs/{run_id}/discussion/comments",
@@ -1369,16 +1413,7 @@ def create_studio_reviews_router(
         patch = await saved_run_patch(access.run.id, access.owner)
         if patch is None:
             raise HTTPException(404, "This review has no captured diff")
-        anchor = body.anchor
-        if isinstance(anchor, FindingDiscussionAnchor):
-            report = await read_consolidation(
-                access.run, changed_anchors(patch), include_finding_keys=True
-            )
-            valid = any(entry.finding_key == anchor.finding_key for entry in report.findings)
-        else:
-            valid = anchor.is_in(displayed_anchors(patch))
-        if not valid:
-            raise HTTPException(422, "The discussion anchor is outside the captured diff")
+        await validate_discussion_anchor(access.run, body.anchor, patch)
         try:
             return await asyncio.to_thread(
                 review_store.post_discussion_comment,
@@ -1386,6 +1421,298 @@ def create_studio_reviews_router(
                 body,
                 actor=access.actor,
                 owner=access.owner,
+            )
+        except ReviewNotFoundError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ReviewConflictError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    async def question_execution(
+        request: Request, access: DiscussionAccess, body: AskReviewQuestion
+    ) -> QuestionExecution:
+        target = access.run.target
+        actor = access.actor
+        if body.host_id is None or body.workspace is None:
+            if actor != access.owner:
+                raise HTTPException(403, "Choose your own connected host and directory")
+            host_id, workspace, project_id = (
+                target.host_id,
+                target.workspace,
+                target.source_project_id,
+            )
+        else:
+            host_id, workspace, project_id = body.host_id, body.workspace, None
+        _, registry, connection = await _connected_review_host(request, actor, host_id)
+        try:
+            canonical = await validate_workspace(
+                host_registry=registry, host_id=host_id, workspace=workspace, spec_cwd=None
+            )
+        except WorkspaceValidationError as exc:
+            raise HTTPException(400, exc.message) from exc
+        if registry.get(host_id) is not connection:
+            raise HTTPException(503, "The question host reconnected. Try again.")
+        captured = (
+            next(
+                (
+                    member.profile
+                    for member in access.run.selected_reviewers()
+                    if _discussion_reviewer_key(member.id) == body.reviewer_key
+                ),
+                None,
+            )
+            if body.reviewer_key is not None
+            else None
+        )
+        agent_id = captured.agent_id if captured is not None else body.agent_id
+        if agent_id is None:
+            raise HTTPException(422, "Choose a reviewer from the captured roster")
+        agent = await validate_session_agent(
+            user_id=actor,
+            agent_id=agent_id,
+            agent_store=agent_store,
+            permission_store=permission_store,
+            conversation_store=conversation_store,
+        )
+        native = native_coding_agent_for_agent_name(agent.name)
+        harness = native.harness if native is not None else None
+        if (
+            harness not in ("codex-native", "claude-native")
+            or agent.session_id is not None
+            or not agent.operator_authored
+            or agent.id != builtin_agent_id(agent.name)
+            or (
+                captured is not None
+                and (captured.agent_version != str(agent.version) or captured.harness != harness)
+            )
+        ):
+            raise HTTPException(409, "Choose a current built-in Codex or Claude agent")
+        model, effort = validate_session_model_metadata(
+            model_override=captured.model if captured else body.model,
+            reasoning_effort=captured.reasoning_effort if captured else body.reasoning_effort,
+        )
+        return QuestionExecution(
+            host_id=host_id,
+            workspace=canonical,
+            project_id=project_id,
+            pr_number=target.pr_number,
+            profile=ReviewProfile(
+                agent_id=agent.id,
+                agent_version=str(agent.version),
+                harness=cast(ReviewHarness, harness),
+                model=model,
+                reasoning_effort=effort,
+            ),
+        )
+
+    async def question_record(
+        access: DiscussionAccess, question_id: str, *, intent: str | None = None
+    ) -> QuestionRecord | None:
+        try:
+            return await asyncio.to_thread(
+                review_store.get_discussion_question,
+                access.run.id,
+                _identifier(question_id),
+                actor=access.actor,
+                owner=access.owner,
+                intent=intent,
+            )
+        except ReviewNotFoundError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ReviewConflictError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    async def verify_question_session(
+        access: DiscussionAccess, record: QuestionRecord
+    ) -> Conversation:
+        session = await _owned_source(
+            record.view.session_id,
+            access.actor,
+            conversation_store,
+            permission_store,
+            auth_provider,
+            private=True,
+        )
+        execution = record.snapshot.execution
+        if (
+            session.parent_conversation_id is not None
+            or session.agent_id != execution.profile.agent_id
+            or (session.host_id, session.workspace, session.project_id)
+            != (execution.host_id, execution.workspace, execution.project_id)
+        ):
+            raise HTTPException(409, "The private question session binding changed")
+        return session
+
+    @router.post(
+        "/studio/review-runs/{run_id}/discussion/questions",
+        response_model=ReviewQuestion,
+        dependencies=_WRITE_GATES,
+        openapi_extra=_discussion_request_schema(AskReviewQuestion),
+    )
+    async def ask_review_question(request: Request, run_id: str) -> ReviewQuestion:
+        access = await discussion_access(request, run_id)
+        if not access.can_comment or (access.actor is not None and len(access.actor) > 128):
+            raise HTTPException(403, "This account cannot ask an agent in the review")
+        if create_reviewer is None or send_review is None:
+            raise HTTPException(503, "Native question sessions are unavailable")
+        body = await _bounded_json(request, AskReviewQuestion, limit=44 * 1024)
+        intent = hashlib.sha256(body.model_dump_json().encode()).hexdigest()
+        existing = await question_record(access, body.id, intent=intent)
+        if existing is not None:
+            return existing.view
+        patch = await saved_run_patch(access.run.id, access.owner)
+        if patch is None:
+            raise HTTPException(404, "This review has no captured diff")
+        finding = await validate_discussion_anchor(access.run, body.anchor, patch)
+        try:
+            prompt = question_prompt(body, access.run.target, patch, finding)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        execution = await question_execution(request, access, body)
+        snapshot = QuestionInput(
+            anchor=body.anchor,
+            body=body.body,
+            execution=execution,
+            prompt_digest=hashlib.sha256(prompt.rstrip().encode()).hexdigest(),
+        )
+        try:
+            record, created = await asyncio.to_thread(
+                review_store.claim_discussion_question,
+                access.run.id,
+                body.id,
+                snapshot,
+                intent,
+                actor=access.actor,
+                owner=access.owner,
+            )
+        except ReviewNotFoundError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ReviewConflictError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        if not created:
+            return record.view
+        session_id = record.view.session_id
+
+        async def settle(status: QuestionDispatch) -> ReviewQuestion:
+            try:
+                return await asyncio.to_thread(
+                    review_store.update_discussion_question,
+                    access.run.id,
+                    body.id,
+                    actor=access.actor,
+                    owner=access.owner,
+                    status=status,
+                )
+            except ReviewNotFoundError as exc:
+                raise HTTPException(404, str(exc)) from exc
+
+        try:
+            created_session = await create_reviewer(request, access.actor, execution, session_id)
+            if (
+                created_session.id != session_id
+                or not created_session.runner_id
+                or created_session.harness != execution.profile.harness
+            ):
+                raise RuntimeError("Question runner did not match its binding")
+            # A revoked collaborator must not send the prompt after the host starts.
+            current = await discussion_access(request, run_id)
+            if not current.can_comment or await question_record(current, body.id) is None:
+                raise HTTPException(404, "Review question not found")
+            session = await verify_question_session(current, record)
+            if session.runner_id != created_session.runner_id:
+                raise RuntimeError("Question runner changed before delivery")
+            response = await send_review(
+                request,
+                session_id,
+                SessionEventInput(
+                    type="message",
+                    data={
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": prompt}],
+                        "stable_id": initial_input_id(session_id),
+                    },
+                ),
+                created_session.runner_id,
+            )
+            pending_id = response.get("pending_id")
+            if (
+                response.get("queued") is not True
+                or not isinstance(pending_id, str)
+                or not pending_id
+            ):
+                raise RuntimeError("Question input acknowledgement is unavailable")
+        except asyncio.CancelledError:
+            await settle("unknown")
+            raise
+        except Exception as exc:  # noqa: BLE001 — side effects may have happened before failure
+            _logger.warning(
+                "Review question %s dispatch is unconfirmed (%s)", body.id, type(exc).__name__
+            )
+            return await settle("unknown")
+        return await settle("accepted")
+
+    @router.get(
+        "/studio/review-runs/{run_id}/discussion/questions/{question_id}",
+        response_model=ReviewQuestion,
+    )
+    async def get_review_question(
+        request: Request, response: Response, run_id: str, question_id: str
+    ) -> ReviewQuestion:
+        access = await discussion_access(request, run_id)
+        record = await question_record(access, question_id)
+        if record is None:
+            raise HTTPException(404, "Review question not found")
+        response.headers["Cache-Control"] = "no-store"
+        view = record.view
+        if view.answer is not None:
+            return view
+        if await asyncio.to_thread(conversation_store.get_conversation, view.session_id) is None:
+            return view
+        await verify_question_session(access, record)
+        state, answer = await asyncio.to_thread(
+            read_question_answer,
+            conversation_store,
+            session_id=view.session_id,
+            question_id=view.id,
+            target=access.run.target,
+            prompt_digest=record.snapshot.prompt_digest,
+            updated_at=view.updated_at,
+            running=view.status == "accepted",
+        )
+        if answer is None:
+            return view.model_copy(update={"answer_state": state})
+        try:
+            return await asyncio.to_thread(
+                review_store.update_discussion_question,
+                access.run.id,
+                view.id,
+                actor=access.actor,
+                owner=access.owner,
+                answer=answer,
+            )
+        except ReviewNotFoundError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+    @router.post(
+        "/studio/review-runs/{run_id}/discussion/questions/{question_id}/share",
+        response_model=ReviewQuestion,
+        dependencies=_WRITE_GATES,
+        openapi_extra=_discussion_request_schema(StartReviewRequest),
+    )
+    async def share_review_question_answer(
+        request: Request, run_id: str, question_id: str
+    ) -> ReviewQuestion:
+        access = await discussion_access(request, run_id)
+        if not access.can_comment:
+            raise HTTPException(403, "This account cannot share an answer on the review")
+        await _bounded_json(request, StartReviewRequest, limit=1024)
+        try:
+            return await asyncio.to_thread(
+                review_store.update_discussion_question,
+                access.run.id,
+                _identifier(question_id),
+                actor=access.actor,
+                owner=access.owner,
+                publish=True,
             )
         except ReviewNotFoundError as exc:
             raise HTTPException(404, str(exc)) from exc

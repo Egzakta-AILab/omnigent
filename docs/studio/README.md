@@ -413,6 +413,19 @@ and repository. **Revoke access** removes the collaborator's review and
 receipt access. Capture a new run to share a review from before the instance
 recorded the owner's account identity with each capture.
 
+### Ask an agent from a review thread
+
+Select **Ask an agent** on a finding or diff range. Choose a native Codex or
+Claude Code agent, or choose **Saved reviewer settings** to reuse that
+reviewer's agent and model in a fresh session. The owner can use the saved
+workspace. Collaborators choose a connected host and working directory under
+their own account.
+
+**Ask privately** sends the question and captured diff to the agent. The
+session uses the selected native agent's permissions. Open the private session
+to inspect it, then use **Share answer** to add the question and answer to the
+internal thread.
+
 For any workspace, open **Project settings → Repositories**, or open
 **Manage repositories** from the PR panel. The managers run on the connected
 macOS or Linux host. Choose a scan depth from 0 to 5 and click **Scan

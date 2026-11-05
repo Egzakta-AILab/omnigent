@@ -3755,6 +3755,113 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
         report = (await auth_client.get(f"{plan_path}/report")).json()
         assert [entry["review_id"] for entry in report["reviewers"]] == [required["id"]]
         assert report["proposal"] is None
+
+        # Bob may use the shared diff but his question runs under his own account.
+        assert (
+            await auth_client.post(collaborators_path, json={"user_id": "bob"})
+        ).status_code == 204
+        bob_host = uuid4().hex
+        _register_online_host(auth_app, bob_host, "bob")
+        auth_app.state.host_store.upsert_on_connect(
+            bob_host, "Bob host", "bob", configured_harnesses={"codex-native": True}
+        )
+        questions_path = f"{discussion_path}/questions"
+        question = {
+            "id": uuid4().hex,
+            "anchor": {"kind": "finding", "finding_key": finding_key},
+            "body": "Which path accepts the invalid input?",
+            "reviewer_key": view["reports"][0]["key"],
+        }
+        forbidden_host = await auth_client.post(
+            questions_path,
+            headers=foreign_headers,
+            json={**question, "host_id": host_id, "workspace": workspace},
+        )
+        assert forbidden_host.status_code in (403, 404), forbidden_host.text
+        assert send_review.await_count == 5
+        request_body = {**question, "host_id": bob_host, "workspace": "/bob-checkout"}
+        asked = await auth_client.post(questions_path, headers=foreign_headers, json=request_body)
+        assert asked.status_code == 200, asked.text
+        private_question = asked.json()
+        assert private_question["status"] == "accepted", asked.text
+        assert send_review.await_count == 6
+        private_session_id = private_question["session_id"]
+        private_session = conversations.get_conversation(private_session_id)
+        assert private_session is not None
+        assert (
+            private_session.host_id,
+            private_session.workspace,
+            private_session.project_id,
+        ) == (bob_host, "/bob-checkout", None)
+        assert permissions.get("bob", private_session_id).level == LEVEL_OWNER
+        assert permissions.get(RESERVED_USER_PUBLIC, private_session_id) is None
+        assert (
+            await auth_client.post(questions_path, headers=foreign_headers, json=request_body)
+        ).json() == private_question
+        assert send_review.await_count == 6
+        private_path = f"{questions_path}/{question['id']}"
+        assert (await auth_client.get(private_path)).status_code == 404
+        assert (await auth_client.get(discussion_path)).json()["questions"] == []
+        assert (
+            await auth_client.post(f"{private_path}/share", headers=foreign_headers, json={})
+        ).status_code == 409
+        prompt = send_review.await_args.args[2].data["content"][0]["text"]
+        assert base_sha in prompt and current_head in prompt and "Which path accepts" in prompt
+        response_body = {
+            "question_id": question["id"],
+            "base_sha": base_sha,
+            "head_sha": current_head,
+            "answer": "The changed condition at hello:1 admits the invalid case.",
+        }
+        reply = "```studio-review-answer-v1\n" + json.dumps(response_body) + "\n```"
+
+        def question_echo(text: str) -> None:
+            conversations.append(
+                private_session_id,
+                [
+                    NewConversationItem(
+                        type="message",
+                        response_id=uuid4().hex,
+                        data=MessageData(
+                            role="user", content=[{"type": "input_text", "text": text}]
+                        ),
+                    )
+                ],
+            )
+
+        question_echo(prompt)
+        save_assistant_message(private_session_id, reply)
+        question_echo("Unrelated input after the captured question")
+        different_answer = {**response_body, "answer": "The latest reply should not be shared."}
+        save_assistant_message(
+            private_session_id,
+            "```studio-review-answer-v1\n" + json.dumps(different_answer) + "\n```",
+        )
+        observed = await auth_client.get(private_path, headers=foreign_headers)
+        assert observed.json()["answer"] == response_body["answer"], observed.text
+        assert (await auth_client.get(discussion_path)).json()["agent_answers"] == []
+        published = await auth_client.post(
+            f"{private_path}/share", headers=foreign_headers, json={}
+        )
+        assert published.status_code == 200, published.text
+        shared_answer = (await auth_client.get(discussion_path)).json()["agent_answers"][0]
+        assert shared_answer["answer"] == response_body["answer"]
+        assert shared_answer["requested_by"] == "bob"
+        assert "session_id" not in shared_answer
+        assert (
+            await auth_client.delete(collaborators_path, params={"user_id": "bob"})
+        ).status_code == 204
+        assert (await auth_client.get(private_path, headers=foreign_headers)).status_code == 404
+        send_review.side_effect = RuntimeError("The input acknowledgement was lost")
+        owner_question = {**question, "id": uuid4().hex}
+        uncertain = await auth_client.post(questions_path, json=owner_question)
+        assert uncertain.status_code == 200 and uncertain.json()["status"] == "unknown"
+        owner_session = conversations.get_conversation(uncertain.json()["session_id"])
+        assert owner_session is not None and owner_session.project_id == expected_project_id
+        assert (
+            await auth_client.post(questions_path, json=owner_question)
+        ).json() == uncertain.json()
+        assert send_review.await_count == 7
         return
 
     created = await create_reviewer(request, "alice", review, review.id)

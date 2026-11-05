@@ -1978,6 +1978,9 @@ def test_studio_review_from_pr_panel(
         assert not ordinary_creates and not review_events
         collaborators: list[str] = []
         replies: list[dict] = []
+        questions: list[dict] = []
+        agent_answers: list[dict] = []
+        answer_reads = 0
         discussion_path = f"**/v1/studio/review-runs/{run_id}/discussion"
 
         def grant_discussion_access(route: Route) -> None:
@@ -2005,6 +2008,60 @@ def test_studio_review_from_pr_panel(
 
         page.route(f"{discussion_path}/collaborators", grant_discussion_access)
         page.route(f"{discussion_path}/comments", reply_in_discussion)
+
+        def create_private_question(route: Route) -> None:
+            payload = route.request.post_data_json
+            assert payload["anchor"] == replies[-1]["anchor"]
+            assert payload["reviewer_key"] == "6" * 64 and "host_id" not in payload
+            if questions:
+                assert payload["id"] == questions[0]["id"]
+                route.fulfill(json=questions[0])
+                return
+            saved = {
+                "id": payload["id"],
+                "anchor": payload["anchor"],
+                "body": payload["body"],
+                "session_id": "9" * 32,
+                "harness": "codex-native",
+                "status": "accepted",
+                "answer_state": "pending",
+                "answer": None,
+                "published_at": None,
+                "updated_at": review["created_at"],
+            }
+            questions.append(saved)
+            route.fulfill(status=503, json={"detail": "Dispatch response lost"})
+
+        def private_question_status(route: Route) -> None:
+            nonlocal answer_reads
+            question = questions[0]
+            assert question["id"] in route.request.url
+            if route.request.method == "GET":
+                answer_reads += 1
+                if answer_reads == 1:
+                    route.fulfill(status=503, json={"detail": "Answer temporarily unavailable"})
+                    return
+            question.update(
+                answer_state="ready", answer="The added line handles only valid input."
+            )
+            if route.request.method == "POST":
+                question["published_at"] = review["created_at"]
+                agent_answers.append(
+                    {
+                        "id": question["id"],
+                        "anchor": question["anchor"],
+                        "question": question["body"],
+                        "answer": question["answer"],
+                        "harness": question["harness"],
+                        "requested_by": "fixture-owner",
+                        "published_at": question["published_at"],
+                    }
+                )
+            route.fulfill(json=question)
+
+        page.route(f"{discussion_path}/questions", create_private_question)
+        page.route(f"{discussion_path}/questions/*", private_question_status)
+        page.route(f"{discussion_path}/questions/*/share", private_question_status)
         page.route(
             discussion_path,
             lambda route: route.fulfill(
@@ -2026,7 +2083,11 @@ def test_studio_review_from_pr_panel(
                     ],
                     "findings": [{"key": finding_key, "finding": report["findings"][0]}],
                     "comments": replies,
+                    "questions": questions,
+                    "agent_answers": agent_answers,
                     "can_comment": True,
+                    "can_ask": True,
+                    "can_use_review_workspace": True,
                     "collaborators": collaborators,
                     "sharing_available": True,
                 }
@@ -2052,6 +2113,32 @@ def test_studio_review_from_pr_panel(
         thread.get_by_role("textbox", name="Internal reply").fill("Check this changed line.")
         thread.get_by_role("button", name="Post internal reply", exact=True).click()
         expect(thread.get_by_text("Check this changed line.", exact=True)).to_be_visible()
+
+        def ask_question() -> None:
+            thread.get_by_role("button", name="Ask an agent", exact=True).click()
+            thread.get_by_label("Answer with").select_option("reviewer:" + "6" * 64)
+            thread.get_by_label("Question for agent").fill("What does this line handle?")
+            thread.get_by_role("button", name="Ask privately", exact=True).click()
+
+        ask_question()
+        expect(thread.get_by_role("alert")).to_contain_text("Dispatch response lost")
+        thread.get_by_role("button", name="Ask an agent", exact=True).click()
+        ask_question()
+        expect(thread.get_by_role("alert")).to_contain_text("Answer temporarily unavailable")
+        expect(thread.get_by_role("link", name="Open private session")).to_be_visible()
+        thread.get_by_role("button", name="Check for answer", exact=True).click()
+        expect(
+            thread.get_by_text("The added line handles only valid input.", exact=True)
+        ).to_be_visible()
+        expect(thread.get_by_role("link", name="Open private session")).to_have_attribute(
+            "href", "/c/" + "9" * 32
+        )
+        thread.get_by_role("button", name="Share answer", exact=True).click()
+        expect(
+            thread.get_by_text("Codex answer · Shared by fixture-owner", exact=True)
+        ).to_be_visible()
+        expect(thread.get_by_role("link", name="Open private session")).to_have_count(0)
+        page.screenshot(path=str(tmp_path / "review-agent-answer.png"))
         return
 
     page.goto(f"{base_url}/{'canvas/' if entry == 'canvas' else ''}c/{session_id}")
