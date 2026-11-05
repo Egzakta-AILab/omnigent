@@ -1632,6 +1632,22 @@ class SqlStudioReviewPatchChunk(OmnigentBase):
     )
 
 
+class SqlStudioReviewReceiptChunk(OmnigentBase):
+    """Content-addressed reproduction receipts scoped to an immutable run finding."""
+
+    __tablename__ = "studio_review_receipt_chunks"
+    workspace_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    run_id: Mapped[str] = mapped_column(Uuid16, primary_key=True)
+    finding_key: Mapped[bytes] = mapped_column(_CKSUM32, primary_key=True)
+    receipt_digest: Mapped[bytes] = mapped_column(_CKSUM32, primary_key=True)
+    position: Mapped[int] = mapped_column(SmallInteger, primary_key=True)
+    attached_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    payload: Mapped[bytes] = mapped_column(LargeBinary(12288), nullable=False)
+    __table_args__ = (
+        CheckConstraint("position >= 0 AND position < 16", name="ck_review_receipt_position"),
+    )
+
+
 class SqlStudioReviewPass(OmnigentBase):
     """Owner-private frozen PR context; execution remains owned by sessions."""
 
