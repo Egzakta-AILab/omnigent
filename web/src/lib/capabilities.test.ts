@@ -424,6 +424,14 @@ describe("custom agents settings capability", () => {
   );
 
   it.each([undefined, false, "true", true])(
+    "parses workspace_repositories strictly: %s",
+    async (catalog) => {
+      const parsed = await probe({ workspace_repositories: catalog });
+      expect(parsed.workspace_repositories).toBe(catalog === true);
+    },
+  );
+
+  it.each([undefined, false, "true", true])(
     "requires a boolean install capability: %s",
     async (install) => {
       const parsed = await probe({

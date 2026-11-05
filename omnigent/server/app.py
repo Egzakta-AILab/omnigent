@@ -297,6 +297,7 @@ class ServerInfoResponse(BaseModel):
     # absent on older servers, which clients treat as unsupported.
     session_pull_requests: bool = False
     studio_reviews: bool = False
+    workspace_repositories: bool = False
     # Absent on older servers, which clients treat as the default extensions.
     filesystem_attachments: FilesystemAttachmentsInfo | None = None
     # Scheduled tasks accept ``project_id``; older servers reject it.
@@ -3647,6 +3648,7 @@ def create_app(
                 "session_pull_requests": session_pull_requests.open_store(conversation_store)
                 is not None,
                 "studio_reviews": studio_review_store is not None,
+                "workspace_repositories": True,
                 "filesystem_attachments": {
                     "extensions": sorted(filesystem_attachment_policy.extensions),
                     "all_types": filesystem_attachment_policy.all_types,

@@ -6916,6 +6916,11 @@
             "default": false,
             "title": "Studio Reviews",
             "type": "boolean"
+          },
+          "workspace_repositories": {
+            "default": false,
+            "title": "Workspace Repositories",
+            "type": "boolean"
           }
         },
         "required": [

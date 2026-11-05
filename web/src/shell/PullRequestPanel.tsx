@@ -97,6 +97,8 @@ import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { gitProviderCopy, type GitProviderCopy } from "@/lib/gitProviders";
 import { parseHttpUrl } from "@/lib/openLinkInApp";
 import { absoluteTime, relativeTime } from "@/lib/relativeTime";
+import { isTempConvId } from "@/lib/tempConversationId";
+import { WorkspaceRepositories } from "@/studio/WorkspaceRepositories";
 import { ReviewPanel, useStudioReviewHistory } from "@/studio/reviews/ReviewPanel";
 import type { ReviewSource } from "@/studio/reviews/api";
 import {
@@ -996,6 +998,9 @@ export function PullRequestPanel({
   const mobileHeaderTarget = useMobilePanelHeaderTarget();
   const inMobileDrawer = mobileHeaderTarget !== undefined;
   const queryClient = useQueryClient();
+  const serverInfo = useServerInfo();
+  const hasWorkspaceCatalog =
+    serverInfo !== "loading" && serverInfo.workspace_repositories === true;
   const viewKey = ["pull-request-panel-view", conversationId];
   const { data: cachedView = DEFAULT_PANEL_VIEW } = useQuery<PullRequestPanelView>({
     queryKey: viewKey,
@@ -1060,6 +1065,7 @@ export function PullRequestPanel({
           "github-changed-files",
           "github-pr-diff",
           "session-pull-requests",
+          ...(hasWorkspaceCatalog ? ["workspace-repositories"] : []),
         ].map((key) => queryClient.invalidateQueries({ queryKey: [key, conversationId] })),
       );
     } finally {
@@ -1078,7 +1084,7 @@ export function PullRequestPanel({
   // Servers that store PRs decide which PRs the session links, so the controls
   // survive a selection switch and the runner and host being offline. Live info
   // then only supplies the selected PR's details.
-  const storesPrs = storesSessionPullRequests(useServerInfo());
+  const storesPrs = storesSessionPullRequests(serverInfo);
   const stored = useSessionPullRequests(conversationId, info.data);
   const hostOffline = useHostOffline(conversationId, info);
   const sandboxAsleep = useWorkspaceAsleep(conversationId);
@@ -1153,6 +1159,39 @@ export function PullRequestPanel({
         if (prUrl === selected) changeSelection(remaining.prs[0]?.url);
       },
     });
+  const attachPr = (prUrl: string, openDetails = false) => {
+    if (linkNeedsHost || update.isPending) return;
+    update.mutate(
+      { url: prUrl, action: "attach" },
+      {
+        onSuccess: async (data) => {
+          if (storesPrs && data.prs) {
+            const key = sessionPullRequestsKey(conversationId);
+            await queryClient.cancelQueries({ queryKey: key });
+            queryClient.setQueryData<StoredPullRequests>(key, (previous) => ({
+              prs: data.prs!.map((pr) => ({
+                ...previous?.prs.find((storedPr) => storedPr.url === pr.url),
+                ...pr,
+              })),
+              synced: previous?.synced ?? false,
+            }));
+          }
+          if (openDetails) {
+            updateView({ selected: data.selected_pr_url, showingDetails: true, subtab: "summary" });
+          } else {
+            changeSelection(data.selected_pr_url);
+          }
+          setLinking(false);
+          setUrl("");
+        },
+      },
+    );
+  };
+  const linkError = update.isError && (
+    <p role="alert" className="mt-1 text-ui text-destructive">
+      {update.error.message}
+    </p>
+  );
   const linkControls = (
     <>
       {linking && (
@@ -1167,28 +1206,7 @@ export function PullRequestPanel({
           }}
           onSubmit={(event) => {
             event.preventDefault();
-            if (linkNeedsHost) return;
-            update.mutate(
-              { url, action: "attach" },
-              {
-                onSuccess: async (data) => {
-                  if (storesPrs && data.prs) {
-                    const key = sessionPullRequestsKey(conversationId);
-                    await queryClient.cancelQueries({ queryKey: key });
-                    queryClient.setQueryData<StoredPullRequests>(key, (previous) => ({
-                      prs: data.prs!.map((pr) => ({
-                        ...previous?.prs.find((storedPr) => storedPr.url === pr.url),
-                        ...pr,
-                      })),
-                      synced: previous?.synced ?? false,
-                    }));
-                  }
-                  changeSelection(data.selected_pr_url);
-                  setLinking(false);
-                  setUrl("");
-                },
-              },
-            );
+            attachPr(url);
           }}
         >
           <Input
@@ -1210,11 +1228,7 @@ export function PullRequestPanel({
           </Button>
         </form>
       )}
-      {update.isError && (
-        <p role="alert" className="mt-1 text-ui text-destructive">
-          {update.error.message}
-        </p>
-      )}
+      {linkError}
     </>
   );
   const fallbackCopy = gitProviderCopy(
@@ -1308,6 +1322,24 @@ export function PullRequestPanel({
         <div className="shrink-0 border-b border-border p-2 [&>:first-child]:mt-0">
           {linkControls}
         </div>
+      )}
+      {active && hasWorkspaceCatalog && !isTempConvId(conversationId) && (
+        <WorkspaceRepositories
+          key={conversationId}
+          conversationId={conversationId}
+          hostOffline={hostOffline}
+          linkPending={update.isPending}
+          linkedUrls={prs.map((pr) => pr.url)}
+          onLink={(prUrl) => {
+            if (!hostOffline) attachPr(prUrl, true);
+          }}
+          onOpen={(prUrl) => {
+            updateView({ selected: prUrl, showingDetails: true, subtab: "summary" });
+          }}
+        />
+      )}
+      {!showTrackingControls && !linkInEmptyState && linkError && (
+        <div className="shrink-0 border-b border-border p-2 [&>:first-child]:mt-0">{linkError}</div>
       )}
       {unlink.isError && (
         <p role="alert" className="shrink-0 border-b border-border p-2 text-ui text-destructive">

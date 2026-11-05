@@ -66,11 +66,11 @@ import time
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import quote
 
 from omnigent import config as _config
-from omnigent.git_providers import host_of
+from omnigent.git_providers import ParsedRemote, host_of, resolve_pr_url
 from omnigent.host.identity_env import in_managed_sandbox
 from omnigent.runner import pr_resource
 from omnigent.runner.git_providers import (
@@ -333,7 +333,7 @@ def _resolved_base_nwo(root: str) -> str | None:
     return None
 
 
-def _workspace_key(root: str) -> str | None:
+def _workspace_key(root: str, *, timeout: float | None = None) -> str | None:
     """Return the stable per-workspace key for the account preference, or ``None``.
 
     The account preference is keyed by the **main worktree path** — the first
@@ -342,7 +342,11 @@ def _workspace_key(root: str) -> str | None:
     distinct. Purely local (no network, no auth), so it's available before any
     ``gh`` call — the constraint that rules out keying on the resolved base repo.
     """
-    rc, out, _ = _git(["worktree", "list", "--porcelain"], cwd=root)
+    argv = ["worktree", "list", "--porcelain"]
+    if timeout is None:
+        rc, out, _ = _git(argv, cwd=root)
+    else:
+        rc, out, _ = _run(["git", *argv], cwd=root, timeout=timeout)
     if rc != 0:
         return None
     for line in out.splitlines():
@@ -977,6 +981,70 @@ def _pr_view_json(root: str, fields: str, *, token: str | None = None) -> dict[s
     if not _resolved_base_nwo(root):
         _gh(["repo", "set-default", base_repo], cwd=root, token=token)
     return _gh_pr_view([str(number), "-R", base_repo], fields, cwd=root, token=token)
+
+
+def read_workspace_branch_pr(
+    root: str, remote: ParsedRemote, branch: str, *, deadline: float
+) -> tuple[Literal["found", "no_pr", "unavailable"], dict[str, str | int] | None]:
+    """Read the unique open same-repository PR for an explicitly scoped branch."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0 or not _gh_installed():
+        return "unavailable", None
+    # An explicit repo avoids the checkout's gh default, while the existing
+    # provider wrapper preserves local account and managed sandbox auth. The
+    # account preference retrieves a github.com token, so it is public-host only.
+    with _gh_deadline_scope(deadline):
+        token = None
+        if remote.host == "github.com" and not _in_sandbox():
+            key = _workspace_key(root, timeout=min(remaining, 1.0))
+            if key:
+                token = _account_token_for(root, workspace_key=key)
+        rc, stdout, _ = _gh(
+            [
+                "pr",
+                "list",
+                f"--repo={remote.host}/{remote.repository}",
+                f"--head={branch}",
+                "--state",
+                "open",
+                "--limit",
+                "2",
+                "--json",
+                "number,title,url,headRefName,isCrossRepository",
+            ],
+            cwd=root,
+            token=token,
+        )
+    if rc != 0:
+        return "unavailable", None
+    try:
+        prs = json.loads(stdout)
+    except ValueError:
+        return "unavailable", None
+    if not isinstance(prs, list):
+        return "unavailable", None
+    if not prs:
+        return "no_pr", None
+    if len(prs) != 1 or not isinstance(pr := prs[0], dict):
+        return "unavailable", None
+    url = pr.get("url")
+    title = pr.get("title")
+    parsed = resolve_pr_url(url) if isinstance(url, str) and len(url) <= 2048 else None
+    if (
+        pr.get("headRefName") != branch
+        or pr.get("isCrossRepository") is not False
+        or not isinstance(title, str)
+        or not title.strip()
+        or len(title) > 1024
+        or parsed is None
+        or parsed.provider != remote.provider
+        or parsed.host != remote.host
+        or parsed.repository.casefold() != remote.repository.casefold()
+        or type(pr.get("number")) is not int
+        or pr["number"] != parsed.number
+    ):
+        return "unavailable", None
+    return "found", {"url": parsed.url, "title": title, "number": parsed.number}
 
 
 def _workspace_github_info(root: str) -> dict[str, Any]:

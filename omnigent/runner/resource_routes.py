@@ -1401,6 +1401,28 @@ def register_resource_routes(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse(status_code=200, content=result)
 
+    @app.get("/v1/sessions/{session_id}/resources/workspace-repositories")
+    async def get_workspace_repositories(
+        session_id: str, repository: str | None = None
+    ) -> JSONResponse:
+        """Read the workspace manifest or discover one declared checkout's branch PR."""
+        from omnigent.workspace_fs import WorkspaceReaderError
+        from omnigent.workspace_repositories import read_workspace_repositories
+
+        root = Path(await _github_workspace_root(session_id))
+
+        def read() -> dict[str, Any]:
+            return read_workspace_repositories(root, repository)
+
+        try:
+            result = await (run_slow_io(read) if repository is None else run_provider_cli(read))
+        except WorkspaceReaderError as exc:
+            return JSONResponse(
+                status_code=exc.status,
+                content={"error": {"code": exc.code, "message": exc.message}},
+            )
+        return JSONResponse(content=result)
+
     @app.get("/v1/sessions/{session_id}/resources/repository-branches")
     async def get_repository_branches(session_id: str, repositories: str) -> JSONResponse:
         """Inspect server-provided repository targets in the existing workspace."""

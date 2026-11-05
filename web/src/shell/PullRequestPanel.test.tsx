@@ -213,6 +213,8 @@ import {
   LARGE_DIFF_THRESHOLD,
 } from "./PullRequestPanel";
 import { RunnerOfflineError } from "@/hooks/useWorkspaceChangedFiles";
+import { CapabilitiesProvider } from "@/lib/CapabilitiesContext";
+import { FALLBACK_SERVER_INFO } from "@/lib/capabilities";
 import { viewedStorageKey } from "@/lib/pullRequestViewed";
 
 const FORGE_DISPLAY = {
@@ -247,20 +249,28 @@ function file(
   };
 }
 
-function renderPanel(mobile = false, active?: boolean) {
+function renderPanel(mobile = false, active?: boolean, workspaceRepositories = false) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return {
     client,
     ...render(<PullRequestPanel conversationId="conv_1" active={active} />, {
       wrapper: ({ children }) => (
         <QueryClientProvider client={client}>
-          {mobile ? (
-            <MobilePanelDrawer open title="Pull Requests" onClose={() => {}}>
-              {children}
-            </MobilePanelDrawer>
-          ) : (
-            children
-          )}
+          <CapabilitiesProvider
+            info={
+              workspaceRepositories
+                ? { ...FALLBACK_SERVER_INFO, workspace_repositories: true }
+                : "loading"
+            }
+          >
+            {mobile ? (
+              <MobilePanelDrawer open title="Pull Requests" onClose={() => {}}>
+                {children}
+              </MobilePanelDrawer>
+            ) : (
+              children
+            )}
+          </CapabilitiesProvider>
         </QueryClientProvider>
       ),
     }),
@@ -2702,6 +2712,130 @@ describe("derivePullRequestPanelState", () => {
     expect(derivePullRequestPanelState(q({ data: azNoCli(true, { repo: null }) })).kind).toBe(
       "repo-unresolved",
     );
+  });
+});
+
+describe("workspace repository selection", () => {
+  const endpoint = "/v1/sessions/conv_1/resources/workspace-repositories";
+  const servicePr: PullRequestAssociation = {
+    ...OTHER_PR,
+    url: "https://github.com/Egzakta-AILab/Services/pull/6001",
+    repository: "Egzakta-AILab/Services",
+  };
+
+  function mockWorkspaceRepositories(originMismatch = false) {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url === endpoint) {
+        return Response.json({
+          manifest: "repos.yaml",
+          repositories: [
+            { name: "KVARK", path: "KVARK", depends_on: ["Services"], checkout: "ready" },
+            {
+              name: "Services",
+              path: "Services",
+              description: "Supporting services",
+              depends_on: [],
+              checkout: "ready",
+            },
+          ],
+        });
+      }
+      if (url === `${endpoint}?repository=Services`) {
+        if (originMismatch) {
+          return Response.json({
+            repository: "Services",
+            branch: "fix/service",
+            remote: "github.com/former-org/Services",
+            expected_remote: "github.com/Egzakta-AILab/Services",
+            state: "unavailable",
+            reason: "origin_mismatch",
+            pr: null,
+          });
+        }
+        return Response.json({
+          repository: "Services",
+          branch: "fix/service",
+          remote: "github.com/Egzakta-AILab/Services",
+          state: "found",
+          pr: { url: servicePr.url, number: servicePr.number, title: "Fix service" },
+        });
+      }
+      return new Response(null, { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  it("uses the declared checkout for an explicit branch lookup and attaches through the existing flow", async () => {
+    const fetchMock = mockWorkspaceRepositories();
+    state.stored.conv_1 = [];
+    Object.assign(state.info!.data!, { tracking_available: true, prs: [], pr: null });
+    state.updateSessionPr.mockImplementationOnce((_payload, options) =>
+      options.onSuccess({ selected_pr_url: servicePr.url, prs: [servicePr] }),
+    );
+    const user = userEvent.setup();
+    const { client } = renderPanel(false, true, true);
+
+    await user.click(await screen.findByText("Workspace repositories"));
+    const select = screen.getByRole("combobox", { name: "Workspace repository" });
+    expect(select).toHaveValue("KVARK");
+    expect(screen.getByText("Uses Services")).toBeVisible();
+
+    await user.selectOptions(select, "Services");
+    expect(screen.getByText("Supporting services")).toBeVisible();
+    expect(
+      fetchMock.mock.calls.map(([url]) => url).filter((url) => url.startsWith(endpoint)),
+    ).toEqual([endpoint]);
+
+    await user.click(screen.getByRole("button", { name: "Find branch PR" }));
+    expect(await screen.findByText("#6001 Fix service")).toBeVisible();
+    expect(screen.getByText("github.com/Egzakta-AILab/Services")).toBeVisible();
+    expect(fetchMock).toHaveBeenCalledWith(`${endpoint}?repository=Services`, expect.anything());
+    expect(state.updateSessionPr).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Link this PR" }));
+
+    expect(state.updateSessionPr).toHaveBeenCalledWith(
+      { url: servicePr.url, action: "attach" },
+      expect.anything(),
+    );
+    expect(client.getQueryData(["pull-request-panel-view", "conv_1"])).toMatchObject({
+      selected: servicePr.url,
+      showingDetails: true,
+    });
+    expect(await screen.findByRole("button", { name: "Open linked PR" })).toBeVisible();
+  });
+
+  it("explains how to recover from a checkout origin that differs from the manifest", async () => {
+    mockWorkspaceRepositories(true);
+    const user = userEvent.setup();
+    renderPanel(false, true, true);
+
+    await user.click(await screen.findByText("Workspace repositories"));
+    await user.selectOptions(
+      screen.getByRole("combobox", { name: "Workspace repository" }),
+      "Services",
+    );
+    await user.click(screen.getByRole("button", { name: "Find branch PR" }));
+
+    expect(await screen.findByText(/checkout’s origin differs from repos\.yaml/)).toBeVisible();
+    expect(screen.getByText("github.com/Egzakta-AILab/Services")).toBeVisible();
+    expect(screen.getByText("github.com/former-org/Services")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Link this PR" })).not.toBeInTheDocument();
+    expect(state.updateSessionPr).not.toHaveBeenCalled();
+  });
+
+  it("waits for the panel to open and limits read-only viewers to the catalog", async () => {
+    const fetchMock = mockWorkspaceRepositories();
+    state.canEdit = false;
+    const user = userEvent.setup();
+    const { rerender } = renderPanel(false, false, true);
+
+    expect(fetchMock).not.toHaveBeenCalledWith(endpoint, expect.anything());
+    rerender(<PullRequestPanel conversationId="conv_1" active />);
+
+    await user.click(await screen.findByText("Workspace repositories"));
+    expect(screen.getByRole("combobox", { name: "Workspace repository" })).toHaveValue("KVARK");
+    expect(screen.queryByRole("button", { name: "Find branch PR" })).not.toBeInTheDocument();
   });
 });
 

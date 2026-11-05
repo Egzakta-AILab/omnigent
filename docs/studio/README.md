@@ -12,40 +12,86 @@ acceptance use a local instance.
 
 ## Local checkout
 
-Install the prerequisites in [CONTRIBUTING.md](../../CONTRIBUTING.md#development-setup),
-including a `uv` satisfying [uv.toml](../../uv.toml). Use the repository's pinned
-Python and pnpm versions. Keep the lockfiles unchanged during setup.
+### 1. Start Omnigent on your Mac
 
-From this checkout:
+The existing Egzakta checkout has a built supervisor and installed dependencies.
+Run this in macOS Terminal:
+
+```sh
+cd /Users/pavluhin/Documents/Projects/Work/egzakta/omnigent
+export PATH="$PWD/.omnigent/tools/bin:$HOME/.local/bin:$PATH"
+.omnigent/build/cargo/debug/omnidev
+```
+
+The `PATH` line selects the checkout's compatible `uv` and makes your agent
+CLIs visible to the host. `omnidev` starts the server, local execution host and
+web UI. It opens the browser when ready. If needed, copy the exact `ui` URL
+from its header. The port is selected at startup.
+
+Keep the terminal open while using Omnigent. Press `q` or `Ctrl+C` to stop it.
+Starting again from this checkout reuses its local conversations and review
+records. The `--clean` option wipes that state. See the
+[supervisor guide](../../dev/omnidev/README.md#isolation) for storage and logs.
+
+If you already use the Omnigent desktop app, choose **Server → Change
+Server…** and enter the `server` URL from the same header. The desktop app
+uses the backend URL. Your browser uses the `ui` URL. In either client,
+select the host that `omnidev` already connected. See the
+[desktop connection guide](../../web/electron/README.md).
+
+### 2. Connect your existing agent accounts
+
+The local host runs each CLI under your macOS user. Your saved CLI sign-ins,
+configuration and skills are available there. In a second Terminal tab, check
+the status for the agents you want to use. Run the sign-in command only if
+needed, then check status again.
+
+| Agent | Check sign-in | Sign in with your existing account |
+| --- | --- | --- |
+| Claude Code | `claude auth status --text` | `claude auth login --claudeai` ([Claude Code CLI reference](https://code.claude.com/docs/en/cli-reference)) |
+| Codex | `codex login status` | `codex login` ([OpenAI authentication docs](https://developers.openai.com/codex/auth)) |
+| Cursor | `cursor-agent status` | `cursor-agent login` ([Cursor CLI authentication](https://cursor.com/docs/cli/reference/authentication)) |
+
+On this Mac, `agent` and `cursor-agent` are two names for the same Cursor CLI.
+`cursor` opens the editor. Choose the native **Cursor** agent in Omnigent to use
+the CLI account.
+
+In Omnigent, open **Settings → Harnesses** and select your Mac. Check the
+readiness shown on the three cards. If you just signed in, use **Check again**
+where available or wait for the next host refresh. If you changed `PATH`, quit
+and restart the supervisor from the terminal with the new path.
+
+### 3. Start your first session
+
+1. Choose **New session** and select your Mac in the host picker.
+2. Set the working directory to the root you want the agent to use. For the
+   Egzakta workspace, choose `/Users/pavluhin/Documents/Projects/Work/egzakta`.
+   For a single-repo session, choose that checkout's directory.
+3. Pick **Claude Code**, **Cursor** or **Codex** and send a short prompt such as
+   `Read-only: tell me the current directory and repository name.` Repeat with
+   a new session for each agent you want to check. Cursor may be under
+   **Other… → Cursor**.
+
+If a ready agent is hidden in the picker, check **Settings → Appearance → Show
+in agent pickers**. If a native terminal fails to open, run `tmux -V` in the
+launch terminal. Native sessions require tmux 3.3 or newer. The supervisor's
+`2` key shows the host log.
+
+All three agents can run regular sessions. The **Pull Requests → Review**
+reviewer picker in A3 supports **Codex** and **Claude Code**, including from a
+workspace session you started with Cursor. Continue with
+[Run a review locally](#run-a-review-locally).
+
+### Fresh checkout setup
+
+Install the prerequisites in [CONTRIBUTING.md](../../CONTRIBUTING.md#development-setup),
+including a `uv` that satisfies [uv.toml](../../uv.toml). From the fork checkout:
 
 ```sh
 uv sync --frozen --extra all --group dev
-uv run --no-sync pre-commit install
 pnpm install --frozen-lockfile --filter web
 cargo run --locked --manifest-path dev/omnidev/Cargo.toml
 ```
-
-`omnidev` starts the existing server, host and frontend supervisor. Open the
-exact UI URL it prints, or connect the installed desktop app to its server URL.
-Do not assume the default ports are available. `--pod-dir /absolute/path` selects
-an explicit state directory; see its [options](../../dev/omnidev/README.md#options).
-
-The pod isolates Omnigent's configuration, database, artifacts and logs. It
-inherits the execution user's native agent credentials and skills. It is not an
-OS sandbox. Keep the supervisor running while using the pod. Stopping it or
-sleeping the laptop can interrupt local execution.
-
-The settings already expose the setup details needed here:
-
-1. Open **Settings → Harnesses** and select the intended host.
-2. Check Codex and Claude Code readiness and their selected account.
-3. Inspect the existing Skills, MCPs and Plugins inventories. Use the existing
-   MCP tool probe when checking integration connectivity.
-4. Open a session on that host and verify its workspace before starting work.
-
-Organization skills remain provisioned through the existing organization tools.
-Each host needs its own authorized native configuration. Selecting the server
-in the desktop app does not move the laptop's skills or credentials there.
 
 ## Server from this fork
 
@@ -168,12 +214,24 @@ provenance needs.
 
 1. Start the local instance, connect your host and open a session you own in
    a workspace where you already run Codex or Claude Code.
-2. Attach a GitHub PR and open **Pull Requests → Review**. Choose the built-in
-   reviewer and a review skill from the host's catalog, then select **Run review**.
-3. Inspect the summary and findings. Open a finding's line in **Changes** to
+2. In the target repository, use `gh auth status` to check GitHub sign-in and
+   `gh pr view 'PR_URL'` with your PR URL to confirm the host can read it. If
+   needed, sign in with `gh auth login` on that host.
+3. In your session, open the **Workspace** panel on the right. Its default
+   toolbar uses icons. Hover over the branch icon between **Changes** and
+   **Agents** to find **Pull Requests**. If the icon is unpinned, open **+ →
+   Pull Requests**. In a multi-repo workspace, choose a checkout under
+   **Workspace repositories** and select **Find branch PR**, then link the
+   result. For any full PR URL, use **Link a PR**, paste the URL and select
+   **Link**. In the PR details, open **Review**, choose **Codex**
+   or **Claude Code**, select a review skill, then click **Run review**. The
+   skill list comes from the chosen reviewer and workspace. To inspect the
+   harness inventory, open **Settings → Harnesses**, select the host and open
+   the relevant harness card's **Skills** tab.
+4. Inspect the summary and findings. Open a finding's line in **Changes** to
    compare the claim with the diff. Refresh the page and reopen **Review** to
    check that the saved run and its linked reviewer session return.
-4. If the report is incomplete, open the reviewer session and ask it to repair
+5. If the report is incomplete, open the reviewer session and ask it to repair
    the structured report in the same conversation. Return to **Review** and
    refresh the report.
 
@@ -206,3 +264,26 @@ uv run --no-sync python scripts/verify_studio.py review \
 
 Use `--harness claude-native` for Claude Code. The command checks the saved
 revision, reviewer session and structured report through the instance API.
+
+## Use a multi-repo workspace
+
+In the project settings for your Egzakta sessions, select your Mac and set
+**Working directory** to `/Users/pavluhin/Documents/Projects/Work/egzakta`.
+Leave **Random worktree** off so new sessions open the root that contains your
+nested clones.
+
+Omnigent reads the root's existing `repos.yaml` to show declared checkouts in
+**Workspace → Pull Requests → Workspace repositories**. For example, choose
+`KVARK` for platform work and see its declared dependency on `Services`. Switch
+to `Services` when you need its own branch PR. GitHub lookup checks that the
+checkout's `origin` matches the manifest's host, organization and repository.
+Egzakta checkouts use `github.com/Egzakta-AILab`. **Find branch PR** looks for an
+open PR from the exact local branch name. Use **Link a PR** with the full URL
+for fork branches, closed PRs or another known PR.
+
+The session and its reviewer start at the workspace root, where the native
+harness resolves skills and rules through its normal configuration. Keep using
+`org` to provision those assets. Select a review skill from the actual host
+catalog in **Review**. A review pins the linked PR's repository, base and head
+revisions. The workspace **Changes** tab shows the outer checkout's local Git
+changes. Repo-specific check execution needs its own pinned checkout binding.

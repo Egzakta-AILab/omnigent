@@ -3363,6 +3363,81 @@ async def test_repository_branches_require_session_read_access(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("via_host", [False, True])
+async def test_workspace_repository_lookup_uses_bound_workspace(
+    app: FastAPI, client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch, via_host: bool
+) -> None:
+    from omnigent.server.routes import _host_filesystem
+
+    session_id = "79b22ebd2309e48fdeb450c65611d51b"
+    conversation = app.state.test_conversation_store.get_conversation(session_id)
+    conversation.workspace = "/workspace/meta"
+    conversation.host_id = "source-host"
+    path = f"/v1/sessions/{session_id}/resources/workspace-repositories"
+    result = {"repository": "KVARK", "branch": "feature", "state": "no_pr", "pr": None}
+    runner = _FakeRunnerClient(payload=result)
+    host_reads: list[dict[str, Any]] = []
+
+    async def read(**kwargs: Any) -> dict[str, Any]:
+        host_reads.append(kwargs)
+        return result
+
+    if via_host:
+        monkeypatch.setattr(app.state.test_host_registry, "get", lambda _host_id: object())
+        monkeypatch.setattr(_host_filesystem, "read_workspace_from_host", read)
+        set_runner_router(_FakeRunnerRouter(_OfflineRunnerClient()))  # type: ignore[arg-type]
+    else:
+        set_runner_router(_FakeRunnerRouter(runner))  # type: ignore[arg-type]
+
+    invalid = await client.get(path, params={"repository": "../Services"})
+    assert invalid.status_code == 422
+    response = await client.get(path, params={"repository": "KVARK", "workspace": "/other"})
+    assert response.status_code == 200, response.text
+    assert response.json() == result
+    assert conversation.workspace == "/workspace/meta"
+    if via_host:
+        assert len(host_reads) == 1
+        assert host_reads[0]["workspace"] == "/workspace/meta"
+        assert host_reads[0]["op"] == "workspace_repositories"
+        assert host_reads[0]["params"] == {"repository": "KVARK"}
+    else:
+        assert runner.calls == [("GET", path)]
+        assert runner.get_params == [{"repository": "KVARK"}]
+
+
+@pytest.mark.asyncio
+async def test_workspace_repository_discovery_requires_edit_access(
+    runner_globals_reset: None,
+) -> None:
+    del runner_globals_reset
+    session_id = "79b22ebd2309e48fdeb450c65611d51b"
+    user = "alice@example.com"
+    store = _ConversationStore()
+    conversation = store.get_conversation(session_id)
+    assert conversation is not None
+    conversation.workspace = "/workspace/meta"
+    conversation.share_workspace_files = True
+    permissions = _StubPermissionStore()
+    permissions.add_grant(user, session_id, LEVEL_READ)
+    app = _sessions_app(
+        store,
+        auth_provider=UnifiedAuthProvider(source="header", local_single_user=False),
+        permission_store=permissions,
+    )
+    runner = _FakeRunnerClient(payload={"manifest": "repos.yaml", "repositories": []})
+    set_runner_router(_FakeRunnerRouter(runner))  # type: ignore[arg-type]
+    path = f"/v1/sessions/{session_id}/resources/workspace-repositories"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://server",
+        headers={"X-Forwarded-Email": user},
+    ) as client:
+        assert (await client.get(path)).status_code == 200
+        assert (await client.get(path, params={"repository": "KVARK"})).status_code == 403
+    assert runner.calls == [("GET", path)]
+
+
+@pytest.mark.asyncio
 async def test_github_info_proxies_to_runner(client: httpx.AsyncClient) -> None:
     """GET /resources/github proxies to the runner and returns its payload.
 

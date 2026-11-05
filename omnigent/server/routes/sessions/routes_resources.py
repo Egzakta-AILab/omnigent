@@ -3606,6 +3606,35 @@ def register_resources_routes(
     # lives on ``file_read_router`` (gzip) above.
 
     @router.get(
+        "/sessions/{session_id}/resources/workspace-repositories",
+        include_in_schema=False,
+        response_model=None,
+    )
+    async def get_workspace_repositories(
+        request: Request,
+        session_id: str,
+        repository: str | None = Query(
+            default=None, min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$"
+        ),
+    ) -> dict[str, Any]:
+        """Read declared workspace members or look up one member's branch PR."""
+        if repository is None:
+            conv = await _authorize_browse_read(session_id, request)
+        else:
+            conv = await _validate_session(session_id, request, LEVEL_EDIT)
+        if not conv.workspace:
+            raise HTTPException(409, "Select a session working directory first")
+        params = {"repository": repository} if repository is not None else {}
+        return await _fs_get_with_host_fallback(
+            session_id,
+            conv,
+            op="workspace_repositories",
+            host_params=params,
+            runner_path=f"/v1/sessions/{session_id}/resources/workspace-repositories",
+            runner_params=params or None,
+        )
+
+    @router.get(
         "/sessions/{session_id}/resources/repository-branches",
         response_model=SessionRepositoryBranchList,
     )

@@ -3778,6 +3778,7 @@ class HostProcess:
             WorkspaceReaderError,
             read_repository_branches,
         )
+        from omnigent.workspace_repositories import read_workspace_repositories
 
         try:
             expanded = os.path.expanduser(frame.workspace)
@@ -3810,6 +3811,8 @@ class HostProcess:
                 payload = read_repository_branches(
                     Path(expanded), cast("list[dict[str, str]]", params["repositories"])
                 )
+            elif frame.op == "workspace_repositories":
+                payload = read_workspace_repositories(Path(expanded), params.get("repository"))
             else:
                 # A workspace can gain or lose its .git while the host is running.
                 repo_root = detect_git_root(Path(expanded))

@@ -268,6 +268,8 @@ export interface ServerInfo {
    * and ``Conversation.pull_request``); absent on older servers (off).
    */
   session_pull_requests?: boolean;
+  /** The session workspace can expose its repos.yaml repository catalog. */
+  workspace_repositories?: boolean;
   /** Private pull request review capture and execution are available. */
   studio_reviews?: boolean;
   /**
@@ -589,6 +591,7 @@ export async function resolveServerInfo(): Promise<ServerInfo> {
             ? data.session_event_types.filter((t): t is string => typeof t === "string")
             : [],
           session_pull_requests: data.session_pull_requests === true,
+          workspace_repositories: data.workspace_repositories === true,
           studio_reviews: data.studio_reviews === true,
           filesystem_attachments: parseFilesystemAttachments(data.filesystem_attachments),
           scheduled_task_projects: data.scheduled_task_projects === true,
