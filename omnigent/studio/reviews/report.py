@@ -71,6 +71,40 @@ class ReviewReport(FrozenModel):
     message_id: str | None = None
 
 
+class ReviewerRunReport(FrozenModel):
+    review_id: str
+    report: ReviewReport
+
+
+class ConsolidatedFinding(FrozenModel):
+    finding: ReviewFinding
+    review_ids: list[str]
+
+
+class ConsolidatedReviewReport(FrozenModel):
+    reviewers: list[ReviewerRunReport]
+    findings: list[ConsolidatedFinding]
+
+
+def consolidate_reports(reports: list[ReviewerRunReport]) -> ConsolidatedReviewReport:
+    """Group exact duplicates and keep disagreements at the same line separate."""
+    grouped: dict[str, tuple[ReviewFinding, list[str]]] = {}
+    for entry in reports:
+        if entry.report.state != "ready":
+            continue
+        for finding in entry.report.findings:
+            _, sources = grouped.setdefault(finding.model_dump_json(), (finding, []))
+            if entry.review_id not in sources:
+                sources.append(entry.review_id)
+    return ConsolidatedReviewReport(
+        reviewers=reports,
+        findings=[
+            ConsolidatedFinding(finding=finding, review_ids=sources)
+            for finding, sources in grouped.values()
+        ],
+    )
+
+
 def report_instructions(review: ReviewPass) -> str:
     """Describe the narrow result format without embedding repository contents."""
     example = {

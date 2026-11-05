@@ -321,6 +321,14 @@ summary, and findings. **Open transcript** shows the original exchange. In
 the PR’s **Review** tab, use **Show in diff** to jump to the cited file and
 line for a saved finding on the current revision.
 
+To group reviewers on the same revision, configure one reviewer and select
+**Add reviewer to run**. Repeat for the other profiles or skills, then select
+**Run selected reviewers**. A run captures the roster before launching its
+private reviewer sessions. Under **Review runs**, open the consolidation or
+select an individual reviewer to inspect the report. The run keeps its
+first complete report for each reviewer once read and shows a reason when
+a reviewer cannot start. A run with missing reports shows partial coverage.
+
 For any workspace, open **Project settings → Repositories**, or open
 **Manage repositories** from the PR panel. The managers run on the connected
 macOS or Linux host. Choose a scan depth from 0 to 5 and click **Scan

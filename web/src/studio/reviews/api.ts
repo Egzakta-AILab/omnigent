@@ -58,6 +58,8 @@ function hasValidDefaults(defaults: ReviewProfileDefaults | null | undefined): b
 
 export interface ReviewPass {
   id: string;
+  run_id?: string | null;
+  launch_error?: string | null;
   target: {
     pr_url: string;
     repository: string;
@@ -120,6 +122,70 @@ export interface CaptureReview {
   reasoning_effort?: string;
   profile_id?: string;
   profile_digest?: string;
+}
+
+export type ProjectReviewMember = CaptureReview & {
+  host_id: string;
+  workspace: string;
+  repository: string;
+};
+
+export interface ReviewRun {
+  id: string;
+  target: ReviewPass["target"];
+  reviewers: ReviewPass[];
+  created_at: number;
+}
+
+export interface ReviewRunPage {
+  entries: ReviewRun[];
+  next_cursor: string | null;
+}
+
+export interface ReviewRunReport {
+  reviewers: { review_id: string; report: ReviewReport }[];
+  findings: { finding: ReviewFinding; review_ids: string[] }[];
+}
+
+function reviewRunPath(runId: string) {
+  return `/v1/studio/review-runs/${encodeURIComponent(runId)}`;
+}
+
+function projectReviewRunsPath(projectId: string) {
+  return `/v1/projects/${encodeURIComponent(projectId)}/studio/review-runs`;
+}
+
+export function captureReviewRun(projectId: string, members: ProjectReviewMember[], key: string) {
+  return postReview<ReviewRun>(projectReviewRunsPath(projectId), key, { reviewers: members });
+}
+
+export function startReviewRun(runId: string) {
+  return postReview<{ run: ReviewRun; errors: Record<string, string> }>(
+    `${reviewRunPath(runId)}/start`,
+    `studio-review-run-start-${runId}`,
+    {},
+  );
+}
+
+export async function listProjectReviewRuns(
+  projectId: string,
+  prUrl: string,
+  afterId: string | null,
+  signal: AbortSignal,
+) {
+  const params = new URLSearchParams({ pr_url: prUrl });
+  if (afterId) params.set("after_id", afterId);
+  const page = await reviewRequest<ReviewRunPage>(`${projectReviewRunsPath(projectId)}?${params}`, {
+    signal,
+  });
+  if (!Array.isArray(page.entries) || (afterId && page.next_cursor === afterId)) {
+    throw new Error("Invalid review run history");
+  }
+  return page;
+}
+
+export function getReviewRunReport(runId: string, signal: AbortSignal) {
+  return reviewRequest<ReviewRunReport>(`${reviewRunPath(runId)}/report`, { signal });
 }
 
 export interface ProjectReviewWorkspace {

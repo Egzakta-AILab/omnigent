@@ -148,97 +148,170 @@ it("prefills profile defaults and drops model overrides when the harness changes
   cache.clear();
 });
 
-it("captures a project review with the selected workspace and starts its reviewer directly", async () => {
-  const prUrl = "https://github.com/example/repo/pull/1";
-  const baseSha = "1".repeat(40);
-  const headSha = "2".repeat(40);
-  const capturePath = "/v1/projects/project/studio/reviews";
-  const launchPath = "/v1/studio/reviews/review/start";
-  const profile = { id: "backend", label: "Backend", digest: "b".repeat(64) };
-  const captured = {
-    id: "review",
-    target: {
-      pr_url: prUrl,
-      base_sha: baseSha,
-      head_sha: headSha,
-      host_id: "selected-host",
-      workspace: "/selected workspace",
-      repository_path: "nested/repo",
-    },
-    profile: { harness: "codex-native", role: profile },
-    dispatch_status: "not_requested",
-  };
-  const launched = { ...captured, dispatch_status: "succeeded", reviewer_session_id: "review" };
-  const posts: { path: string; body: unknown }[] = [];
-  vi.mocked(authenticatedFetch).mockImplementation(async (input, init) => {
-    const url = new URL(String(input), "http://localhost");
-    const path = url.pathname;
-    if (init?.method === "POST") {
-      posts.push({ path, body: JSON.parse(String(init.body)) });
-      if (path === capturePath) return Response.json({ review: captured });
-      if (path === launchPath) return Response.json(launched);
-    }
-    if (path === capturePath) {
-      expect(url.searchParams.get("pr_url")).toBe(prUrl);
-      return Response.json({ object: "list", data: [], next_cursor: null });
-    }
-    if (path === "/v1/projects/project/studio/review-profiles") {
-      expect(url.searchParams.get("host_id")).toBe("selected-host");
-      expect(url.searchParams.get("workspace")).toBe("/selected workspace");
-      return Response.json({ profiles: [profile] });
-    }
-    if (path.endsWith("/codex-native/model-options")) return Response.json({ models: [] });
-    if (path === "/v1/skills") return Response.json({ skills: [] });
-    if (path === "/v1/studio/reviews/review") return Response.json(launched);
-    if (path === "/v1/studio/reviews/review/report") {
-      return Response.json({ state: "pending", summary: null, findings: [], message_id: null });
-    }
-    throw new Error(`Unexpected review request ${path}`);
-  });
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  const onReviewStarted = vi.fn();
-  render(
-    <MemoryRouter>
-      <QueryClientProvider client={client}>
-        <ProjectReviewPanel
-          active
-          projectId="project"
-          hostId="selected-host"
-          workspace="/selected workspace"
-          repository="nested/repo"
-          revision={{ prUrl, baseSha, headSha }}
-          onReviewStarted={onReviewStarted}
-        />
-      </QueryClientProvider>
-    </MemoryRouter>,
-  );
-  const user = userEvent.setup();
-  await user.click(await screen.findByRole("combobox", { name: "Reviewer profile" }));
-  await user.click(await screen.findByRole("option", { name: "Backend" }));
-  await user.click(screen.getByRole("combobox", { name: "Reviewer" }));
-  await user.click(await screen.findByRole("option", { name: "Codex" }));
-  await user.click(screen.getByRole("button", { name: "Run review" }));
-  await waitFor(() => expect(onReviewStarted).toHaveBeenCalledWith(launched));
-  expect(posts).toEqual([
-    {
-      path: capturePath,
-      body: {
+it.each(["single", "run"] as const)(
+  "launches a project %s from the selected workspace",
+  async (mode) => {
+    const prUrl = "https://github.com/example/repo/pull/1";
+    const baseSha = "1".repeat(40);
+    const headSha = "2".repeat(40);
+    const capturePath = "/v1/projects/project/studio/reviews";
+    const launchPath = "/v1/studio/reviews/review/start";
+    const profile = { id: "backend", label: "Backend", digest: "b".repeat(64) };
+    const security = { id: "security", label: "Security", digest: "c".repeat(64) };
+    const runsPath = "/v1/projects/project/studio/review-runs";
+    const runPath = "/v1/studio/review-runs/run";
+    let runWasStarted = false;
+    const captured = {
+      id: "review",
+      target: {
         pr_url: prUrl,
-        expected_base_sha: baseSha,
-        expected_head_sha: headSha,
-        agent_id: "codex",
-        harness: "codex-native",
-        profile_id: "backend",
-        profile_digest: "b".repeat(64),
+        base_sha: baseSha,
+        head_sha: headSha,
         host_id: "selected-host",
         workspace: "/selected workspace",
-        repository: "nested/repo",
+        repository_path: "nested/repo",
       },
-    },
-    { path: launchPath, body: {} },
-  ]);
-  expect(await screen.findByRole("link", { name: "Open review report" })).toHaveAttribute(
-    "href",
-    "/c/review?view=review",
-  );
-});
+      profile: { harness: "codex-native", role: profile },
+      dispatch_status: "not_requested",
+    };
+    const launched = { ...captured, dispatch_status: "succeeded", reviewer_session_id: "review" };
+    const second = {
+      ...launched,
+      id: "other",
+      reviewer_session_id: "other",
+      profile: { ...captured.profile, role: security },
+    };
+    const run = {
+      id: "run",
+      target: captured.target,
+      reviewers: [launched, second],
+      created_at: 0,
+    };
+    const finding = {
+      title: "A retry writes twice",
+      detail: "The second write is visible.",
+      path: "src/backend.py",
+      side: "head",
+      line: 12,
+      severity: "high",
+    };
+    const posts: { path: string; body: unknown }[] = [];
+    vi.mocked(authenticatedFetch).mockImplementation(async (input, init) => {
+      const url = new URL(String(input), "http://localhost");
+      const path = url.pathname;
+      if (init?.method === "POST") {
+        posts.push({ path, body: JSON.parse(String(init.body)) });
+        if (path === capturePath) return Response.json({ review: captured });
+        if (path === launchPath) return Response.json(launched);
+        if (path === runsPath) return Response.json(run);
+        if (path === `${runPath}/start`) {
+          runWasStarted = true;
+          return Response.json({ run, errors: {} });
+        }
+      }
+      if (path === runsPath)
+        return Response.json({ entries: runWasStarted ? [run] : [], next_cursor: null });
+      if (path === `${runPath}/report`)
+        return Response.json({
+          reviewers: [
+            {
+              review_id: "review",
+              report: { state: "ready", summary: "Backend report", findings: [finding] },
+            },
+            {
+              review_id: "other",
+              report: { state: "ready", summary: "Security report", findings: [finding] },
+            },
+          ],
+          findings: [{ finding, review_ids: ["review", "other"] }],
+        });
+      if (path === capturePath) {
+        expect(url.searchParams.get("pr_url")).toBe(prUrl);
+        return Response.json({ object: "list", data: [], next_cursor: null });
+      }
+      if (path === "/v1/projects/project/studio/review-profiles") {
+        expect(url.searchParams.get("host_id")).toBe("selected-host");
+        expect(url.searchParams.get("workspace")).toBe("/selected workspace");
+        return Response.json({ profiles: [profile, security] });
+      }
+      if (path.endsWith("/codex-native/model-options")) return Response.json({ models: [] });
+      if (path === "/v1/skills") return Response.json({ skills: [] });
+      if (path === "/v1/studio/reviews/review") return Response.json(launched);
+      if (path === "/v1/studio/reviews/review/report") {
+        return Response.json({ state: "pending", summary: null, findings: [], message_id: null });
+      }
+      throw new Error(`Unexpected review request ${path}`);
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const onReviewStarted = vi.fn();
+    render(
+      <MemoryRouter>
+        <QueryClientProvider client={client}>
+          <ProjectReviewPanel
+            active
+            projectId="project"
+            hostId="selected-host"
+            workspace="/selected workspace"
+            repository="nested/repo"
+            revision={{ prUrl, baseSha, headSha }}
+            onReviewStarted={onReviewStarted}
+          />
+        </QueryClientProvider>
+      </MemoryRouter>,
+    );
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("combobox", { name: "Reviewer profile" }));
+    await user.click(await screen.findByRole("option", { name: "Backend" }));
+    await user.click(screen.getByRole("combobox", { name: "Reviewer" }));
+    await user.click(await screen.findByRole("option", { name: "Codex" }));
+    if (mode === "run") {
+      await user.click(screen.getByRole("button", { name: "Add reviewer to run" }));
+      await user.click(screen.getByRole("combobox", { name: "Reviewer profile" }));
+      await user.click(await screen.findByRole("option", { name: "Security" }));
+      await user.click(screen.getByRole("button", { name: "Add reviewer to run" }));
+      await user.click(screen.getByRole("button", { name: "Run selected reviewers" }));
+      expect(await screen.findByText("2 / 2 reports ready")).toBeVisible();
+      expect(screen.getByText("Consolidated findings")).toBeVisible();
+      expect(screen.getAllByText(finding.title)).toHaveLength(1);
+      expect(posts.map((entry) => entry.path)).toEqual([runsPath, `${runPath}/start`]);
+      expect(posts[0].body).toMatchObject({
+        reviewers: [
+          { profile_id: "backend", host_id: "selected-host", expected_head_sha: headSha },
+          { profile_id: "security", host_id: "selected-host", expected_head_sha: headSha },
+        ],
+      });
+      await user.click(screen.getAllByRole("button", { name: "Security · Codex" })[0]);
+      expect(screen.getByText("Security report")).toBeVisible();
+      expect(screen.getByRole("link", { name: "Open reviewer report" })).toHaveAttribute(
+        "href",
+        "/c/other?view=review",
+      );
+      expect(onReviewStarted).not.toHaveBeenCalled();
+      return;
+    }
+    await user.click(screen.getByRole("button", { name: "Run review" }));
+    await waitFor(() => expect(onReviewStarted).toHaveBeenCalledWith(launched));
+    expect(posts).toEqual([
+      {
+        path: capturePath,
+        body: {
+          pr_url: prUrl,
+          expected_base_sha: baseSha,
+          expected_head_sha: headSha,
+          agent_id: "codex",
+          harness: "codex-native",
+          profile_id: "backend",
+          profile_digest: "b".repeat(64),
+          host_id: "selected-host",
+          workspace: "/selected workspace",
+          repository: "nested/repo",
+        },
+      },
+      { path: launchPath, body: {} },
+    ]);
+    expect(await screen.findByRole("link", { name: "Open review report" })).toHaveAttribute(
+      "href",
+      "/c/review?view=review",
+    );
+  },
+);

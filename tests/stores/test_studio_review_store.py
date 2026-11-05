@@ -447,3 +447,68 @@ def test_actual_keyset_query_uses_owner_session_index(
     assert "ix_studio_review_pass_owner_session" in details
     assert "created_at" in details
     assert "TEMP B-TREE" not in details
+
+
+def test_project_run_captures_roster_atomically_and_replays(store: StudioReviewStore) -> None:
+    project = uuid.uuid4().hex
+    target = _target(source_session_id=None, source_project_id=project, repository_path=".")
+    options = {
+        "owner_user_id": OWNER,
+        "idempotency_key": "run",
+        "request_hash": "a" * 64,
+        "target": target,
+        "profiles": [_profile(skill="backend"), _profile(skill="security")],
+    }
+    run = store.capture_run(**options)
+    assert store.capture_run(**options) == run
+    assert {review.profile.skill for review in run.reviewers} == {"backend", "security"}
+    assert all(review.run_id == run.id and review.target == target for review in run.reviewers)
+    assert all(review.reviewer_session_id is None for review in run.reviewers)
+    assert store.get_run(run.id, owner_user_id=OTHER) is None
+    assert store.list_runs(
+        project_id=project, owner_user_id=OWNER, pr_url=target.pr_url, limit=10
+    ).entries == [run]
+    with pytest.raises(ReviewConflictError):
+        store.capture_run(**{**options, "request_hash": "b" * 64})
+    assert store.get_run(run.id, owner_user_id=OWNER) == run
+    member = run.reviewers[0]
+    assert store.get_report_snapshot(member) is None
+    assert store.save_report_snapshot(member, '{"summary":"original"}') == '{"summary":"original"}'
+    assert (
+        store.save_report_snapshot(member, '{"summary":"follow-up"}') == '{"summary":"original"}'
+    )
+    assert store.get_report_snapshot(member) == '{"summary":"original"}'
+    newer = store.capture_run(**{**options, "idempotency_key": "second-run"})
+    first_page = store.list_runs(
+        project_id=project, owner_user_id=OWNER, pr_url=target.pr_url, limit=1
+    )
+    second_page = store.list_runs(
+        project_id=project,
+        owner_user_id=OWNER,
+        pr_url=target.pr_url,
+        limit=1,
+        after_id=first_page.next_cursor,
+    )
+    assert {first_page.entries[0].id, second_page.entries[0].id} == {run.id, newer.id}
+    assert second_page.next_cursor is None
+
+
+def test_project_run_rolls_back_all_captures_on_invalid_snapshot(store: StudioReviewStore) -> None:
+    project = uuid.uuid4().hex
+    target = _target(source_session_id=None, source_project_id=project, repository_path=".")
+    oversized = _profile().model_copy(update={"skill": "x" * 13000})
+    with pytest.raises(ValueError, match="byte budget"):
+        store.capture_run(
+            owner_user_id=OWNER,
+            idempotency_key="invalid",
+            request_hash="a" * 64,
+            target=target,
+            profiles=[_profile(), oversized],
+        )
+    assert (
+        store.list_runs(
+            project_id=project, owner_user_id=OWNER, pr_url=target.pr_url, limit=10
+        ).entries
+        == []
+    )
+    assert store.list_page(owner_user_id=OWNER, source_project_id=project, limit=10).entries == []

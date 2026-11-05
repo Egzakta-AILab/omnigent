@@ -15,6 +15,10 @@ import {
 
 const POLL_MS = 3_000;
 
+export function uniqueReviewFindings(findings: ReviewFinding[] | undefined) {
+  return new Map(findings?.map((finding) => [JSON.stringify(finding), finding]));
+}
+
 export function reviewSettingsLabel(review: ReviewPass): string {
   const { role, skill, harness, model, reasoning_effort } = review.profile;
   return [role?.label, skill, REVIEW_HARNESS_LABELS[harness], model, reasoning_effort]
@@ -33,7 +37,7 @@ function reviewSource(review: ReviewPass, finding: ReviewFinding): ReviewSource 
   };
 }
 
-function FindingCard({
+export function FindingCard({
   finding,
   review,
   current,
@@ -133,9 +137,7 @@ export function ReviewResult({
   });
   if (!review.reviewer_session_id || !sessionKnown) return null;
   const ready = report.data?.state === "ready" && !report.isError;
-  const findings = new Map(
-    report.data?.findings.map((finding) => [JSON.stringify(finding), finding]),
-  );
+  const findings = uniqueReviewFindings(report.data?.findings);
   return (
     <section aria-label="Review findings" className={standalone ? "space-y-4" : "space-y-2"}>
       <div className="flex flex-wrap items-center justify-between gap-1">

@@ -3090,6 +3090,7 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
     from fastapi import APIRouter, Request
 
     from omnigent.db.utils import builtin_agent_id
+    from omnigent.entities.conversation import MessageData, NewConversationItem
     from omnigent.errors import ErrorCode, OmnigentError
     from omnigent.harness_plugins import native_provider_for_key
     from omnigent.host.frames import (
@@ -3313,23 +3314,22 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
         history = await auth_client.get(path)
         assert history.status_code == 200, history.text
         assert history.json()["data"] == []
+        reviewer_input = {
+            "host_id": host_id,
+            "workspace": workspace,
+            "repository": "nested/project",
+            "pr_url": pr_url,
+            "expected_base_sha": base_sha,
+            "expected_head_sha": current_head,
+            "agent_id": reviewer.id,
+            "harness": "codex-native",
+            "profile_id": "backend",
+            "profile_digest": role_digest,
+            "model": "review-model",
+            "reasoning_effort": "high",
+        }
         capture = await auth_client.post(
-            path,
-            headers={"Idempotency-Key": "project-capture"},
-            json={
-                "host_id": host_id,
-                "workspace": workspace,
-                "repository": "nested/project",
-                "pr_url": pr_url,
-                "expected_base_sha": base_sha,
-                "expected_head_sha": current_head,
-                "agent_id": reviewer.id,
-                "harness": "codex-native",
-                "profile_id": "backend",
-                "profile_digest": role_digest,
-                "model": "review-model",
-                "reasoning_effort": "high",
-            },
+            path, headers={"Idempotency-Key": "project-capture"}, json=reviewer_input
         )
         assert capture.status_code == 201, capture.text
         captured = capture.json()["review"]
@@ -3380,6 +3380,111 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
         for private_path in (path, reviewer_path):
             private = await auth_client.get(private_path, headers={"X-Forwarded-Email": "bob"})
             assert private.status_code == 404, private.text
+        runs_path = path.replace("/reviews", "/review-runs")
+        headers = {"Idempotency-Key": "project-review-run"}
+        roster = {
+            "reviewers": [
+                reviewer_input,
+                {**reviewer_input, "model": "second-review-model"},
+            ]
+        }
+        run_capture = await auth_client.post(runs_path, headers=headers, json=roster)
+        assert run_capture.status_code == 200, run_capture.text
+        run = run_capture.json()
+        members = {member["id"] for member in run["reviewers"]}
+        assert len(members) == 2
+        assert run["target"] == captured["target"]
+        assert all(member["run_id"] == run["id"] for member in run["reviewers"])
+        assert {conv.id for conv in conversations.list_conversations().data} == before | {
+            review_id
+        }
+        assert (await auth_client.post(runs_path, headers=headers, json=roster)).json() == run
+        mismatched = {**reviewer_input, "expected_head_sha": "c" * 40}
+        invalid = await auth_client.post(
+            runs_path, headers=headers, json={"reviewers": [reviewer_input, mismatched]}
+        )
+        assert invalid.status_code == 422, invalid.text
+        assert (await auth_client.get(runs_path, params={"pr_url": pr_url})).json() == {
+            "entries": [run],
+            "next_cursor": None,
+        }
+
+        run_path = f"/v1/studio/review-runs/{run['id']}"
+        current_head = "c" * 40
+        stale_run = await auth_client.post(f"{run_path}/start", json={})
+        assert stale_run.status_code == 200, stale_run.text
+        assert set(stale_run.json()["errors"]) == members
+        assert all(
+            member["launch_error"]
+            for member in (await auth_client.get(run_path)).json()["reviewers"]
+        )
+        assert len(launches) == 1
+        current_head = "b" * 40
+        started_run = await auth_client.post(f"{run_path}/start", json={})
+        assert started_run.status_code == 200, started_run.text
+        assert started_run.json()["errors"] == {}
+        assert all(
+            member["launch_error"] is None for member in started_run.json()["run"]["reviewers"]
+        )
+        assert {
+            member["reviewer_session_id"] for member in started_run.json()["run"]["reviewers"]
+        } == members
+        assert {conv.id for conv in conversations.list_conversations().data} == before | {
+            review_id
+        } | members
+        assert send_review.await_count == 3
+        await auth_client.post(f"{run_path}/start", json={})
+        assert send_review.await_count == 3
+        consolidation = await auth_client.get(f"{run_path}/report")
+        assert consolidation.status_code == 200, consolidation.text
+        assert {entry["review_id"] for entry in consolidation.json()["reviewers"]} == members
+        assert consolidation.json()["findings"] == []
+        finding = {
+            "title": "Validate the input",
+            "detail": "The new branch accepts invalid values.",
+            "severity": "high",
+            "path": "src/service.py",
+            "side": "head",
+            "line": 2,
+        }
+
+        def save_assistant_message(member_id: str, text: str) -> None:
+            conversations.append(
+                member_id,
+                [
+                    NewConversationItem(
+                        type="message",
+                        response_id=uuid4().hex,
+                        data=MessageData(
+                            role="assistant",
+                            content=[{"type": "output_text", "text": text}],
+                            agent=reviewer.id,
+                        ),
+                    )
+                ],
+            )
+            conversations.set_session_live_status(member_id, "idle")
+
+        for member_id in members:
+            envelope = json.dumps(
+                {
+                    "review_id": member_id,
+                    "base_sha": base_sha,
+                    "head_sha": current_head,
+                    "summary": "Independent reviewer report",
+                    "findings": [finding],
+                }
+            )
+            save_assistant_message(member_id, "```studio-review-v1\n" + envelope + "\n```")
+        ready = await auth_client.get(f"{run_path}/report")
+        assert ready.status_code == 200, ready.text
+        assert len(ready.json()["findings"]) == 1
+        assert set(ready.json()["findings"][0]["review_ids"]) == members
+        save_assistant_message(next(iter(members)), "A later response from the reviewer.")
+        assert (await auth_client.get(f"{run_path}/report")).json() == ready.json()
+
+        private_run = await auth_client.get(run_path, headers={"X-Forwarded-Email": "bob"})
+        assert private_run.status_code == 404, private_run.text
         return
 
     created = await create_reviewer(request, "alice", review, review.id)

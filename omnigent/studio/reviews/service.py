@@ -9,13 +9,21 @@ from collections.abc import Awaitable, Callable
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, StringConstraints, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 
 from omnigent.stores.studio_review_store import (
     ReviewConflictError,
     StudioReviewStore,
 )
 from omnigent.studio.reviews.models import (
+    MAX_RUN_REVIEWERS,
     BoundedText,
     CaptureResult,
     ReviewProfile,
@@ -98,6 +106,43 @@ class CaptureProjectReviewRequest(CaptureReviewRequest):
     @classmethod
     def canonical_host_id(cls, value: str) -> str:
         return require_uuid(value)
+
+
+class CaptureReviewRunRequest(BaseModel):
+    """Each member uses the same project checkout and captured revision."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    reviewers: Annotated[
+        list[CaptureProjectReviewRequest], Field(min_length=1, max_length=MAX_RUN_REVIEWERS)
+    ]
+
+    @model_validator(mode="after")
+    def validate_roster(self) -> CaptureReviewRunRequest:
+        members = self.reviewers
+        target_fields = {
+            "pr_url",
+            "expected_base_sha",
+            "expected_head_sha",
+            "host_id",
+            "workspace",
+            "repository",
+        }
+        expected = members[0].model_dump(include=target_fields)
+        if any(member.model_dump(include=target_fields) != expected for member in members[1:]):
+            raise ValueError("All reviewers must use the same checkout and revision")
+        if len({member.model_dump_json() for member in members}) != len(members):
+            raise ValueError("Choose distinct reviewer configurations")
+        return self
+
+
+def review_run_fingerprint(project_id: str, body: CaptureReviewRunRequest) -> str:
+    payload = json.dumps(
+        ["review.run.capture", project_id, body.model_dump(mode="json")],
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()
 
 
 def capture_fingerprint(
