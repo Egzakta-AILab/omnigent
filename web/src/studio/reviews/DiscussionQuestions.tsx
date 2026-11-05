@@ -1,8 +1,9 @@
-import { useState, type RefObject } from "react";
+import { useId, useState, type RefObject } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
+import { nativeEffortOptions } from "@/components/HarnessConfigControls";
 import { Button } from "@/components/ui/button";
 import { useAvailableAgents } from "@/hooks/useAvailableAgents";
-import { useHosts } from "@/hooks/useHosts";
+import { useHostModelOptions, useHosts } from "@/hooks/useHosts";
 import { nativeCodingAgentForAgentName } from "@/lib/nativeCodingAgents";
 import { randomUUID } from "@/lib/randomUUID";
 import { Link } from "@/lib/routing";
@@ -122,11 +123,43 @@ function AskForm({
   const [reviewWorkspace, setReviewWorkspace] = useState(!!discussion.can_use_review_workspace);
   const [hostId, setHostId] = useState("");
   const [workspace, setWorkspace] = useState("");
+  const modelInputId = useId();
+  const effortInputId = useId();
+  const [modelChoice, setModelChoice] = useState<{
+    scope: string;
+    model: string;
+    effort: string;
+  }>();
   const agents = useAvailableAgents();
   const hosts = useHosts({ enabled: !reviewWorkspace });
   const onlineHosts = (hosts.data ?? []).filter((host) => host.status === "online");
+  const nativeAgents = (agents.data ?? []).flatMap((agent) => {
+    const harness = nativeCodingAgentForAgentName(agent.name)?.harness;
+    return agent.builtin && (harness === "codex-native" || harness === "claude-native")
+      ? [{ ...agent, harness }]
+      : [];
+  });
+  const nativeAgent = nativeAgents.find((agent) => agent.id === selection);
+  const reviewerKey = selection.startsWith("reviewer:") ? selection.slice("reviewer:".length) : "";
+  const modelHost = (reviewWorkspace ? discussion.review_workspace_host_id : hostId) || null;
+  const modelScope = JSON.stringify([modelHost, nativeAgent?.id]);
+  const modelCatalog = useHostModelOptions(modelHost, nativeAgent?.harness ?? "", !!nativeAgent, {
+    poll: false,
+  });
+  const models = modelCatalog.data ?? [];
+  const { model, effort } =
+    modelChoice?.scope === modelScope ? modelChoice : { model: "", effort: "" };
+  const validModel = !model || models.some((option) => option.id === model);
+  const efforts = validModel
+    ? (nativeEffortOptions(nativeAgent?.harness, models, model) ?? [])
+    : [];
+  const validEffort = !effort || efforts.some((option) => option.value === effort);
   const ready =
-    !!selection && !!body.trim() && (reviewWorkspace || (!!hostId && !!workspace.trim()));
+    (reviewerKey || nativeAgent) &&
+    !!body.trim() &&
+    validModel &&
+    validEffort &&
+    (reviewWorkspace || (!!hostId && !!workspace.trim()));
   const ask = useMutation({
     mutationFn: (input: AskReviewQuestion) => askReviewQuestion(discussion.id, input),
     onSuccess: async (_question, input) => {
@@ -144,9 +177,13 @@ function AskForm({
         const input = {
           anchor,
           body: body.trim(),
-          ...(selection.startsWith("reviewer:")
-            ? { reviewer_key: selection.slice("reviewer:".length) }
-            : { agent_id: selection }),
+          ...(reviewerKey
+            ? { reviewer_key: reviewerKey }
+            : {
+                agent_id: selection,
+                ...(model ? { model } : {}),
+                ...(effort ? { reasoning_effort: effort } : {}),
+              }),
           ...(reviewWorkspace ? {} : { host_id: hostId, workspace: workspace.trim() }),
         };
         const intent = JSON.stringify(input);
@@ -171,16 +208,11 @@ function AskForm({
               Saved reviewer settings · {report.label}
             </option>
           ))}
-          {(agents.data ?? [])
-            .filter((agent) => {
-              const native = nativeCodingAgentForAgentName(agent.name);
-              return native?.harness === "codex-native" || native?.harness === "claude-native";
-            })
-            .map((agent) => (
-              <option key={agent.id} value={agent.id}>
-                {agent.display_name ?? agent.name}
-              </option>
-            ))}
+          {nativeAgents.map((agent) => (
+            <option key={agent.id} value={agent.id}>
+              {agent.display_name ?? agent.name}
+            </option>
+          ))}
         </select>
       </label>
       {discussion.can_use_review_workspace && (
@@ -220,6 +252,71 @@ function AskForm({
               onChange={(event) => setWorkspace(event.target.value)}
             />
           </label>
+        </div>
+      )}
+      {nativeAgent && modelHost && (
+        <div className="grid gap-2 sm:grid-cols-2">
+          <div className="grid gap-1">
+            <label htmlFor={modelInputId}>Model</label>
+            <select
+              id={modelInputId}
+              className="w-full rounded-md border bg-background p-1"
+              value={model}
+              disabled={ask.isPending}
+              onChange={(event) =>
+                setModelChoice({ scope: modelScope, model: event.target.value, effort: "" })
+              }
+            >
+              <option value="">Agent default</option>
+              {!validModel && (
+                <option value={model} disabled>
+                  {model} (unavailable)
+                </option>
+              )}
+              {models.map((option) => (
+                <option key={option.id} value={option.id}>
+                  {option.displayName || option.id}
+                </option>
+              ))}
+            </select>
+          </div>
+          {(efforts.length > 0 || effort) && (
+            <div className="grid gap-1">
+              <label htmlFor={effortInputId}>Reasoning effort</label>
+              <select
+                id={effortInputId}
+                className="w-full rounded-md border bg-background p-1"
+                value={effort}
+                disabled={ask.isPending}
+                onChange={(event) =>
+                  setModelChoice({ scope: modelScope, model, effort: event.target.value })
+                }
+              >
+                <option value="">Default</option>
+                {!validEffort && (
+                  <option value={effort} disabled>
+                    {effort} (unavailable)
+                  </option>
+                )}
+                {efforts.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+          {modelCatalog.isPending && <p role="status">Loading models…</p>}
+          {modelCatalog.isError && (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={() => void modelCatalog.refetch()}
+            >
+              Retry loading models
+            </Button>
+          )}
         </div>
       )}
       <textarea

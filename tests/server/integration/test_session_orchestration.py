@@ -3592,6 +3592,9 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
         assert shared.status_code == 200, shared.text
         view = shared.json()
         assert view["collaborators"] is None and view["can_comment"] is True
+        assert view["review_workspace_host_id"] is None
+        owner_view = (await auth_client.get(discussion_path)).json()
+        assert owner_view["review_workspace_host_id"] == host_id
         assert (view["base_sha"], view["head_sha"], view["patch"]) == (
             base_sha,
             current_head,

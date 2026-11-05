@@ -2012,7 +2012,9 @@ def test_studio_review_from_pr_panel(
         def create_private_question(route: Route) -> None:
             payload = route.request.post_data_json
             assert payload["anchor"] == replies[-1]["anchor"]
-            assert payload["reviewer_key"] == "6" * 64 and "host_id" not in payload
+            assert payload["agent_id"] == agent_id and "host_id" not in payload
+            assert payload["model"] == model and payload["reasoning_effort"] == "high"
+            assert "reviewer_key" not in payload
             if questions:
                 assert payload["id"] == questions[0]["id"]
                 route.fulfill(json=questions[0])
@@ -2088,6 +2090,7 @@ def test_studio_review_from_pr_panel(
                     "can_comment": True,
                     "can_ask": True,
                     "can_use_review_workspace": True,
+                    "review_workspace_host_id": host_id,
                     "collaborators": collaborators,
                     "sharing_available": True,
                 }
@@ -2117,7 +2120,12 @@ def test_studio_review_from_pr_panel(
         def ask_question() -> None:
             thread.get_by_role("button", name="Ask an agent", exact=True).click()
             thread.get_by_label("Answer with").select_option("reviewer:" + "6" * 64)
+            expect(thread.get_by_label("Model", exact=True)).to_have_count(0)
+            thread.get_by_label("Answer with").select_option(agent_id)
+            thread.get_by_label("Model", exact=True).select_option(model)
+            thread.get_by_label("Reasoning effort", exact=True).select_option("high")
             thread.get_by_label("Question for agent").fill("What does this line handle?")
+            page.screenshot(path=str(tmp_path / "review-question-model.png"))
             thread.get_by_role("button", name="Ask privately", exact=True).click()
 
         ask_question()

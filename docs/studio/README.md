@@ -416,10 +416,12 @@ recorded the owner's account identity with each capture.
 ### Ask an agent from a review thread
 
 Select **Ask an agent** on a finding or diff range. Choose a native Codex or
-Claude Code agent, or choose **Saved reviewer settings** to reuse that
-reviewer's agent and model in a fresh session. The owner can use the saved
-workspace. Collaborators choose a connected host and working directory under
-their own account.
+Claude Code agent, then select a model from the execution host and set its
+reasoning effort where available. **Agent default** uses the native agent's
+configuration. **Saved reviewer settings** reuses the captured agent, model,
+and effort in a fresh session. The owner can use the saved workspace.
+Collaborators choose a connected host and working directory under their own
+account.
 
 **Ask privately** sends the question and captured diff to the agent. The
 session uses the selected native agent's permissions. Open the private session
