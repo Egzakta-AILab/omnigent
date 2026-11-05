@@ -1580,6 +1580,70 @@ def test_studio_review_from_pr_panel(
             else:
                 route.continue_()
 
+        run_posts: list[str] = []
+        run: dict = {}
+        run_id = "f" * 32
+        run_reviewers = ("2" * 32, "3" * 32)
+        run_started = False
+
+        def project_runs(route: Route) -> None:
+            if route.request.method == "GET":
+                route.fulfill(json={"entries": [run] if run else [], "next_cursor": None})
+                return
+            assert route.request.method == "POST"
+            run_posts.append("capture")
+            inputs = route.request.post_data_json["reviewers"]
+            assert [item["skill"] for item in inputs] == ["team-review", "security-review"]
+            assert all(item["expected_head_sha"] == head_sha for item in inputs)
+            run.update(
+                id=run_id,
+                target=review["target"],
+                reviewers=[
+                    {
+                        **review,
+                        "id": member_id,
+                        "run_id": run_id,
+                        "profile": {**review["profile"], "skill": item["skill"]},
+                        "dispatch_status": "not_requested",
+                        "reviewer_session_id": None,
+                    }
+                    for member_id, item in zip(run_reviewers, inputs, strict=True)
+                ],
+                created_at=review["created_at"],
+            )
+            route.fulfill(json=run)
+
+        def start_project_run(route: Route) -> None:
+            nonlocal run_started
+            assert route.request.method == "POST"
+            run_posts.append("start")
+            run_started = True
+            for member in run["reviewers"]:
+                member.update(dispatch_status="running", reviewer_session_id=member["id"])
+            route.fulfill(json={"run": run, "errors": {}})
+
+        def project_run_report(route: Route) -> None:
+            route.fulfill(
+                json={
+                    "reviewers": [
+                        {
+                            "review_id": member_id,
+                            "report": {
+                                **report,
+                                "state": "ready" if run_started else "pending",
+                                "summary": f"Reviewer {index + 1} report" if run_started else None,
+                            },
+                        }
+                        for index, member_id in enumerate(run_reviewers)
+                    ],
+                    "findings": [
+                        {"finding": report["findings"][0], "review_ids": list(run_reviewers)}
+                    ]
+                    if run_started
+                    else [],
+                }
+            )
+
         project_path = f"**/v1/projects/{project_id}"
         page.route(re.compile(r"/v1/sessions(?:\?|$)"), reject_unexpected_create)
         page.route("**/v1/sessions/*/events", observed_events)
@@ -1639,6 +1703,21 @@ def test_studio_review_from_pr_panel(
         page.route(
             f"{project_path}/studio/review-profiles?*", lambda r: r.fulfill(json={"profiles": []})
         )
+        page.route(re.compile(r"/studio/review-runs(?:\?|$)"), project_runs)
+        page.route(f"**/v1/studio/review-runs/{run_id}/start", start_project_run)
+        page.route(f"**/v1/studio/review-runs/{run_id}/report", project_run_report)
+        page.route(
+            "**/v1/skills?*",
+            lambda r: r.fulfill(
+                json={
+                    "skills": [
+                        {"name": "team-review", "description": "Review a patch"},
+                        {"name": "security-review", "description": "Review security"},
+                    ],
+                    "warnings": [],
+                }
+            ),
+        )
         page.route(f"**/v1/sessions/{reviewer_id}/studio/review", lambda r: r.fulfill(json=review))
         report.update(
             state="ready",
@@ -1687,6 +1766,24 @@ def test_studio_review_from_pr_panel(
         workspace_panel.get_by_role("button", name="Show in diff", exact=True).click()
         expect(diff_tab).to_have_attribute("data-state", "active")
         expect(workspace_panel.get_by_text("Review finding · src/app/main.py:2")).to_be_visible()
+        workspace_panel.get_by_role("tab", name="Review", exact=True).click()
+        workspace_panel.get_by_role("combobox", name="Reviewer", exact=True).click()
+        page.get_by_role("option", name="Codex", exact=True).click()
+        for skill in ("team-review", "security-review"):
+            workspace_panel.get_by_role("combobox", name="Review skill", exact=True).click()
+            page.get_by_role("option", name=skill, exact=True).click()
+            workspace_panel.get_by_role("button", name="Add reviewer to run", exact=True).click()
+        workspace_panel.get_by_role("button", name="Run selected reviewers", exact=True).click()
+        runs_panel = workspace_panel.get_by_role("region", name="Review runs", exact=True)
+        expect(runs_panel.get_by_text("2 / 2 reports ready")).to_be_visible()
+        consolidation = runs_panel.get_by_role("region", name="Consolidation")
+        expect(consolidation.get_by_text("Keep the input validation")).to_have_count(1)
+        consolidation.get_by_role("button", name=re.compile(r"^security-review")).click()
+        expect(runs_panel.get_by_text("Reviewer 2 report")).to_be_visible()
+        expect(runs_panel.get_by_role("link", name="Open reviewer report")).to_have_attribute(
+            "href", f"/c/{run_reviewers[1]}?view=review"
+        )
+        assert run_posts == ["capture", "start"]
         assert len(capture_keys) == len(start_keys) == 1
         assert not ordinary_creates and not review_events
         return

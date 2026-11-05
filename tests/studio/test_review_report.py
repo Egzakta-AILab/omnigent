@@ -18,7 +18,14 @@ from omnigent.entities.conversation import (
 from omnigent.entities.pagination import PagedList
 from omnigent.stores.conversation_store import ConversationStore
 from omnigent.studio.reviews.models import ReviewPass, ReviewProfile, ReviewRole, ReviewTarget
-from omnigent.studio.reviews.report import read_review_report, report_instructions
+from omnigent.studio.reviews.report import (
+    ReviewerRunReport,
+    ReviewFinding,
+    ReviewReport,
+    consolidate_reports,
+    read_review_report,
+    report_instructions,
+)
 
 
 class _MessageAttributes(TypedDict, total=False):
@@ -441,3 +448,34 @@ def test_does_not_read_a_missing_or_source_session_binding(review: ReviewPass) -
         invalid = review.model_copy(update={"reviewer_session_id": session_id})
         assert read_review_report(store, invalid).state == "pending"
     store.list_items.assert_not_called()
+
+
+def test_consolidation_keeps_provenance_and_disagreements():
+    finding = ReviewFinding(
+        title="Duplicate write",
+        detail="The retry can duplicate a write.",
+        severity="high",
+        path="src/handler.py",
+        side="head",
+        line=17,
+    )
+    disagreement = finding.model_copy(update={"detail": "Only the log message is duplicated."})
+    report = ReviewReport(state="ready", findings=[finding])
+    result = consolidate_reports(
+        [
+            ReviewerRunReport(review_id="backend", report=report),
+            ReviewerRunReport(
+                review_id="security",
+                report=report.model_copy(update={"findings": [finding, disagreement]}),
+            ),
+            ReviewerRunReport(
+                review_id="frontend", report=ReviewReport(state="incomplete", findings=[finding])
+            ),
+        ]
+    )
+    assert [entry.review_ids for entry in result.findings] == [
+        ["backend", "security"],
+        ["security"],
+    ]
+    assert result.findings[1].finding == disagreement
+    assert result.reviewers[2].report.state == "incomplete"

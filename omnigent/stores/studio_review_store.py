@@ -18,6 +18,7 @@ from omnigent.db.db_models import (
     SqlStudioReviewEvent,
     SqlStudioReviewOperation,
     SqlStudioReviewPass,
+    SqlStudioReviewRun,
     current_workspace_id,
 )
 from omnigent.db.utils import (
@@ -26,6 +27,7 @@ from omnigent.db.utils import (
     run_write_transaction,
 )
 from omnigent.studio.reviews.models import (
+    MAX_RUN_REVIEWERS,
     CaptureResult,
     DispatchStatus,
     EventPage,
@@ -37,6 +39,8 @@ from omnigent.studio.reviews.models import (
     ReviewPage,
     ReviewPass,
     ReviewProfile,
+    ReviewRun,
+    ReviewRunPage,
     ReviewState,
     ReviewTarget,
     require_uuid,
@@ -126,6 +130,8 @@ def _name(codes: dict[_T, int], code: int) -> _T:
 def _review(row: SqlStudioReviewPass) -> ReviewPass:
     return ReviewPass(
         id=row.id,
+        run_id=row.run_id,
+        launch_error=row.launch_error,
         owner_user_id=row.owner_user_id,
         target=ReviewTarget.model_validate_json(row.target_json),
         profile=ReviewProfile.model_validate_json(row.profile_json),
@@ -229,6 +235,55 @@ class StudioReviewStore:
             row = self._pass_row(session, review_id, _owner_scope(owner_user_id))
             return None if row is None else _review(row)
 
+    def _insert_capture(
+        self,
+        session: Session,
+        owner_user_id: str | None,
+        idempotency_key: str,
+        request_hash: str,
+        target: ReviewTarget,
+        profile: ReviewProfile,
+        *,
+        now: int,
+        run_id: str | None = None,
+    ) -> CaptureResult:
+        owner = _owner_scope(owner_user_id)
+        digest = _request_values(idempotency_key, request_hash)
+        row = SqlStudioReviewPass(
+            workspace_id=current_workspace_id(),
+            id=uuid.uuid4().hex,
+            owner_scope=owner,
+            run_id=run_id,
+            owner_user_id=owner_user_id,
+            source_session_id=target.source_session_id,
+            source_project_id=target.source_project_id,
+            target_json=_snapshot(target),
+            profile_json=_snapshot(profile),
+            state=_PASS_STATES["prepared"],
+            dispatch_status=_DISPATCH_STATES["not_requested"],
+            reviewer_session_id=None,
+            created_at=now,
+            updated_at=now,
+            version=1,
+        )
+        operation = SqlStudioReviewOperation(
+            workspace_id=current_workspace_id(),
+            id=uuid.uuid4().hex,
+            owner_scope=owner,
+            review_id=row.id,
+            action=_ACTIONS["review.capture"],
+            idempotency_key=idempotency_key,
+            request_hash=digest,
+            start_once=None,
+            state=_OP_STATES["succeeded"],
+            version=1,
+            created_at=now,
+            updated_at=now,
+        )
+        session.add_all([row, operation])
+        self._event(session, row, operation, "review.captured", now, initial=True)
+        return CaptureResult(review=_review(row), operation=_operation(operation), created=True)
+
     def capture(
         self,
         *,
@@ -240,7 +295,6 @@ class StudioReviewStore:
     ) -> CaptureResult:
         owner = _owner_scope(owner_user_id)
         digest = _request_values(idempotency_key, request_hash)
-        target_json, profile_json = _snapshot(target), _snapshot(profile)
 
         def replay(session: Session, operation: SqlStudioReviewOperation) -> CaptureResult:
             if bytes(operation.request_hash) != digest:
@@ -256,41 +310,14 @@ class StudioReviewStore:
             existing = self._request_row(session, owner, "review.capture", idempotency_key)
             if existing is not None:
                 return replay(session, existing)
-            now = time.time_ns() // 1_000_000
-            row = SqlStudioReviewPass(
-                workspace_id=current_workspace_id(),
-                id=uuid.uuid4().hex,
-                owner_scope=owner,
-                owner_user_id=owner_user_id,
-                source_session_id=target.source_session_id,
-                source_project_id=target.source_project_id,
-                target_json=target_json,
-                profile_json=profile_json,
-                state=_PASS_STATES["prepared"],
-                dispatch_status=_DISPATCH_STATES["not_requested"],
-                reviewer_session_id=None,
-                created_at=now,
-                updated_at=now,
-                version=1,
-            )
-            operation = SqlStudioReviewOperation(
-                workspace_id=current_workspace_id(),
-                id=uuid.uuid4().hex,
-                owner_scope=owner,
-                review_id=row.id,
-                action=_ACTIONS["review.capture"],
-                idempotency_key=idempotency_key,
-                request_hash=digest,
-                start_once=None,
-                state=_OP_STATES["succeeded"],
-                version=1,
-                created_at=now,
-                updated_at=now,
-            )
-            session.add_all([row, operation])
-            self._event(session, row, operation, "review.captured", now, initial=True)
-            return CaptureResult(
-                review=_review(row), operation=_operation(operation), created=True
+            return self._insert_capture(
+                session,
+                owner_user_id,
+                idempotency_key,
+                request_hash,
+                target,
+                profile,
+                now=time.time_ns() // 1_000_000,
             )
 
         try:
@@ -301,6 +328,206 @@ class StudioReviewStore:
                 if existing is None:
                     raise
                 return replay(session, existing)
+
+    def _materialize_runs(
+        self, session: Session, rows: list[SqlStudioReviewRun], owner: bytes
+    ) -> list[ReviewRun]:
+        if not rows:
+            return []
+        members = session.scalars(
+            select(SqlStudioReviewPass)
+            .where(
+                SqlStudioReviewPass.workspace_id == current_workspace_id(),
+                SqlStudioReviewPass.owner_scope == owner,
+                SqlStudioReviewPass.run_id.in_([row.id for row in rows]),
+            )
+            .order_by(SqlStudioReviewPass.created_at, SqlStudioReviewPass.id)
+        )
+        by_run: dict[str, list[ReviewPass]] = {row.id: [] for row in rows}
+        for member in members:
+            if member.run_id is not None:
+                by_run[member.run_id].append(_review(member))
+        return [
+            ReviewRun(
+                id=row.id,
+                target=ReviewTarget.model_validate_json(row.target_json),
+                reviewers=by_run[row.id],
+                created_at=row.created_at,
+            )
+            for row in rows
+        ]
+
+    def _run_request(
+        self, session: Session, owner: bytes, key: bytes, digest: bytes
+    ) -> ReviewRun | None:
+        row = session.scalar(
+            select(SqlStudioReviewRun).where(
+                SqlStudioReviewRun.workspace_id == current_workspace_id(),
+                SqlStudioReviewRun.owner_scope == owner,
+                SqlStudioReviewRun.request_key == key,
+            )
+        )
+        if row is None:
+            return None
+        if bytes(row.request_hash) != digest:
+            raise ReviewConflictError("Idempotency key was used for a different review run")
+        return self._materialize_runs(session, [row], owner)[0]
+
+    def find_run_request(
+        self, *, owner_user_id: str | None, idempotency_key: str, request_hash: str
+    ) -> ReviewRun | None:
+        digest = _request_values(idempotency_key, request_hash)
+        key = hashlib.sha256(idempotency_key.encode()).digest()
+        with self._session("find_review_run_request") as session:
+            return self._run_request(session, _owner_scope(owner_user_id), key, digest)
+
+    def capture_run(
+        self,
+        *,
+        owner_user_id: str | None,
+        idempotency_key: str,
+        request_hash: str,
+        target: ReviewTarget,
+        profiles: list[ReviewProfile],
+    ) -> ReviewRun:
+        """Persist the complete roster and its capture receipts in one transaction."""
+        project_id = target.source_project_id
+        if project_id is None or not 1 <= len(profiles) <= MAX_RUN_REVIEWERS:
+            raise ValueError("A run requires a project and a bounded reviewer roster")
+        owner = _owner_scope(owner_user_id)
+        key = hashlib.sha256(idempotency_key.encode()).digest()
+        digest = _request_values(idempotency_key, request_hash)
+
+        def write(session: Session) -> ReviewRun:
+            existing = self._run_request(session, owner, key, digest)
+            if existing is not None:
+                return existing
+            now = time.time_ns() // 1_000_000
+            run_id = uuid.uuid4().hex
+            session.add(
+                SqlStudioReviewRun(
+                    workspace_id=current_workspace_id(),
+                    id=run_id,
+                    owner_scope=owner,
+                    project_id=project_id,
+                    pr_key=hashlib.sha256(target.pr_url.casefold().encode()).digest(),
+                    request_key=key,
+                    request_hash=digest,
+                    target_json=_snapshot(target),
+                    created_at=now,
+                )
+            )
+            members = [
+                self._insert_capture(
+                    session,
+                    owner_user_id,
+                    f"run:{run_id}:{index}",
+                    request_hash,
+                    target,
+                    profile,
+                    now=now,
+                    run_id=run_id,
+                ).review
+                for index, profile in enumerate(profiles)
+            ]
+            return ReviewRun(
+                id=run_id,
+                target=target,
+                reviewers=sorted(members, key=lambda member: member.id),
+                created_at=now,
+            )
+
+        try:
+            return run_write_transaction(self._write, "capture_review_run", write)
+        except IntegrityError:
+            with self._session("replay_concurrent_review_run") as session:
+                existing = self._run_request(session, owner, key, digest)
+                if existing is None:
+                    raise
+                return existing
+
+    def get_run(self, run_id: str, *, owner_user_id: str | None) -> ReviewRun | None:
+        owner = _owner_scope(owner_user_id)
+        with self._session("get_owned_review_run") as session:
+            row = session.scalar(
+                select(SqlStudioReviewRun).where(
+                    SqlStudioReviewRun.workspace_id == current_workspace_id(),
+                    SqlStudioReviewRun.owner_scope == owner,
+                    SqlStudioReviewRun.id == require_uuid(run_id),
+                )
+            )
+            return self._materialize_runs(session, [row], owner)[0] if row else None
+
+    def list_runs(
+        self,
+        *,
+        project_id: str,
+        owner_user_id: str | None,
+        pr_url: str,
+        limit: int,
+        after_id: str | None = None,
+    ) -> ReviewRunPage:
+        if not 1 <= limit <= 25:
+            raise ValueError("Review run page size must be between 1 and 25")
+        owner = _owner_scope(owner_user_id)
+        query = select(SqlStudioReviewRun).where(
+            SqlStudioReviewRun.workspace_id == current_workspace_id(),
+            SqlStudioReviewRun.owner_scope == owner,
+            SqlStudioReviewRun.project_id == require_uuid(project_id),
+            SqlStudioReviewRun.pr_key == hashlib.sha256(pr_url.casefold().encode()).digest(),
+        )
+        with self._session("list_project_pr_review_runs") as session:
+            if after_id is not None:
+                cursor = session.scalar(
+                    query.where(SqlStudioReviewRun.id == require_uuid(after_id))
+                )
+                if cursor is None:
+                    raise ReviewNotFoundError("Review run cursor not found")
+                query = query.where(
+                    tuple_(SqlStudioReviewRun.created_at, SqlStudioReviewRun.id)
+                    < (cursor.created_at, cursor.id)
+                )
+            rows = list(
+                session.scalars(
+                    query.order_by(
+                        SqlStudioReviewRun.created_at.desc(), SqlStudioReviewRun.id.desc()
+                    ).limit(limit + 1)
+                )
+            )
+            return ReviewRunPage(
+                entries=self._materialize_runs(session, rows[:limit], owner),
+                next_cursor=rows[limit - 1].id if len(rows) > limit else None,
+            )
+
+    def save_launch_error(self, review: ReviewPass, message: str) -> None:
+        """Record a pre-dispatch failure without changing the right to retry."""
+
+        def write(session: Session) -> None:
+            row = self._pass_row(session, review.id, _owner_scope(review.owner_user_id), lock=True)
+            if row and row.run_id and row.dispatch_status == _DISPATCH_STATES["not_requested"]:
+                row.launch_error = message[:512]
+
+        run_write_transaction(self._write, "save_review_launch_error", write)
+
+    def get_report_snapshot(self, review: ReviewPass) -> str | None:
+        with self._session("get_review_report_snapshot") as session:
+            row = self._pass_row(session, review.id, _owner_scope(review.owner_user_id))
+            return row.report_json if row and row.run_id else None
+
+    def save_report_snapshot(self, review: ReviewPass, report_json: str) -> str:
+        """Retain the first observed complete report for this run member."""
+
+        def write(session: Session) -> str:
+            row = self._pass_row(session, review.id, _owner_scope(review.owner_user_id), lock=True)
+            if row is None or not row.run_id or row.run_id != review.run_id:
+                raise ReviewNotFoundError("Review run member not found")
+            saved = row.report_json
+            if saved is not None:
+                return saved
+            row.report_json = report_json
+            return report_json
+
+        return run_write_transaction(self._write, "save_review_report_snapshot", write)
 
     def list_page(
         self,
@@ -554,6 +781,8 @@ class StudioReviewStore:
                 raise ReviewTransitionError("Operation version changed")
             if operation.action == _ACTIONS["review.start"]:
                 review.dispatch_status = _DISPATCH_STATES[cast("DispatchStatus", state)]
+                if state == "dispatching":
+                    review.launch_error = None
                 review.state = _PASS_STATES[
                     "prepared"
                     if state == "dispatching"

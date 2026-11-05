@@ -32,24 +32,31 @@ import { canonicalNativeHarness } from "@/lib/nativeHarnessModes";
 import { randomUUID } from "@/lib/randomUUID";
 import {
   captureReview,
+  captureReviewRun,
   getReview,
   listReviewerProfiles,
   listReviews,
   matchesReviewRevision,
   REVIEW_HARNESS_LABELS,
   reviewProfilesPath,
+  type ProjectReviewMember,
   type ProjectReviewWorkspace,
   startReview,
+  startReviewRun,
   type CaptureReview,
   type ReviewHarness,
   type ReviewPage,
   type ReviewPass,
+  type ReviewRun,
+  type ReviewRunPage,
   type ReviewScope,
   type ReviewerProfile,
   type ReviewSource,
 } from "./api";
 import { ProfileEditorDialog } from "./ProfileEditorDialog";
 import { ReviewResult, reviewSettingsLabel } from "./ReviewResult";
+
+import { ReviewRunsPanel, reviewRunsKey } from "./ReviewRunsPanel";
 
 const POLL_MS = 3_000;
 const START_CONFIRMATION_MS = 120_000;
@@ -212,10 +219,85 @@ function ReviewForm({
   const launchInFlight = useRef(false);
   const projectOrigin = "projectId" in origin ? origin : null;
   const { session } = useSession(active && "sessionId" in origin ? origin.sessionId : null);
+  const [selectedRunId, setSelectedRunId] = useState("");
+  const [draftRun, setDraftRun] = useState<{ scope: string; members: ProjectReviewMember[] }>();
+  const runAttempt = useRef<{ intent: string; key: string } | undefined>(undefined);
+  const runInFlight = useRef(false);
   const hostId = projectOrigin?.hostId ?? session?.hostId;
   const workspace = projectOrigin?.workspace ?? session?.workspace;
   const scope =
     "sessionId" in origin ? origin : { projectId: origin.projectId, prUrl: revision.prUrl };
+  const runScope = JSON.stringify([history.viewerId, projectOrigin, revision]);
+  const members = draftRun?.scope === runScope ? draftRun.members : [];
+  const runKey = reviewRunsKey(history.viewerId, projectOrigin?.projectId ?? "", revision.prUrl);
+  const runAction = useMutation({
+    mutationFn: async ({
+      projectId,
+      roster,
+      key,
+    }: {
+      projectId: string;
+      roster: ProjectReviewMember[];
+      key: string;
+    }) => {
+      const captured = await captureReviewRun(projectId, roster, key);
+      rememberRun(captured);
+      const target = roster[0];
+      if (
+        captured.target.host_id !== target.host_id ||
+        captured.target.workspace !== target.workspace ||
+        captured.target.repository_path !== target.repository ||
+        captured.target.base_sha !== target.expected_base_sha ||
+        captured.target.head_sha !== target.expected_head_sha
+      )
+        throw new Error(
+          "The captured review run did not match the selected checkout and revision.",
+        );
+      const started = await startReviewRun(captured.id);
+      rememberRun(started.run);
+      return started;
+    },
+    onSuccess: () => {
+      runAttempt.current = undefined;
+      setDraftRun((current) => (current?.scope === runScope ? undefined : current));
+    },
+    onSettled: () => {
+      runInFlight.current = false;
+      void queryClient.invalidateQueries({ queryKey: runKey });
+    },
+  });
+
+  function rememberRun(run: ReviewRun) {
+    queryClient.setQueryData<InfiniteData<ReviewRunPage, string | null>>(runKey, (old) => ({
+      pages: old?.pages.length
+        ? old.pages.map((page, index) => ({
+            ...page,
+            entries: [
+              ...(index === 0 ? [run] : []),
+              ...page.entries.filter((entry) => entry.id !== run.id),
+            ],
+          }))
+        : [{ entries: [run], next_cursor: null }],
+      pageParams: old?.pageParams ?? [null],
+    }));
+    setSelectedRunId(run.id);
+    void queryClient.invalidateQueries({
+      queryKey: ["studio-review-run-report", history.viewerId, run.id],
+    });
+  }
+
+  function launchRun() {
+    if (!projectOrigin || !history.authorized || !members.length || runInFlight.current) return;
+    const intent = JSON.stringify(members);
+    if (runAttempt.current?.intent !== intent) runAttempt.current = { intent, key: randomUUID() };
+    runInFlight.current = true;
+    runAction.mutate({
+      projectId: projectOrigin.projectId,
+      roster: members,
+      key: runAttempt.current.key,
+    });
+  }
+
   const profileEndpoint = reviewProfilesPath(origin);
   const canEditProfiles =
     active &&
@@ -280,7 +362,7 @@ function ReviewForm({
     : !!role;
   const records = (history.query.data?.pages ?? [])
     .flatMap((page) => page.data)
-    .filter((review) => review.target.pr_url === revision.prUrl);
+    .filter((review) => !review.run_id && review.target.pr_url === revision.prUrl);
   const listed = records.find((review) => review.id === selectedId) ?? records[0];
   const detailKey = (id: string | undefined) => ["studio-review", history.viewerId, id] as const;
   const detail = useQuery({
@@ -404,19 +486,9 @@ function ReviewForm({
     });
   }
 
-  function runReview() {
-    if (
-      launchInFlight.current ||
-      !reviewer ||
-      !hostId ||
-      !workspace ||
-      !reviewable ||
-      !validProfile ||
-      !validModel ||
-      !validEffort
-    )
-      return;
-    const input: CaptureReview = {
+  function reviewInput(): CaptureReview | null {
+    if (!reviewer || !reviewable || !validProfile || !validModel || !validEffort) return null;
+    return {
       pr_url: revision.prUrl,
       expected_base_sha: revision.baseSha,
       expected_head_sha: revision.headSha,
@@ -426,6 +498,20 @@ function ReviewForm({
       ...(model ? { model } : {}),
       ...(effort ? { reasoning_effort: effort } : {}),
     };
+  }
+
+  function addReviewer() {
+    const input = reviewInput();
+    if (!input || !projectOrigin || !hostId || !workspace || members.length >= 16) return;
+    const member = { ...input, host_id: hostId, workspace, repository: projectOrigin.repository };
+    if (members.some((entry) => JSON.stringify(entry) === JSON.stringify(member))) return;
+    setDraftRun({ scope: runScope, members: [...members, member] });
+    runAction.reset();
+  }
+
+  function runReview() {
+    const input = reviewInput();
+    if (launchInFlight.current || !input || !hostId || !workspace) return;
     const intent = JSON.stringify({ input, hostId, workspace });
     if (captureAttempt.current?.intent !== intent) {
       captureAttempt.current = { intent, key: randomUUID() };
@@ -640,10 +726,68 @@ function ReviewForm({
             This reviewer has no supported skills in the selected workspace.
           </p>
         )}
-        <Button onClick={runReview} disabled={pending || !canRun}>
-          {pending && <Loader2Icon className="animate-spin" data-icon="inline-start" />}
-          {pending ? "Requesting review…" : "Run review"}
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          <Button onClick={runReview} disabled={pending || runAction.isPending || !canRun}>
+            {pending && <Loader2Icon className="animate-spin" data-icon="inline-start" />}
+            {pending ? "Requesting review…" : "Run review"}
+          </Button>
+          {projectOrigin && (
+            <Button
+              variant="outline"
+              onClick={addReviewer}
+              disabled={!canRun || pending || runAction.isPending || members.length >= 16}
+            >
+              Add reviewer to run
+            </Button>
+          )}
+        </div>
+        {projectOrigin && members.length > 0 && (
+          <section aria-label="Selected reviewers" className="space-y-2 rounded-md border p-3">
+            <h4 className="font-medium">Selected reviewers</h4>
+            <ul className="space-y-1">
+              {members.map((member, index) => (
+                <li
+                  key={JSON.stringify(member)}
+                  className="flex items-center justify-between gap-2 text-sm"
+                >
+                  <span className="[overflow-wrap:anywhere]">
+                    {profiles.find((profile) => profile.id === member.profile_id)?.label ??
+                      member.profile_id ??
+                      member.skill}
+                    {" · "}
+                    {REVIEW_HARNESS_LABELS[member.harness]}
+                    {member.model && ` · ${member.model}`}
+                  </span>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={runAction.isPending}
+                    onClick={() => {
+                      setDraftRun({
+                        scope: runScope,
+                        members: members.filter((_, position) => index !== position),
+                      });
+                      runAction.reset();
+                    }}
+                  >
+                    Remove
+                  </Button>
+                </li>
+              ))}
+            </ul>
+            <Button
+              onClick={launchRun}
+              disabled={pending || runAction.isPending || !history.authorized}
+            >
+              {runAction.isPending ? "Starting reviewers…" : "Run selected reviewers"}
+            </Button>
+          </section>
+        )}
+        {runAction.error && (
+          <p role="alert" className="text-destructive">
+            {runAction.error.message}
+          </p>
+        )}
         {action.isError && (
           <p role="alert" className="text-destructive">
             {action.error.message}
@@ -657,6 +801,18 @@ function ReviewForm({
           endpoint={reviewProfilesPath(origin, true)}
           hostId={hostId}
           workspace={workspace}
+        />
+      )}
+      {projectOrigin && history.authorized && active && (
+        <ReviewRunsPanel
+          projectId={projectOrigin.projectId}
+          revision={revision}
+          viewerId={history.viewerId}
+          selectedRunId={selectedRunId}
+          onSelectRun={setSelectedRunId}
+          onOpenSource={onOpenSource}
+          launchErrors={runAction.data}
+          launchPending={runAction.isPending}
         />
       )}
       <section aria-label="Review history" className="space-y-3 border-t border-border pt-3">

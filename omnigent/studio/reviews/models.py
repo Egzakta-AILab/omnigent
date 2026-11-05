@@ -175,8 +175,13 @@ class ReviewTarget(FrozenModel):
         return self.source_project_id
 
 
+MAX_RUN_REVIEWERS = 16
+
+
 class ReviewPass(FrozenModel):
     id: str
+    run_id: str | None = None
+    launch_error: str | None = None
     owner_user_id: str | None
     target: ReviewTarget
     profile: ReviewProfile
@@ -186,6 +191,20 @@ class ReviewPass(FrozenModel):
     created_at: int
     updated_at: int
     version: int
+
+
+class ReviewRun(FrozenModel):
+    """One deliberately selected roster reviewing one captured PR revision."""
+
+    id: str
+    target: ReviewTarget
+    reviewers: list[ReviewPass]
+    created_at: int
+
+
+class ReviewRunPage(FrozenModel):
+    entries: list[ReviewRun]
+    next_cursor: str | None
 
 
 class ReviewOperation(FrozenModel):

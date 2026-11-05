@@ -1176,6 +1176,26 @@
         "title": "CaptureReviewRequest",
         "type": "object"
       },
+      "CaptureReviewRunRequest": {
+        "additionalProperties": false,
+        "description": "Each member uses the same project checkout and captured revision.",
+        "properties": {
+          "reviewers": {
+            "items": {
+              "$ref": "#/components/schemas/CaptureProjectReviewRequest"
+            },
+            "maxItems": 16,
+            "minItems": 1,
+            "title": "Reviewers",
+            "type": "array"
+          }
+        },
+        "required": [
+          "reviewers"
+        ],
+        "title": "CaptureReviewRunRequest",
+        "type": "object"
+      },
       "ChildSessionList": {
         "description": "Paginated list of child sessions; `data` is a page of `ChildSessionSummary`.",
         "properties": {
@@ -1864,6 +1884,52 @@
           "response"
         ],
         "title": "CompletedEvent",
+        "type": "object"
+      },
+      "ConsolidatedFinding": {
+        "additionalProperties": false,
+        "properties": {
+          "finding": {
+            "$ref": "#/components/schemas/ReviewFinding"
+          },
+          "review_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Review Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "finding",
+          "review_ids"
+        ],
+        "title": "ConsolidatedFinding",
+        "type": "object"
+      },
+      "ConsolidatedReviewReport": {
+        "additionalProperties": false,
+        "properties": {
+          "findings": {
+            "items": {
+              "$ref": "#/components/schemas/ConsolidatedFinding"
+            },
+            "title": "Findings",
+            "type": "array"
+          },
+          "reviewers": {
+            "items": {
+              "$ref": "#/components/schemas/ReviewerRunReport"
+            },
+            "title": "Reviewers",
+            "type": "array"
+          }
+        },
+        "required": [
+          "reviewers",
+          "findings"
+        ],
+        "title": "ConsolidatedReviewReport",
         "type": "object"
       },
       "ConversationDeleted": {
@@ -6252,6 +6318,17 @@
             "title": "Id",
             "type": "string"
           },
+          "launch_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Launch Error"
+          },
           "owner_user_id": {
             "anyOf": [
               {
@@ -6276,6 +6353,17 @@
               }
             ],
             "title": "Reviewer Session Id"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Id"
           },
           "state": {
             "enum": [
@@ -6711,6 +6799,68 @@
         "title": "ReviewRolesResponse",
         "type": "object"
       },
+      "ReviewRun": {
+        "additionalProperties": false,
+        "description": "One deliberately selected roster reviewing one captured PR revision.",
+        "properties": {
+          "created_at": {
+            "format": "int64",
+            "title": "Created At",
+            "type": "integer"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "reviewers": {
+            "items": {
+              "$ref": "#/components/schemas/ReviewPass"
+            },
+            "title": "Reviewers",
+            "type": "array"
+          },
+          "target": {
+            "$ref": "#/components/schemas/ReviewTarget"
+          }
+        },
+        "required": [
+          "id",
+          "target",
+          "reviewers",
+          "created_at"
+        ],
+        "title": "ReviewRun",
+        "type": "object"
+      },
+      "ReviewRunPage": {
+        "additionalProperties": false,
+        "properties": {
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/ReviewRun"
+            },
+            "title": "Entries",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "entries",
+          "next_cursor"
+        ],
+        "title": "ReviewRunPage",
+        "type": "object"
+      },
       "ReviewTarget": {
         "additionalProperties": false,
         "properties": {
@@ -6798,6 +6948,24 @@
           "head_sha"
         ],
         "title": "ReviewTarget",
+        "type": "object"
+      },
+      "ReviewerRunReport": {
+        "additionalProperties": false,
+        "properties": {
+          "report": {
+            "$ref": "#/components/schemas/ReviewReport"
+          },
+          "review_id": {
+            "title": "Review Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "review_id",
+          "report"
+        ],
+        "title": "ReviewerRunReport",
         "type": "object"
       },
       "RoutingDecisionData": {
@@ -11055,6 +11223,26 @@
         "title": "StartReviewRequest",
         "type": "object"
       },
+      "StartReviewRunResponse": {
+        "properties": {
+          "errors": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Errors",
+            "type": "object"
+          },
+          "run": {
+            "$ref": "#/components/schemas/ReviewRun"
+          }
+        },
+        "required": [
+          "run",
+          "errors"
+        ],
+        "title": "StartReviewRunResponse",
+        "type": "object"
+      },
       "StartupInputOptions": {
         "description": "Request options retained only while a startup input awaits delivery.",
         "properties": {
@@ -15054,6 +15242,149 @@
         "summary": "Update Project",
         "tags": [
           "projects"
+        ]
+      }
+    },
+    "/v1/projects/{project_id}/studio/review-runs": {
+      "get": {
+        "operationId": "list_project_review_runs_v1_projects__project_id__studio_review_runs_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "pr_url",
+            "required": true,
+            "schema": {
+              "maxLength": 2048,
+              "minLength": 1,
+              "title": "Pr Url",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 10,
+              "maximum": 25,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "after_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "After Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewRunPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Project Review Runs",
+        "tags": [
+          "sessions"
+        ]
+      },
+      "post": {
+        "operationId": "capture_project_review_run_v1_projects__project_id__studio_review_runs_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[!-~]+$",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CaptureReviewRunRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewRun"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Capture Project Review Run",
+        "tags": [
+          "sessions"
         ]
       }
     },
@@ -21630,6 +21961,142 @@
         "summary": "Get Skills",
         "tags": [
           "skills"
+        ]
+      }
+    },
+    "/v1/studio/review-runs/{run_id}": {
+      "get": {
+        "operationId": "get_project_review_run_v1_studio_review_runs__run_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewRun"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Project Review Run",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/studio/review-runs/{run_id}/report": {
+      "get": {
+        "operationId": "get_review_run_report_v1_studio_review_runs__run_id__report_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConsolidatedReviewReport"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Review Run Report",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/studio/review-runs/{run_id}/start": {
+      "post": {
+        "operationId": "start_review_run_v1_studio_review_runs__run_id__start_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartReviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StartReviewRunResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Start Review Run",
+        "tags": [
+          "sessions"
         ]
       }
     },
