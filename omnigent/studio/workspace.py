@@ -38,7 +38,7 @@ def read_project_pull_requests(root: Path, op: str, params: dict[str, Any]) -> d
             "pull_requests": github_resource.list_workspace_pull_requests(str(checkout), remote)
         }
 
-    reference = _workspace_pr_reference(params.get("pr_url"), remote)
+    reference = workspace_pr_reference(params.get("pr_url"), remote)
     if op == "studio_project_pull_request":
         result = github_resource.read_workspace_pull_request(
             str(checkout), reference, include_files=params.get("include_files") is True
@@ -62,7 +62,7 @@ def read_project_pull_requests(root: Path, op: str, params: dict[str, Any]) -> d
     return {"patch": patch[:_PATCH_PREVIEW_CHARS], "truncated": len(patch) > _PATCH_PREVIEW_CHARS}
 
 
-def _workspace_pr_reference(url: object, remote: ParsedRemote) -> PullRequestRef:
+def workspace_pr_reference(url: object, remote: ParsedRemote) -> PullRequestRef:
     if not isinstance(url, str) or not 1 <= len(url) <= 2048:
         raise ValueError("Choose a pull request URL.")
     reference = PullRequestRef.from_url(url)
@@ -86,7 +86,7 @@ def publish_project_inline_comment(root: Path, params: dict[str, Any]) -> dict[s
         raise WorkspaceReaderError(
             409, "reference_repository", "Mark this repository Active to publish a comment."
         )
-    reference = _workspace_pr_reference(params.get("pr_url"), remote)
+    reference = workspace_pr_reference(params.get("pr_url"), remote)
     anchor = DiffDiscussionAnchor.model_validate(params.get("anchor"))
     with pr_resource.server_tracking(True):
         return pr_resource.create_pr_review_thread(

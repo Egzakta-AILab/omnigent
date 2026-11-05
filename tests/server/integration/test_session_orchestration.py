@@ -3086,7 +3086,8 @@ async def test_explicit_host_endpoint_refuses_without_capability_or_source(
 async def test_studio_reviewer_uses_private_session_and_original_runner(
     auth_client, auth_app, peers, db_uri, monkeypatch, scenario, tmp_path
 ):
-    from base64 import b64decode
+    import asyncio
+    from base64 import b64decode, b64encode
     from unittest.mock import AsyncMock
 
     from fastapi import APIRouter, Request
@@ -3158,6 +3159,10 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
     auth_app.state.default_public_sessions = lambda: DefaultPublicSessions.ALL
     launches = []
     inline_writes = []
+    hosted_frames = []
+    hosted_receipt = {}
+    hosted_content = b""
+    lose_check_ack = False
     pr_url = "https://github.com/example/project/pull/42"
     role_digest = "1" * 64
     current_head = "b" * 40
@@ -3178,6 +3183,32 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
         elif isinstance(frame, HostFsWriteFrame) and scenario == "project":
             assert frame.session_id == expected_project_id
             assert frame.workspace == workspace
+            if frame.op.startswith("studio_project_pull_request_check_"):
+                hosted_frames.append(frame)
+                if frame.op.endswith("_start"):
+                    if lose_check_ack:
+                        connection.pending_fs_requests[frame.request_id].set_result(
+                            {
+                                "status": "error",
+                                "error_status": 503,
+                                "error": "Acknowledgment lost",
+                            }
+                        )
+                        return
+                    result = {"state": "accepted"}
+                elif frame.op.endswith("_release"):
+                    result = {"state": "released"}
+                elif frame.op.endswith("_status"):
+                    result = {"state": "finished", "receipt": hosted_receipt}
+                else:
+                    assert frame.op.endswith("_file")
+                    offset = frame.params["offset"]
+                    chunk = hosted_content[offset : offset + 512 * 1024]
+                    result = {"data": b64encode(chunk).decode()}
+                connection.pending_fs_requests[frame.request_id].set_result(
+                    {"status": "ok", "payload": result}
+                )
+                return
             assert frame.op == "studio_project_pull_request_publish_inline"
             inline_writes.append(frame.params)
             if len(inline_writes) == 1:
@@ -4265,6 +4296,105 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
         assert (
             await auth_client.post(reproduction_path, json=checked)
         ).json() == attached_check.json()
+        hosted_content = png + b"x" * (512 * 1024)
+        hosted_file = {
+            **manifest,
+            "byte_size": len(hosted_content),
+            "digest": hashlib.sha256(hosted_content).hexdigest(),
+        }
+        hosted_receipt = {
+            **checked,
+            "base": {**checked["base"], "evidence": [hosted_file]},
+            "head": {**checked["head"], "evidence": [hosted_file]},
+        }
+        run_check = f"{check_path}/run-check"
+        approval = {
+            "proposal_digest": private_check.json()["proposed_check_digest"],
+            "image_id": hosted_receipt["image_id"],
+            "confirm": True,
+        }
+        assert (
+            await auth_client.post(run_check, json=approval, headers=foreign_headers)
+        ).status_code == 403
+        assert (
+            await auth_client.post(run_check, json={**approval, "confirm": 1})
+        ).status_code == 422
+        assert (
+            await auth_client.post(run_check, json={**approval, "proposal_digest": "0" * 64})
+        ).status_code == 409
+        assert hosted_frames == []
+        started_check = await auth_client.post(run_check, json=approval)
+        assert started_check.status_code == 202, started_check.text
+        job = started_check.json()
+        assert job["state"] == "running"
+
+        async def wait_for_check(path):
+            async with asyncio.timeout(5):
+                while True:
+                    current = (await auth_client.get(path)).json()["check_job"]
+                    if current["state"] != "running":
+                        return current
+                    await asyncio.sleep(0.05)
+
+        finished = await wait_for_check(check_path)
+        assert finished["id"] == job["id"]
+        assert finished["state"] == "attached" and finished["files_attached"] == 2
+        assert (await auth_client.post(run_check, json=approval)).json() == finished
+        assert [
+            frame.op.rsplit("_", 1)[1]
+            for frame in hosted_frames
+            if not frame.op.endswith("_release")
+        ] == [
+            "start",
+            "status",
+            "file",
+            "file",
+            "file",
+            "file",
+        ]
+        assert hosted_frames[0].params == {
+            "job_id": job["id"],
+            "proposal_id": check_request["id"],
+            "image_id": approval["image_id"],
+            "repository": "nested/project",
+            "proposal": check,
+            "source": receipt["source"],
+        }
+        assert [
+            (frame.params["side"], frame.params["offset"])
+            for frame in hosted_frames
+            if frame.op.endswith("_file")
+        ] == [
+            ("base", 0),
+            ("base", 512 * 1024),
+            ("head", 0),
+            ("head", 512 * 1024),
+        ]
+        downloaded_check = await auth_client.get(f"{artifacts_path}/{hosted_file['digest']}")
+        assert downloaded_check.content == hosted_content
+
+        lost_request = {**check_request, "id": uuid4().hex}
+        lost = await auth_client.post(questions_path, json=lost_request)
+        assert lost.status_code == 200, lost.text
+        lost_session = lost.json()["session_id"]
+        question_echo(send_review.await_args.args[2].data["content"][0]["text"], lost_session)
+        lost_answer = {**check_answer, "question_id": lost_request["id"]}
+        save_assistant_message(
+            lost_session, "```studio-check-proposal-v1\n" + json.dumps(lost_answer) + "\n```"
+        )
+        lost_path = f"{questions_path}/{lost_request['id']}"
+        assert (await auth_client.get(lost_path)).json()["proposed_check"] == check
+        lose_check_ack = True
+        lost_run = await auth_client.post(f"{lost_path}/run-check", json=approval)
+        assert lost_run.status_code == 202, lost_run.text
+        unconfirmed = await wait_for_check(lost_path)
+        assert unconfirmed["state"] == "unconfirmed" and unconfirmed["receipt_digest"] is None
+        assert (
+            await auth_client.post(f"{lost_path}/run-check", json=approval)
+        ).json() == unconfirmed
+        assert [
+            frame.params["job_id"] for frame in hosted_frames if frame.op.endswith("_start")
+        ] == [job["id"], unconfirmed["id"]]
         return
 
     created = await create_reviewer(request, "alice", review, review.id)

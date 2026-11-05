@@ -2199,6 +2199,7 @@ def test_studio_review_from_pr_panel(
                     "answer_state": "ready",
                     "answer": "Inspect the exported file on both revisions.",
                     "proposed_check": sandbox_check,
+                    "proposed_check_digest": "d" * 64,
                     "published_at": None,
                     "updated_at": review["created_at"],
                 }
@@ -2247,6 +2248,12 @@ def test_studio_review_from_pr_panel(
 
         def private_question_status(route: Route) -> None:
             nonlocal answer_reads
+            if questions[-1].get("action") == "propose_check":
+                check_question = questions[-1]
+                assert route.request.url.endswith(check_question["id"])
+                check_question["check_job"].update(state="attached", receipt_digest="e" * 64)
+                route.fulfill(json=check_question)
+                return
             question = questions[0]
             assert question["id"] in route.request.url
             if route.request.method == "GET":
@@ -2277,9 +2284,27 @@ def test_studio_review_from_pr_panel(
                 )
             route.fulfill(json=question)
 
+        def approve_check(route: Route) -> None:
+            assert route.request.post_data_json == {
+                "proposal_digest": "d" * 64,
+                "image_id": "sha256:" + "c" * 64,
+                "confirm": True,
+            }
+            proposal = questions[-1]
+            assert route.request.url.endswith(f"{proposal['id']}/run-check")
+            proposal["check_job"] = {
+                "id": "b" * 32,
+                "state": "running",
+                "image_id": "sha256:" + "c" * 64,
+                "started_at": review["created_at"],
+                "files_attached": 0,
+            }
+            route.fulfill(status=202, json=proposal["check_job"])
+
         page.route(f"{discussion_path}/questions", create_private_question)
         page.route(f"{discussion_path}/questions/*", private_question_status)
         page.route(f"{discussion_path}/questions/*/share", private_question_status)
+        page.route(f"{discussion_path}/questions/*/run-check", approve_check)
         page.route(
             discussion_path,
             lambda route: route.fulfill(
@@ -2419,15 +2444,20 @@ def test_studio_review_from_pr_panel(
         thread.get_by_role("button", name="Request private proposal", exact=True).click()
         card = thread.get_by_role("region", name="Sandbox check proposal")
         expect(card).to_be_visible()
+        card.get_by_text("Run from terminal", exact=True).click()
+        run_button = card.get_by_role("button", name="Run on workspace host", exact=True)
+        expect(run_button).to_be_disabled()
         command_button = card.get_by_role("button", name="Copy sandbox command", exact=True)
         expect(command_button).to_be_disabled()
-        card.get_by_label("Local Docker image ID").fill("sha256:" + "c" * 64)
+        card.get_by_label("Docker image ID").fill("sha256:" + "c" * 64)
         command_button.click()
         expect(card.get_by_text("Command copied.")).to_be_visible()
         tokens = shlex.split(page.evaluate("navigator.clipboard.readText()"))
         assert tokens[tokens.index("--proposal-id") + 1] == questions[-1]["id"]
         assert tokens[tokens.index("--") + 1 : tokens.index("&&")] == sandbox_check["command"]
         assert tokens[tokens.index("--finding") + 1] == finding_key
+        run_button.click()
+        expect(card.get_by_text("Check results attached", exact=True)).to_be_visible()
         page.screenshot(path=str(tmp_path / "review-sandbox-check-proposal.png"))
         return
 

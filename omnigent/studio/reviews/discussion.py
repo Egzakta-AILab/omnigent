@@ -9,6 +9,7 @@ from pydantic import Field, StringConstraints, field_validator, model_validator
 
 from omnigent.studio.reviews.check_proposal import ProposedCheck
 from omnigent.studio.reviews.evidence import Anchor, Side
+from omnigent.studio.reviews.hosted_check_models import HostedCheckJob
 from omnigent.studio.reviews.models import (
     BoundedText,
     CandidateReviewOrigin,
@@ -226,6 +227,8 @@ class ReviewQuestion(FrozenModel):
     action: QuestionAction = "question"
     proposed_patch: str | None = None
     proposed_check: ProposedCheck | None = None
+    proposed_check_digest: ReviewRoleDigest | None = None
+    check_job: HostedCheckJob | None = None
     published_at: int | None = None
     updated_at: int
 

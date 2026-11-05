@@ -41,6 +41,7 @@ from omnigent.server.routes._session_create_validation import (
     validate_session_agent,
     validate_session_model_metadata,
 )
+from omnigent.server.routes._studio_hosted_checks import execute_hosted_check
 from omnigent.server.routes._studio_project_workspace import (
     ProjectWorkspace,
     require_owned_project,
@@ -105,6 +106,11 @@ from omnigent.studio.reviews.evidence_files import (
     EvidenceMediaType,
     EvidenceSide,
 )
+from omnigent.studio.reviews.hosted_check_models import (
+    ApproveHostedCheck,
+    HostedCheckJob,
+    HostedCheckStart,
+)
 from omnigent.studio.reviews.launch import SKILL_NAME, review_prompt, run_review, verified_patch
 from omnigent.studio.reviews.models import (
     CandidateReviewOrigin,
@@ -137,6 +143,7 @@ from omnigent.studio.reviews.reproduction import (
     MAX_REPRODUCTION_BYTES,
     AttachedReproduction,
     FixCheckEvidence,
+    ReproductionSource,
     ReviewCheckUpload,
     SharedAttachedReproduction,
 )
@@ -582,6 +589,8 @@ def create_studio_reviews_router(
     router = APIRouter()
     service = ReviewService(review_store)
     evidence_transfers = asyncio.Semaphore(4)
+    active_checks: set[asyncio.Task[None]] = set()
+    check_admission = asyncio.Lock()
 
     async def owned_review(request: Request, review_id: str) -> ReviewPass:
         user_id = require_user(request, auth_provider)
@@ -2206,6 +2215,92 @@ def create_studio_reviews_router(
             )
         except ReviewNotFoundError as exc:
             raise HTTPException(404, str(exc)) from exc
+
+    @router.post(
+        "/studio/review-runs/{run_id}/discussion/questions/{question_id}/run-check",
+        response_model=HostedCheckJob,
+        status_code=202,
+        dependencies=_WRITE_GATES,
+        openapi_extra=_discussion_request_schema(ApproveHostedCheck),
+    )
+    async def approve_hosted_check(
+        request: Request, response: Response, run_id: str, question_id: str
+    ) -> HostedCheckJob:
+        access = await discussion_access(request, run_id)
+        if access.actor != access.owner:
+            raise HTTPException(403, "Only the review owner can approve a sandbox check")
+        record = await question_record(access, question_id)
+        if record is None:
+            raise HTTPException(404, "Sandbox check proposal not found")
+        view = record.view
+        approval = await _bounded_json(request, ApproveHostedCheck, limit=2048)
+        if (
+            view.action != "propose_check"
+            or view.proposed_check is None
+            or view.proposed_check_digest != approval.proposal_digest
+            or not isinstance(view.anchor, FindingDiscussionAnchor)
+        ):
+            raise HTTPException(409, "The sandbox check differs from the approved proposal")
+        response.headers["Cache-Control"] = "no-store"
+        if view.check_job is not None:
+            if view.check_job.image_id != approval.image_id:
+                raise HTTPException(409, "This proposal already has a sandbox check")
+            return view.check_job
+        run = access.run
+        target = run.target
+        if (
+            target.candidate is not None
+            or target.repository_path is None
+            or run.patch_sha256 is None
+        ):
+            raise HTTPException(409, "Choose a check for a captured repository and diff")
+        if artifact_store is None:
+            raise HTTPException(503, "Review evidence storage is unavailable")
+        workspace = await captured_project_workspace(request, target, access.owner)
+        source = ReproductionSource(
+            run_id=run.id,
+            pr_url=target.pr_url,
+            patch_sha256=run.patch_sha256,
+            base_sha=target.base_sha,
+            head_sha=target.head_sha,
+        )
+        async with check_admission:
+            if len(active_checks) >= 4:
+                raise HTTPException(429, "Too many sandbox checks are running on this server")
+            try:
+                job, claimed = await asyncio.to_thread(
+                    review_store.claim_hosted_check,
+                    run.id,
+                    view.id,
+                    approval,
+                    owner=access.owner,
+                )
+            except ReviewNotFoundError as exc:
+                raise HTTPException(404, str(exc)) from exc
+            except ReviewConflictError as exc:
+                raise HTTPException(409, str(exc)) from exc
+            if claimed:
+                task = asyncio.create_task(
+                    execute_hosted_check(
+                        workspace,
+                        HostedCheckStart(
+                            job_id=job.id,
+                            repository=target.repository_path,
+                            image_id=job.image_id,
+                            proposal_id=view.id,
+                            proposal=view.proposed_check,
+                            source=source,
+                        ),
+                        job,
+                        finding_key=view.anchor.finding_key,
+                        store=review_store,
+                        artifacts=artifact_store,
+                    ),
+                    name=f"studio-check-{job.id}",
+                )
+                active_checks.add(task)
+                task.add_done_callback(active_checks.discard)
+        return job
 
     @router.post(
         "/studio/review-runs/{run_id}/discussion/questions/{question_id}/share",

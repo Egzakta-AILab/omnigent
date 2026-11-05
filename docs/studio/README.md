@@ -440,13 +440,16 @@ list. Its discussion links back to the original finding.
 Open a finding and choose **Draft sandbox check**. Pick a reviewer or native
 agent and describe what the check should prove. The private proposal shows the
 command, Git paths, timeout, and evidence filenames. Review those details
-before choosing the installed Docker image ID. The repository path can point
-to any checkout on the execution machine with both saved commits.
+before choosing a Docker image ID installed on the workspace host. Select
+**Run on workspace host** to approve the proposal. Omnigent saves the dispatch
+and shows progress in the finding. Reopening the review shows the same check.
+The host tests both saved revisions and Omnigent attaches the receipt and the
+files it can verify. An unconfirmed dispatch requires a fresh proposal for
+another host run.
 
-Choose **Copy sandbox command** and run it from an Omnigent checkout. The
-verifier checks the saved proposal before Docker starts. It runs the command
-against both revisions and attaches the receipt and matching files to the
-finding. If an expected file is missing, the receipt is available locally
+To run it from a terminal, expand **Run from terminal**, select a checkout
+with both commits, and choose **Copy sandbox command**. Run it from an Omnigent
+checkout. If an expected file is missing, the receipt is available locally
 for inspection and can be attached with `attach-proof`.
 
 The result shows the agent proposal ID alongside the reproduction receipt.

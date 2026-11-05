@@ -4777,6 +4777,10 @@ class HostProcess:
 
         from omnigent.runner import pr_resource
 
+        if op.startswith("studio_project_pull_request_check_"):
+            from omnigent.studio.reviews.hosted_check_host import dispatch_hosted_check
+
+            return dispatch_hosted_check(Path(workspace), op, params)
         if op == "studio_project_pull_request_publish_inline":
             from omnigent.studio.workspace import publish_project_inline_comment
 
