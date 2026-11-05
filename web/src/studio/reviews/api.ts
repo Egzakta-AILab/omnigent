@@ -208,6 +208,33 @@ export interface ReviewDiscussionComment {
   created_at: number;
 }
 
+export interface AskReviewQuestion extends Pick<ReviewDiscussionComment, "id" | "anchor" | "body"> {
+  agent_id?: string;
+  reviewer_key?: string;
+  host_id?: string;
+  workspace?: string;
+}
+
+export interface ReviewQuestion extends Pick<ReviewDiscussionComment, "id" | "anchor" | "body"> {
+  session_id: string;
+  harness: ReviewHarness;
+  status: "dispatching" | "accepted" | "unknown";
+  answer_state: "pending" | "incomplete" | "ready";
+  answer: string | null;
+  published_at: number | null;
+  updated_at: number;
+}
+
+export interface SharedReviewAnswer {
+  id: string;
+  anchor: DiscussionAnchor;
+  question: string;
+  answer: string;
+  harness: ReviewHarness;
+  requested_by: string | null;
+  published_at: number;
+}
+
 export interface ReviewDiscussion {
   id: string;
   project_name: string;
@@ -225,7 +252,11 @@ export interface ReviewDiscussion {
   }[];
   findings: { key: string; finding: ReviewFinding }[];
   comments: ReviewDiscussionComment[];
+  questions?: ReviewQuestion[];
+  agent_answers?: SharedReviewAnswer[];
   can_comment: boolean;
+  can_ask?: boolean;
+  can_use_review_workspace?: boolean;
   collaborators: string[] | null;
   sharing_available: boolean;
 }
@@ -246,6 +277,29 @@ export function postReviewDiscussionComment(
     `${reviewRunPath(runId)}/discussion/comments`,
     comment.id,
     comment,
+  );
+}
+
+function questionsPath(runId: string) {
+  return `${reviewRunPath(runId)}/discussion/questions`;
+}
+
+export function askReviewQuestion(runId: string, body: AskReviewQuestion) {
+  return postReview<ReviewQuestion>(questionsPath(runId), body.id, body);
+}
+
+export function getReviewQuestion(runId: string, questionId: string, signal: AbortSignal) {
+  return reviewRequest<ReviewQuestion>(
+    `${questionsPath(runId)}/${encodeURIComponent(questionId)}`,
+    { signal },
+  );
+}
+
+export function shareReviewAnswer(runId: string, questionId: string) {
+  return postReview<ReviewQuestion>(
+    `${questionsPath(runId)}/${encodeURIComponent(questionId)}/share`,
+    questionId,
+    {},
   );
 }
 

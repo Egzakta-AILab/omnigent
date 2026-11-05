@@ -25,6 +25,7 @@ _REPORT_FENCE = "```studio-review-v1"
 _MAX_REPORT_BYTES = 48 * 1024
 _MAX_FINDINGS = 40
 _RECENT_MESSAGE_LIMIT = 24
+_FIRST_TURN_MESSAGE_LIMIT = 64
 _RECENT_SKILL_ITEM_LIMIT = 64
 _EMPTY_REPLY_GRACE_MS = 5_000
 _PROGRESS_PHASES = {"commentary", "partial_answer"}
@@ -163,6 +164,8 @@ def report_instructions(review: ReviewPass) -> str:
 
 def _assistant_response(
     items: list[ConversationItem],
+    *,
+    accepts_input: Callable[[MessageData], bool] | None = None,
 ) -> tuple[list[ConversationItem], int | None]:
     """Return the latest response and the preceding saved input time, if observed."""
     response: list[ConversationItem] = []
@@ -171,7 +174,10 @@ def _assistant_response(
         if not isinstance(data, MessageData) or data.is_meta:
             continue
         if data.role == "user":
-            return response, item.created_at if item.status == "completed" else None
+            accepted = item.status == "completed" and (
+                accepts_input is None or accepts_input(data)
+            )
+            return response, item.created_at if accepted else None
         if item.created_by is not None or data.user_authored or data.subagent_return_id:
             continue
         if response and item.response_id != response[0].response_id:
@@ -274,21 +280,66 @@ def read_native_envelope(
     session_id = review.reviewer_session_id
     if session_id is None or session_id == review.target.source_session_id:
         return "pending", None, None
-
-    recent = conversation_store.list_items(
-        session_id, order="desc", type="message", limit=_RECENT_MESSAGE_LIMIT
+    return read_native_turn(
+        conversation_store,
+        session_id,
+        fence,
+        model,
+        updated_at=review.updated_at,
+        running=review.dispatch_status == "running",
+        claude_skill=review.profile.skill if review.profile.harness == "claude-native" else None,
+        accepts=accepts,
     )
-    response, input_created_at = _assistant_response(recent.data)
+
+
+def read_native_turn(
+    conversation_store: ConversationStore,
+    session_id: str,
+    fence: str,
+    model: type[_Envelope],
+    *,
+    updated_at: int,
+    running: bool,
+    claude_skill: str | None = None,
+    accepts_input: Callable[[MessageData], bool] | None = None,
+    accepts: Callable[[_Envelope], bool] | None = None,
+) -> tuple[ReportState, str | None, _Envelope | None]:
+    """Read a native reply and optionally require its preceding input."""
+
+    page = conversation_store.list_items(
+        session_id,
+        order="asc" if accepts_input is not None else "desc",
+        type="message",
+        limit=_FIRST_TURN_MESSAGE_LIMIT if accepts_input is not None else _RECENT_MESSAGE_LIMIT,
+    )
+    items = page.data
+    first_turn_closed = False
+    if accepts_input is not None:
+        user_positions = [
+            index
+            for index, item in enumerate(items)
+            if isinstance(item.data, MessageData)
+            and item.data.role == "user"
+            and not item.data.is_meta
+        ]
+        first_turn_closed = len(user_positions) > 1
+        if page.has_more and not first_turn_closed:
+            return "incomplete", None, None
+        end = user_positions[1] if first_turn_closed else len(items)
+        items = list(reversed(items[:end]))
+    response, input_created_at = _assistant_response(items, accepts_input=accepts_input)
     session = conversation_store.get_conversation(session_id)
     live_status = session.live_status if session is not None else None
+    if first_turn_closed:
+        live_status = "idle"
     if not response:
         # A saved echo distinguishes consumed input from a still-queued request.
         # Give the mirror time to catch up with idle (item timestamps are seconds).
         empty_reply = (
             live_status == "idle"
-            and review.dispatch_status == "running"
+            and running
             and input_created_at is not None
-            and time_ns() // 1_000_000 - max(review.updated_at, input_created_at * 1_000)
+            and time_ns() // 1_000_000 - max(updated_at, input_created_at * 1_000)
             >= _EMPTY_REPLY_GRACE_MS
         )
         state = "incomplete" if empty_reply or live_status == "failed" else "pending"
@@ -297,6 +348,10 @@ def read_native_envelope(
     latest = response[0]
     if latest.status == "in_progress" or live_status in _ACTIVE_STATUSES:
         return "pending", None, None
+    if accepts_input is not None and input_created_at is None:
+        if time_ns() // 1_000_000 - updated_at < _EMPTY_REPLY_GRACE_MS:
+            return "pending", None, None
+        return "incomplete", latest.id, None
 
     completed = [
         item
@@ -311,10 +366,8 @@ def read_native_envelope(
         _fenced_payload(completed, fence, model) if completed and latest is completed[0] else None
     )
     if payload is not None and (accepts is None or accepts(payload)):
-        if (
-            review.profile.harness == "claude-native"
-            and (skill := review.profile.skill) is not None
-            and not _has_claude_skill_launch(conversation_store, session_id, latest, skill)
+        if claude_skill is not None and not _has_claude_skill_launch(
+            conversation_store, session_id, latest, claude_skill
         ):
             return "incomplete", latest.id, None
         return "ready", latest.id, payload

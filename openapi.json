@@ -6513,13 +6513,30 @@
       "ReviewDiscussionView": {
         "additionalProperties": false,
         "properties": {
+          "agent_answers": {
+            "items": {
+              "$ref": "#/components/schemas/SharedReviewAnswer"
+            },
+            "title": "Agent Answers",
+            "type": "array"
+          },
           "base_sha": {
             "pattern": "^[0-9a-f]{40}(?:[0-9a-f]{24})?$",
             "title": "Base Sha",
             "type": "string"
           },
+          "can_ask": {
+            "default": false,
+            "title": "Can Ask",
+            "type": "boolean"
+          },
           "can_comment": {
             "title": "Can Comment",
+            "type": "boolean"
+          },
+          "can_use_review_workspace": {
+            "default": false,
+            "title": "Can Use Review Workspace",
             "type": "boolean"
           },
           "collaborators": {
@@ -6580,6 +6597,13 @@
           "project_name": {
             "title": "Project Name",
             "type": "string"
+          },
+          "questions": {
+            "items": {
+              "$ref": "#/components/schemas/ReviewQuestion"
+            },
+            "title": "Questions",
+            "type": "array"
           },
           "reports": {
             "items": {
@@ -7314,6 +7338,107 @@
           "profile"
         ],
         "title": "ReviewProfileEditorWrite",
+        "type": "object"
+      },
+      "ReviewQuestion": {
+        "additionalProperties": false,
+        "properties": {
+          "anchor": {
+            "discriminator": {
+              "mapping": {
+                "diff": "#/components/schemas/DiffDiscussionAnchor",
+                "finding": "#/components/schemas/FindingDiscussionAnchor"
+              },
+              "propertyName": "kind"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/FindingDiscussionAnchor"
+              },
+              {
+                "$ref": "#/components/schemas/DiffDiscussionAnchor"
+              }
+            ],
+            "title": "Anchor"
+          },
+          "answer": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Answer"
+          },
+          "answer_state": {
+            "default": "pending",
+            "enum": [
+              "pending",
+              "incomplete",
+              "ready"
+            ],
+            "title": "Answer State",
+            "type": "string"
+          },
+          "body": {
+            "title": "Body",
+            "type": "string"
+          },
+          "harness": {
+            "enum": [
+              "codex-native",
+              "claude-native"
+            ],
+            "title": "Harness",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "published_at": {
+            "anyOf": [
+              {
+                "format": "int64",
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Published At"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "dispatching",
+              "accepted",
+              "unknown"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "int64",
+            "title": "Updated At",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "anchor",
+          "body",
+          "session_id",
+          "harness",
+          "status",
+          "updated_at"
+        ],
+        "title": "ReviewQuestion",
         "type": "object"
       },
       "ReviewReport": {
@@ -11905,6 +12030,76 @@
           "head"
         ],
         "title": "SharedReproductionReceipt",
+        "type": "object"
+      },
+      "SharedReviewAnswer": {
+        "additionalProperties": false,
+        "properties": {
+          "anchor": {
+            "discriminator": {
+              "mapping": {
+                "diff": "#/components/schemas/DiffDiscussionAnchor",
+                "finding": "#/components/schemas/FindingDiscussionAnchor"
+              },
+              "propertyName": "kind"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/FindingDiscussionAnchor"
+              },
+              {
+                "$ref": "#/components/schemas/DiffDiscussionAnchor"
+              }
+            ],
+            "title": "Anchor"
+          },
+          "answer": {
+            "title": "Answer",
+            "type": "string"
+          },
+          "harness": {
+            "enum": [
+              "codex-native",
+              "claude-native"
+            ],
+            "title": "Harness",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "published_at": {
+            "format": "int64",
+            "title": "Published At",
+            "type": "integer"
+          },
+          "question": {
+            "title": "Question",
+            "type": "string"
+          },
+          "requested_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Requested By"
+          }
+        },
+        "required": [
+          "id",
+          "anchor",
+          "question",
+          "answer",
+          "harness",
+          "requested_by",
+          "published_at"
+        ],
+        "title": "SharedReviewAnswer",
         "type": "object"
       },
       "SkillContentResponse": {
@@ -23108,6 +23303,284 @@
           }
         },
         "summary": "Create Review Discussion Comment",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/studio/review-runs/{run_id}/discussion/questions": {
+      "post": {
+        "operationId": "ask_review_question_v1_studio_review_runs__run_id__discussion_questions_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "agent_id": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Agent Id"
+                  },
+                  "anchor": {
+                    "discriminator": {
+                      "mapping": {
+                        "diff": "#/components/schemas/DiffDiscussionAnchor",
+                        "finding": "#/components/schemas/FindingDiscussionAnchor"
+                      },
+                      "propertyName": "kind"
+                    },
+                    "oneOf": [
+                      {
+                        "$ref": "#/components/schemas/FindingDiscussionAnchor"
+                      },
+                      {
+                        "$ref": "#/components/schemas/DiffDiscussionAnchor"
+                      }
+                    ],
+                    "title": "Anchor"
+                  },
+                  "body": {
+                    "maxLength": 2000,
+                    "minLength": 1,
+                    "title": "Body",
+                    "type": "string"
+                  },
+                  "host_id": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Host Id"
+                  },
+                  "id": {
+                    "title": "Id",
+                    "type": "string"
+                  },
+                  "model": {
+                    "anyOf": [
+                      {
+                        "maxLength": 256,
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Model"
+                  },
+                  "reasoning_effort": {
+                    "anyOf": [
+                      {
+                        "maxLength": 256,
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Reasoning Effort"
+                  },
+                  "reviewer_key": {
+                    "anyOf": [
+                      {
+                        "pattern": "^[0-9a-f]{64}$",
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Reviewer Key"
+                  },
+                  "workspace": {
+                    "anyOf": [
+                      {
+                        "maxLength": 4096,
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Workspace"
+                  }
+                },
+                "required": [
+                  "id",
+                  "anchor",
+                  "body"
+                ],
+                "title": "AskReviewQuestion",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewQuestion"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Ask Review Question",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/studio/review-runs/{run_id}/discussion/questions/{question_id}": {
+      "get": {
+        "operationId": "get_review_question_v1_studio_review_runs__run_id__discussion_questions__question_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "question_id",
+            "required": true,
+            "schema": {
+              "title": "Question Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewQuestion"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Review Question",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/studio/review-runs/{run_id}/discussion/questions/{question_id}/share": {
+      "post": {
+        "operationId": "share_review_question_answer_v1_studio_review_runs__run_id__discussion_questions__question_id__share_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "question_id",
+            "required": true,
+            "schema": {
+              "title": "Question Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "description": "Start uses the captured target and profile, without overrides.",
+                "properties": {},
+                "title": "StartReviewRequest",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewQuestion"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Share Review Question Answer",
         "tags": [
           "sessions"
         ]

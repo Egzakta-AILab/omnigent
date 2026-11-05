@@ -14,6 +14,7 @@ import {
   type ReviewDiscussion,
 } from "./api";
 import { FindingReproductions } from "./FindingReproductions";
+import { DiscussionQuestions, type QuestionAttempt } from "./DiscussionQuestions";
 import { ReviewDiff } from "./ReviewDiff";
 
 function anchorKey(anchor: DiscussionAnchor) {
@@ -121,6 +122,7 @@ function DiscussionContent({
   const [body, setBody] = useState("");
   const [copyStatus, setCopyStatus] = useState("");
   const attempt = useRef<{ fingerprint: string; id: string } | undefined>(undefined);
+  const questionAttempt = useRef<QuestionAttempt | undefined>(undefined);
   const send = useMutation({
     mutationFn: (message: Parameters<typeof postReviewDiscussionComment>[1]) =>
       postReviewDiscussionComment(discussion.id, message),
@@ -151,7 +153,11 @@ function DiscussionContent({
   const activeKey = anchor ? anchorKey(anchor) : "";
   const comments = discussion.comments.filter((item) => anchorKey(item.anchor) === activeKey);
   const ranges = new Map(
-    discussion.comments.flatMap(({ anchor: threadAnchor }) =>
+    [
+      ...discussion.comments,
+      ...(discussion.questions ?? []),
+      ...(discussion.agent_answers ?? []),
+    ].flatMap(({ anchor: threadAnchor }) =>
       threadAnchor.kind === "diff" ? [[anchorKey(threadAnchor), threadAnchor] as const] : [],
     ),
   );
@@ -294,6 +300,20 @@ function DiscussionContent({
                 ) : (
                   <p className="text-sm text-muted-foreground">No replies yet.</p>
                 )}
+                <DiscussionQuestions
+                  key={activeKey}
+                  discussion={discussion}
+                  anchor={anchor}
+                  questions={(discussion.questions ?? []).filter(
+                    (item) => anchorKey(item.anchor) === activeKey,
+                  )}
+                  answers={(discussion.agent_answers ?? []).filter(
+                    (item) => anchorKey(item.anchor) === activeKey,
+                  )}
+                  viewerId={viewerId}
+                  attempt={questionAttempt}
+                  refresh={refresh}
+                />
                 {discussion.can_comment && (
                   <form
                     className="space-y-2"
