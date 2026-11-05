@@ -71,6 +71,7 @@ from omnigent.studio.reviews.artifacts import (
     FindingArtifact,
 )
 from omnigent.studio.reviews.discussion import (
+    MAX_INLINE_PUBLICATION_DRAFTS,
     AccountId,
     AskReviewQuestion,
     ConfirmInlinePublication,
@@ -87,6 +88,7 @@ from omnigent.studio.reviews.discussion import (
     QuestionExecution,
     QuestionInput,
     QuestionRecord,
+    ReportDraftResult,
     ReviewCollaboratorInput,
     ReviewComment,
     ReviewDiscussionFinding,
@@ -1868,6 +1870,79 @@ def create_studio_reviews_router(
             raise HTTPException(404, str(exc)) from exc
         except ReviewConflictError as exc:
             raise HTTPException(409, str(exc)) from exc
+
+    @router.post(
+        "/studio/review-runs/{run_id}/discussion/inline-drafts/from-report",
+        response_model=ReportDraftResult,
+        dependencies=_WRITE_GATES,
+    )
+    async def prepare_report_drafts(
+        request: Request, response: Response, run_id: str
+    ) -> ReportDraftResult:
+        run = await owned_run(request, run_id)
+        owner = require_user(request, auth_provider)
+        response.headers["Cache-Control"] = "no-store"
+        if run.target.candidate is not None:
+            raise HTTPException(409, "Use the captured pull request for inline drafts")
+        anchors = await run_anchors(run.id, owner)
+        if anchors is None:
+            raise HTTPException(409, "This review run has no captured diff")
+        members = run.selected_reviewers()
+        if any(member.dispatch_status in {"failed", "cancelled"} for member in members):
+            return ReportDraftResult(state="incomplete")
+        report = await read_consolidation(run, anchors, include_finding_keys=True)
+        if any(member.report.state == "incomplete" for member in report.reviewers):
+            return ReportDraftResult(state="incomplete")
+        if not members or any(member.report.state != "ready" for member in report.reviewers):
+            return ReportDraftResult(state="waiting")
+        if any(member.report.citation_validation != "checked" for member in report.reviewers):
+            return ReportDraftResult(state="incomplete")
+
+        eligible = [
+            entry
+            for entry in report.findings
+            if entry.finding_key is not None and entry.finding.severity in {"critical", "high"}
+        ]
+        eligible.sort(
+            key=lambda entry: (entry.finding.severity != "critical", entry.finding_key or "")
+        )
+        drafts = []
+        for entry in eligible[:MAX_INLINE_PUBLICATION_DRAFTS]:
+            assert entry.finding_key is not None
+            finding = entry.finding
+            draft_id = hashlib.sha256(
+                f"studio-report-draft:{run.id}:{entry.finding_key}".encode()
+            ).hexdigest()[:32]
+            drafts.append(
+                (
+                    CreateReviewComment(
+                        id=draft_id,
+                        anchor=FindingDiscussionAnchor(
+                            kind="finding", finding_key=entry.finding_key
+                        ),
+                        body=finding.detail,
+                    ),
+                    DiffDiscussionAnchor(
+                        kind="diff",
+                        path=finding.path,
+                        side=finding.side,
+                        start=finding.line,
+                        end=finding.line,
+                    ),
+                )
+            )
+        if not drafts:
+            return ReportDraftResult(state="prepared")
+        await current_project_patch(request, run.target, owner, run.id)
+        try:
+            created = await asyncio.to_thread(
+                review_store.create_report_inline_drafts, run.id, drafts, owner=owner
+            )
+        except ReviewNotFoundError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ReviewConflictError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return ReportDraftResult(state="prepared", eligible=len(drafts), created=created)
 
     async def change_inline_draft(
         access: DiscussionAccess, draft_id: str, version: int, body: str | None

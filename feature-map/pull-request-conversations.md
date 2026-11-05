@@ -54,6 +54,8 @@ links findings to their captured changes.
   evidence from Inbox. Each entry shows the captured head.
 - `delegated-inline-publication`: The review owner can allow a named
   collaborator to confirm selected drafts on the captured revision.
+- `webhook-inline-drafts`: An opted-in receiver prepares drafts from
+  citation-checked critical and high findings after all selected reviewers report.
 
 ## How to get to it (user POV)
 
@@ -68,6 +70,9 @@ links findings to their captured changes.
   and choose **Share this review → Allow publishing** beside a collaborator.
   As that collaborator, open the same discussion and choose **Publish inline
   drafts**.
+- `webhook-inline-drafts`: Enable **prepare_inline_drafts** on the review
+  route. After the bot run finishes, open its shared review and inspect
+  **Publish inline drafts** as a publisher.
 
 A session with one PR opens its details directly. With multiple PRs, select a
 request from the list first; **All pull requests** returns to that list.
@@ -150,6 +155,9 @@ and removal controls with scripted responses. The project case in
 `tests/server/integration/test_session_orchestration.py` checks that a
 delegated confirmation is attributed, a removed publisher cannot confirm,
 and replay does not send another comment.
+For the automatic-draft path, the same server test checks waiting, a changed
+head, citation filtering, replay and discard. The webhook test checks the
+receiver's persisted retry state across restarts.
 
 Render recovery has component coverage in
 `web/src/components/RenderErrorBoundary.test.tsx` and

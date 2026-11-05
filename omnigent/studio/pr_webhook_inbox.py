@@ -75,7 +75,8 @@ class WebhookInbox:
             if connection.execute("SELECT 1 FROM deliveries WHERE key = ?", (key,)).fetchone():
                 return False
             pending = connection.execute(
-                "SELECT count(*) FROM deliveries WHERE state IN ('queued','capturing','starting')"
+                "SELECT count(*) FROM deliveries "
+                "WHERE state IN ('queued','capturing','starting','drafting')"
             ).fetchone()[0]
             if pending >= _MAX_PENDING:
                 raise InboxFull
@@ -93,14 +94,14 @@ class WebhookInbox:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 """SELECT key, route, policy, payload, state, run_id, attempts
-                   FROM deliveries WHERE state IN ('queued','capturing','starting')
+                   FROM deliveries WHERE state IN ('queued','capturing','starting','drafting')
                    AND available_at <= ? ORDER BY available_at, key LIMIT 1""",
                 (now,),
             ).fetchone()
             if row is None:
                 return None
-            state = "starting" if row["state"] == "starting" else "capturing"
-            attempts = row["attempts"] + int(state == "capturing")
+            state = row["state"] if row["state"] in ("starting", "drafting") else "capturing"
+            attempts = row["attempts"] + int(state != "starting")
             lease = uuid.uuid4().hex
             connection.execute(
                 """UPDATE deliveries SET state = ?, attempts = ?, lease = ?,

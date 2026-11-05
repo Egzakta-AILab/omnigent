@@ -1439,37 +1439,100 @@ class StudioReviewStore:
                 ) or row.discarded:
                     raise ReviewConflictError("This draft ID is unavailable")
                 return self._inline_draft(row)
-            count = session.scalar(
-                select(func.count())
-                .select_from(SqlStudioInlineDraft)
-                .where(
-                    SqlStudioInlineDraft.workspace_id == current_workspace_id(),
-                    SqlStudioInlineDraft.run_id == run_id,
-                )
-            )
-            if count is not None and count >= _MAX_INLINE_DRAFTS:
-                raise ReviewConflictError("This review has reached its inline draft limit")
-            now = time.time_ns() // 1_000_000
-            row = SqlStudioInlineDraft(
-                workspace_id=current_workspace_id(),
-                run_id=run_id,
-                id=request.id,
-                actor_scope=scope,
-                actor_generation=generation,
-                intent_hash=intent,
-                thread_json=request.anchor.model_dump_json(),
-                anchor_json=anchor.model_dump_json(),
-                body=request.body,
-                version=1,
-                discarded=False,
-                publication_state="draft",
-                created_at=now,
-                updated_at=now,
-            )
+            self._check_inline_draft_capacity(session, run_id, 1)
+            row = self._new_inline_draft(run_id, request, anchor, scope, generation, intent)
             session.add(row)
             return self._inline_draft(row)
 
         return run_write_transaction(self._write, "create_inline_review_draft", write)
+
+    @staticmethod
+    def _check_inline_draft_capacity(session: Session, run_id: str, added: int) -> None:
+        count = session.scalar(
+            select(func.count())
+            .select_from(SqlStudioInlineDraft)
+            .where(
+                SqlStudioInlineDraft.workspace_id == current_workspace_id(),
+                SqlStudioInlineDraft.run_id == run_id,
+            )
+        )
+        if (count or 0) + added > _MAX_INLINE_DRAFTS:
+            raise ReviewConflictError("This review has reached its inline draft limit")
+
+    @staticmethod
+    def _new_inline_draft(
+        run_id: str,
+        request: CreateReviewComment,
+        anchor: DiffDiscussionAnchor,
+        scope: bytes,
+        generation: str | None,
+        intent: bytes,
+    ) -> SqlStudioInlineDraft:
+        now = time.time_ns() // 1_000_000
+        return SqlStudioInlineDraft(
+            workspace_id=current_workspace_id(),
+            run_id=run_id,
+            id=request.id,
+            actor_scope=scope,
+            actor_generation=generation,
+            intent_hash=intent,
+            thread_json=request.anchor.model_dump_json(),
+            anchor_json=anchor.model_dump_json(),
+            body=request.body,
+            version=1,
+            discarded=False,
+            publication_state="draft",
+            created_at=now,
+            updated_at=now,
+        )
+
+    def create_report_inline_drafts(
+        self,
+        run_id: str,
+        drafts: list[tuple[CreateReviewComment, DiffDiscussionAnchor]],
+        *,
+        owner: str | None,
+    ) -> int:
+        def write(session: Session) -> int:
+            generation = self._lock_discussion_writer(session, run_id, owner, owner)
+            scope = _owner_scope(owner)
+            draft = SqlStudioInlineDraft
+            existing_threads = set(
+                session.scalars(
+                    select(draft.thread_json).where(
+                        draft.workspace_id == current_workspace_id(),
+                        draft.run_id == run_id,
+                        draft.actor_scope == scope,
+                        draft.actor_generation == generation,
+                    )
+                )
+            )
+            pending = []
+            for request, anchor in drafts:
+                intent = hashlib.sha256(request.model_dump_json().encode()).digest()
+                row = session.get(
+                    SqlStudioInlineDraft, (current_workspace_id(), run_id, request.id)
+                )
+                if row is None and request.anchor.model_dump_json() not in existing_threads:
+                    pending.append(
+                        self._new_inline_draft(run_id, request, anchor, scope, generation, intent)
+                    )
+                elif row is not None and (
+                    row.actor_scope,
+                    row.actor_generation,
+                    row.intent_hash,
+                ) != (
+                    scope,
+                    generation,
+                    intent,
+                ):
+                    raise ReviewConflictError("This report draft ID is unavailable")
+            if pending:
+                self._check_inline_draft_capacity(session, run_id, len(pending))
+                session.add_all(pending)
+            return len(pending)
+
+        return run_write_transaction(self._write, "prepare_inline_review_drafts", write)
 
     def change_inline_draft(
         self,

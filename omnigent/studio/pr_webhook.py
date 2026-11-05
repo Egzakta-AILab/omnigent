@@ -11,6 +11,7 @@ import logging
 import os
 import re
 import sqlite3
+from collections import Counter
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
@@ -29,20 +30,28 @@ from pydantic import (
 )
 
 from omnigent.studio.pr_webhook_inbox import Delivery, InboxFull, WebhookInbox
-from omnigent.studio.reviews.discussion import MAX_REVIEW_COLLABORATORS, AccountId
+from omnigent.studio.reviews.discussion import (
+    MAX_REVIEW_COLLABORATORS,
+    AccountId,
+    ReportDraftResult,
+)
 from omnigent.studio.reviews.models import (
     MAX_RUN_REVIEWERS,
     FrozenModel,
+    ReviewPass,
     ReviewRun,
     Sha,
     require_uuid,
 )
-from omnigent.studio.reviews.service import CaptureReviewRunRequest
+from omnigent.studio.reviews.service import CaptureProjectReviewRequest, CaptureReviewRunRequest
 from omnigent.studio.setup import validate_server_url
+from omnigent.util.reasoning_effort import EFFORT_VALUES, validate_effort
 
 _logger = logging.getLogger(__name__)
 _MAX_BODY = 1024 * 1024
 _MAX_CAPTURE_ATTEMPTS = 3
+_MAX_DRAFT_ATTEMPTS = 240
+_DRAFT_POLL_SECONDS = 15
 _REQUEST_SECONDS = 150
 _ACTIONS = {"opened", "reopened", "synchronize", "ready_for_review"}
 _RECOVERABLE_CAPTURE_STATUS = {408, 429, 500, 502, 503, 504}
@@ -75,6 +84,7 @@ class WebhookRoute(FrozenModel):
     )
     review_drafts: bool = False
     review_forks: bool = False
+    prepare_inline_drafts: bool = Field(default=False, strict=True)
     reviewers: list[ReviewerSettings] = Field(min_length=1, max_length=MAX_RUN_REVIEWERS)
     coordinator: ReviewerSettings | None = None
     required_reviewer_indices: list[int] = Field(default_factory=list)
@@ -101,7 +111,11 @@ class WebhookRoute(FrozenModel):
 
     @property
     def policy_digest(self) -> str:
-        excluded = {field for field in ("collaborators", "publishers") if not getattr(self, field)}
+        excluded = {
+            field
+            for field in ("collaborators", "publishers", "prepare_inline_drafts")
+            if not getattr(self, field)
+        }
         return hashlib.sha256(self.model_dump_json(exclude=excluded).encode()).hexdigest()
 
     def capture(self, number: int, base: str, head: str) -> CaptureReviewRunRequest:
@@ -217,24 +231,59 @@ class WebhookWorker:
             request.reviewers
         ):
             raise ValueError("Studio returned a different reviewer roster")
-        expected_members = list(request.reviewers)
-        actual_members = list(run.reviewers)
-        if request.coordinator is not None and run.coordinator is not None:
-            expected_members.append(request.coordinator)
-            actual_members.append(run.coordinator)
-        for member, settings in zip(actual_members, expected_members, strict=True):
+
+        def captured_key(member: ReviewPass) -> tuple[str | None, ...]:
+            if member.run_id != run.id or member.target != target:
+                raise ValueError("Studio returned a reviewer for a different run")
             profile = member.profile
             role = profile.role
-            if (
-                member.run_id != run.id
-                or member.target != target
-                or profile.agent_id != settings.agent_id
-                or profile.harness != settings.harness
-                or profile.skill != settings.skill
-                or (role.id if role else None) != settings.profile_id
-                or (role.digest if role else None) != settings.profile_digest
-            ):
-                raise ValueError("Studio returned a different reviewer profile")
+            return (
+                member.run_role,
+                profile.agent_id,
+                profile.harness,
+                profile.skill,
+                role.id if role else None,
+                role.digest if role else None,
+                profile.model,
+                profile.reasoning_effort,
+            )
+
+        def requested_key(
+            settings: CaptureProjectReviewRequest, role: str | None
+        ) -> tuple[str | None, ...]:
+            return (
+                role,
+                settings.agent_id,
+                settings.harness,
+                settings.skill,
+                settings.profile_id,
+                settings.profile_digest,
+                settings.model,
+                validate_effort(settings.reasoning_effort, "session metadata", EFFORT_VALUES),
+            )
+
+        required = set(request.required_reviewer_indices)
+        expected_roster = Counter(
+            requested_key(
+                settings,
+                None
+                if request.coordinator is None
+                else "required"
+                if index in required
+                else "candidate",
+            )
+            for index, settings in enumerate(request.reviewers)
+        )
+        if Counter(captured_key(member) for member in run.reviewers) != expected_roster:
+            raise ValueError("Studio returned a different reviewer roster")
+        if (
+            request.coordinator is not None
+            and run.coordinator is not None
+            and (
+                captured_key(run.coordinator) != requested_key(request.coordinator, "coordinator")
+            )
+        ):
+            raise ValueError("Studio returned a different coordinator profile")
         return run
 
     @staticmethod
@@ -271,13 +320,65 @@ class WebhookWorker:
             state = self._start_state(run, response_confirmed=False)
         except (httpx.HTTPError, TimeoutError, ValueError):
             state = "unconfirmed"
-        await asyncio.to_thread(self.inbox.finish, job, state, "reconciled_without_redispatch")
+        await self._after_start(job, route, state, "reconciled_without_redispatch")
+
+    async def _after_start(
+        self, job: Delivery, route: WebhookRoute, state: str, detail: str
+    ) -> None:
+        if route.prepare_inline_drafts and state in {"started", "awaiting_plan"}:
+            await asyncio.to_thread(self.inbox.finish, job, "drafting", state)
+        else:
+            await asyncio.to_thread(self.inbox.finish, job, state, detail)
+
+    async def _prepare_drafts(self, job: Delivery) -> None:
+        assert job.run_id is not None
+        if job.attempts > _MAX_DRAFT_ATTEMPTS:
+            await asyncio.to_thread(self.inbox.finish, job, "draft_failed", "report_wait_expired")
+            return
+        state, detail = "drafting", "report_waiting"
+        try:
+            async with asyncio.timeout(_REQUEST_SECONDS):
+                response = await self.studio.post(
+                    f"v1/studio/review-runs/{job.run_id}/discussion/inline-drafts/from-report",
+                    json={},
+                )
+            response.raise_for_status()
+            result = ReportDraftResult.model_validate(response.json())
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            if status == 409:
+                state, detail = "draft_skipped", "revision_or_draft_conflict"
+            elif status not in _RECOVERABLE_CAPTURE_STATUS:
+                state, detail = "draft_failed", f"draft_http_{status}"
+            else:
+                detail = f"draft_http_{status}"
+        except (httpx.HTTPError, TimeoutError):
+            detail = "draft_response_unavailable"
+        except ValueError:
+            state, detail = "draft_failed", "invalid_draft_receipt"
+        else:
+            if result.state == "prepared":
+                state, detail = "drafted", f"eligible={result.eligible};created={result.created}"
+            elif result.state == "incomplete":
+                state, detail = "draft_skipped", "report_incomplete"
+        await asyncio.to_thread(
+            self.inbox.finish,
+            job,
+            state,
+            detail,
+            delay=_DRAFT_POLL_SECONDS if state == "drafting" else 0,
+        )
 
     async def dispatch(self, job: Delivery) -> None:
         route = self.routes.get(job.route)
         if route is None or route.policy_digest != job.policy:
-            state = "unconfirmed" if job.state == "starting" else "skipped"
+            state = {"starting": "unconfirmed", "drafting": "draft_skipped"}.get(
+                job.state, "skipped"
+            )
             await asyncio.to_thread(self.inbox.finish, job, state, "policy_changed")
+            return
+        if job.state == "drafting":
+            await self._prepare_drafts(job)
             return
         request = CaptureReviewRunRequest.model_validate_json(job.payload)
         if job.state == "starting":
@@ -328,7 +429,7 @@ class WebhookWorker:
             except (httpx.HTTPError, TimeoutError, ValueError, AttributeError):
                 await self._reconcile(job, route, request, run.id)
             else:
-                await asyncio.to_thread(self.inbox.finish, job, state, "start_response")
+                await self._after_start(job, route, state, "start_response")
             return
 
         if retry and job.attempts < _MAX_CAPTURE_ATTEMPTS:
