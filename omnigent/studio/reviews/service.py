@@ -124,8 +124,11 @@ class CaptureReviewRunRequest(BaseModel):
     collaborators: Annotated[list[AccountId], Field(max_length=MAX_REVIEW_COLLABORATORS)] = Field(
         default_factory=list
     )
+    publishers: Annotated[list[AccountId], Field(max_length=MAX_REVIEW_COLLABORATORS)] = Field(
+        default_factory=list
+    )
 
-    @field_validator("collaborators")
+    @field_validator("collaborators", "publishers")
     @classmethod
     def canonical_collaborators(cls, value: list[str]) -> list[str]:
         if len(set(value)) != len(value):
@@ -134,6 +137,8 @@ class CaptureReviewRunRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_roster(self) -> CaptureReviewRunRequest:
+        if not set(self.publishers).issubset(self.collaborators):
+            raise ValueError("Each publisher must also be a review collaborator")
         members = [*self.reviewers, self.coordinator] if self.coordinator else self.reviewers
         target_fields = {
             "pr_url",
@@ -162,6 +167,8 @@ def review_run_fingerprint(project_id: str, body: CaptureReviewRunRequest) -> st
     excluded = {"coordinator", "required_reviewer_indices"} if body.coordinator is None else set()
     if not body.collaborators:
         excluded.add("collaborators")
+    if not body.publishers:
+        excluded.add("publishers")
     payload = json.dumps(
         ["review.run.capture", project_id, body.model_dump(mode="json", exclude=excluded)],
         sort_keys=True,

@@ -42,11 +42,26 @@ function Sharing({
   const [account, setAccount] = useState("");
   const [status, setStatus] = useState("");
   const change = useMutation({
-    mutationFn: ({ id, revoke }: { id: string; revoke: boolean }) =>
-      changeReviewCollaborator(discussion.id, id, revoke),
-    onSuccess: async (_, { revoke }) => {
-      if (!revoke) setAccount("");
-      setStatus(revoke ? "Access removed." : "Access granted. Share the review link.");
+    mutationFn: ({
+      id,
+      revoke,
+      canPublish,
+    }: {
+      id: string;
+      revoke: boolean;
+      canPublish?: boolean;
+    }) => changeReviewCollaborator(discussion.id, id, revoke, canPublish),
+    onSuccess: async (_, { revoke, canPublish }) => {
+      if (!revoke && canPublish === undefined) setAccount("");
+      setStatus(
+        revoke
+          ? "Access removed."
+          : canPublish === true
+            ? "Publishing access granted."
+            : canPublish === false
+              ? "Publishing access removed."
+              : "Access granted. Share the review link.",
+      );
       await refresh();
     },
   });
@@ -57,7 +72,8 @@ function Sharing({
       <div className="mt-3 space-y-2 text-sm">
         <p className="text-muted-foreground">
           Collaborators can read this saved diff, findings, and reproduction receipts, and reply in
-          Omnigent.
+          Omnigent. Publishers can also confirm inline comments using the review workspace’s
+          configured account.
         </p>
         {discussion.sharing_available && (
           <form
@@ -83,20 +99,36 @@ function Sharing({
           </form>
         )}
         <ul className="divide-y divide-border">
-          {discussion.collaborators.map((id) => (
-            <li key={id} className="flex items-center justify-between gap-2 py-1">
-              <span className="break-all">{id}</span>
-              <Button
-                variant="outline"
-                size="sm"
-                disabled={change.isPending}
-                aria-label={`Revoke access for ${id}`}
-                onClick={() => change.mutate({ id, revoke: true })}
-              >
-                Revoke access
-              </Button>
-            </li>
-          ))}
+          {discussion.collaborators.map((id) => {
+            const publisher = discussion.publishers?.includes(id) ?? false;
+            return (
+              <li key={id} className="flex flex-wrap items-center justify-between gap-2 py-1">
+                <span className="flex-1 break-all">
+                  {id}
+                  {publisher ? " · Publisher" : ""}
+                </span>
+                {discussion.sharing_available && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={change.isPending}
+                    onClick={() => change.mutate({ id, revoke: false, canPublish: !publisher })}
+                  >
+                    {publisher ? "Remove publishing access" : "Allow publishing"}
+                  </Button>
+                )}
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={change.isPending}
+                  aria-label={`Revoke access for ${id}`}
+                  onClick={() => change.mutate({ id, revoke: true })}
+                >
+                  Revoke access
+                </Button>
+              </li>
+            );
+          })}
         </ul>
         {change.error && <p role="alert">{change.error.message}</p>}
         {status && <p role="status">{status}</p>}
@@ -155,6 +187,7 @@ function DiscussionContent({
     : null;
   const activeKey = anchor ? anchorKey(anchor) : "";
   const comments = discussion.comments.filter((item) => anchorKey(item.anchor) === activeKey);
+  const publicationDrafts = discussion.publication_drafts ?? discussion.inline_drafts ?? [];
   const ranges = new Map(
     [
       ...discussion.comments,
@@ -222,12 +255,8 @@ function DiscussionContent({
           </div>
         </header>
         <Sharing discussion={discussion} refresh={refresh} />
-        {discussion.can_publish_inline && !!discussion.inline_drafts?.length && (
-          <InlinePublication
-            runId={discussion.id}
-            drafts={discussion.inline_drafts}
-            refresh={refresh}
-          />
+        {discussion.can_publish_inline && publicationDrafts.length > 0 && (
+          <InlinePublication runId={discussion.id} drafts={publicationDrafts} refresh={refresh} />
         )}
         <div className="grid min-w-0 gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(320px,0.8fr)]">
           <section className="min-w-0 space-y-3" aria-label="Review context">

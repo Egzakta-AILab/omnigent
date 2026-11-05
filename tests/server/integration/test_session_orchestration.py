@@ -1737,6 +1737,45 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
                 f"{publication}/preview", json=selection, headers=foreign_headers
             )
         ).status_code == 403
+        assert (
+            await auth_client.post(
+                collaborators_path,
+                json={"user_id": "bob", "can_publish": True},
+                headers=foreign_headers,
+            )
+        ).status_code == 404
+        publisher = {"user_id": "bob", "can_publish": True}
+        assert (await auth_client.post(collaborators_path, json=publisher)).status_code == 204
+        delegated_view = (await auth_client.get(discussion_path, headers=foreign_headers)).json()
+        assert (
+            delegated_view["can_publish_inline"] and not delegated_view["can_use_review_workspace"]
+        )
+        assert [draft["id"] for draft in delegated_view["inline_drafts"]] == [bob_draft["id"]]
+        assert {draft["id"] for draft in delegated_view["publication_drafts"]} == {
+            bob_draft["id"],
+            left_draft["id"],
+            right_draft["id"],
+        }
+        delegated = await auth_client.post(
+            f"{publication}/preview", json=selection, headers=foreign_headers
+        )
+        assert delegated.status_code == 200, delegated.text
+        delegated_confirm = {**selection, "confirm": True, "digest": delegated.json()["digest"]}
+        assert (
+            await auth_client.post(f"{publication}/confirm", json=delegated_confirm)
+        ).status_code == 409
+        assert (
+            await auth_client.post(
+                collaborators_path, json={"user_id": "bob", "can_publish": False}
+            )
+        ).status_code == 204
+        assert (
+            await auth_client.post(
+                f"{publication}/confirm", json=delegated_confirm, headers=foreign_headers
+            )
+        ).status_code == 403
+        assert inline_writes == []
+        assert (await auth_client.post(collaborators_path, json=publisher)).status_code == 204
         preview = await auth_client.post(f"{publication}/preview", json=selection)
         assert preview.status_code == 200, preview.text
         preview = preview.json()
@@ -1758,10 +1797,13 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
         assert (await auth_client.post(f"{publication}/confirm", json=confirm)).status_code == 409
         current_head = captured_head
         assert inline_writes == []
-        posted = await auth_client.post(f"{publication}/confirm", json=confirm)
+        posted = await auth_client.post(
+            f"{publication}/confirm", json=delegated_confirm, headers=foreign_headers
+        )
         assert posted.status_code == 200, posted.text
         posted_drafts = posted.json()["drafts"]
         assert [draft["publication_state"] for draft in posted_drafts] == ["posted", "unknown"]
+        assert {draft["publication_confirmed_by"] for draft in posted_drafts} == {"bob"}
         assert posted_drafts[0]["provider_url"] == f"{pr_url}#discussion_r1"
         assert posted_drafts[1]["provider_url"] is None
         assert inline_writes == [
@@ -1776,7 +1818,9 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
             for draft in preview["drafts"]
         ]
         assert (
-            await auth_client.post(f"{publication}/confirm", json=confirm)
+            await auth_client.post(
+                f"{publication}/confirm", json=delegated_confirm, headers=foreign_headers
+            )
         ).json() == posted.json()
         assert len(inline_writes) == 2
         assert (

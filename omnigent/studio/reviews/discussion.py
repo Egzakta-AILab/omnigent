@@ -99,6 +99,7 @@ class InlineDraft(InlineDraftVersion):
     updated_at: int
     publication_state: InlinePublicationState = "draft"
     provider_url: str | None = None
+    publication_confirmed_by: str | None = None
 
 
 class InlineDraftSelection(InlineDraftVersion):
@@ -253,6 +254,7 @@ class SharedReviewAnswer(FrozenModel):
 
 class ReviewCollaboratorInput(FrozenModel):
     user_id: AccountId
+    can_publish: bool = Field(default=False, strict=True)
 
 
 class SharedReviewEntry(FrozenModel):
@@ -296,6 +298,7 @@ class ReviewDiscussionView(FrozenModel):
     findings: list[ReviewDiscussionFinding]
     comments: list[ReviewComment]
     inline_drafts: list[InlineDraft] = Field(default_factory=list)
+    publication_drafts: list[InlineDraft] | None = None
     questions: list[ReviewQuestion] = Field(default_factory=list)
     agent_answers: list[SharedReviewAnswer] = Field(default_factory=list)
     can_comment: bool
@@ -307,4 +310,5 @@ class ReviewDiscussionView(FrozenModel):
     check_repository: str | None = None
     review_workspace_host_id: str | None = None
     collaborators: list[str] | None = None
+    publishers: list[str] | None = None
     sharing_available: bool

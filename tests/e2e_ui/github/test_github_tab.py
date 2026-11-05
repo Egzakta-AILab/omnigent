@@ -1973,6 +1973,7 @@ def test_studio_review_from_pr_panel(
         assert len(capture_keys) == len(start_keys) == 1
         assert not ordinary_creates and not review_events
         collaborators: list[str] = []
+        publishers: list[str] = []
         replies: list[dict] = []
         inline_drafts: dict[str, dict] = {}
         questions: list[dict] = []
@@ -2046,8 +2047,16 @@ def test_studio_review_from_pr_panel(
         page.route(f"{discussion_path}/inline-publication/*", inline_publication)
 
         def grant_discussion_access(route: Route) -> None:
-            assert route.request.post_data_json == {"user_id": "reviewer@example.test"}
-            collaborators.append("reviewer@example.test")
+            data = route.request.post_data_json
+            account = "reviewer@example.test"
+            assert data["user_id"] == account
+            if "can_publish" not in data:
+                collaborators.append(account)
+            elif data["can_publish"] is True:
+                publishers.append(account)
+            else:
+                assert data["can_publish"] is False
+                publishers.remove(account)
             route.fulfill(status=204)
 
         def reply_in_discussion(route: Route) -> None:
@@ -2230,6 +2239,7 @@ def test_studio_review_from_pr_panel(
                     "check_repository": workspace,
                     "review_workspace_host_id": host_id,
                     "collaborators": collaborators,
+                    "publishers": publishers,
                     "sharing_available": True,
                 }
             ),
@@ -2240,12 +2250,16 @@ def test_studio_review_from_pr_panel(
         page.get_by_label("Omnigent account ID").fill("reviewer@example.test")
         page.get_by_role("button", name="Grant access", exact=True).click()
         expect(page.get_by_text("reviewer@example.test", exact=True)).to_be_visible()
+        page.get_by_role("button", name="Allow publishing", exact=True).click()
+        expect(page.get_by_text("reviewer@example.test · Publisher", exact=True)).to_be_visible()
+        page.get_by_role("button", name="Remove publishing access", exact=True).click()
+        expect(page.get_by_text("reviewer@example.test", exact=True)).to_be_visible()
         page.get_by_role("textbox", name="Internal reply").fill(
             "Can we reproduce with empty input?"
         )
         page.get_by_role("button", name="Post internal reply", exact=True).click()
         expect(page.get_by_text("Can we reproduce with empty input?", exact=True)).to_be_visible()
-        drafts = page.get_by_role("region", name="Private inline drafts")
+        drafts = page.get_by_role("region", name="Your inline drafts")
         drafts.get_by_role("button", name="Draft inline comment").click()
         drafts.get_by_role("textbox", name="Inline comment draft").fill("Check the input first.")
         drafts.get_by_role("button", name="Save draft").click()

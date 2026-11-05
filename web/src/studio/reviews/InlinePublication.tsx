@@ -105,6 +105,11 @@ export function InlinePublication({
                   ) : (
                     <p>Delivery unconfirmed. Check the pull request for this comment.</p>
                   )}
+                  {draft.publication_confirmed_by && (
+                    <p className="break-words text-xs text-muted-foreground">
+                      Confirmed by {draft.publication_confirmed_by}
+                    </p>
+                  )}
                 </div>
               )}
             </li>

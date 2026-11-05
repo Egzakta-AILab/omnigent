@@ -32,6 +32,7 @@ _INLINE_DRAFTS = "4bf0aa1e9173"
 _INLINE_DELIVERY = "7a2594cfe931"
 _FINDING_ARTIFACTS = "ba9152e8d96f"
 _HOSTED_CHECKS = "b51ac8e4d231"
+_PUBLISHERS = "2ad8b1357c64"
 _TABLES = {"studio_review_passes", "studio_review_operations", "studio_review_events"}
 
 
@@ -80,6 +81,7 @@ def test_upgrade_and_downgrade_preserve_existing_database(tmp_path: Path) -> Non
         assert "studio_inline_drafts" not in sa.inspect(engine).get_table_names()
         _migrate(uri, engine, "upgrade", _INLINE_DRAFTS)
         _migrate(uri, engine, "upgrade", _HOSTED_CHECKS)
+        _migrate(uri, engine, "upgrade", _PUBLISHERS)
         for model in (
             SqlStudioReviewPass,
             SqlStudioReviewOperation,
@@ -101,6 +103,23 @@ def test_upgrade_and_downgrade_preserve_existing_database(tmp_path: Path) -> Non
             assert connection.execute(
                 sa.text("SELECT source_session_id, source_project_id FROM studio_review_passes")
             ).one() == (b"s" * 16, None)
+        grants = SqlStudioReviewCollaborator.__table__
+        with engine.begin() as connection:
+            connection.execute(
+                grants.insert().values(
+                    workspace_id=0,
+                    run_id="a" * 32,
+                    user_key=b"p" * 32,
+                    user_id="publisher",
+                    owner_user_id="owner",
+                )
+            )
+            assert connection.scalar(sa.select(grants.c.can_publish)) is False
+            connection.execute(grants.update().values(can_publish=True))
+        with pytest.raises(RuntimeError, match="review publishers are assigned"):
+            _migrate(uri, engine, "downgrade", _HOSTED_CHECKS)
+        with engine.begin() as connection:
+            connection.execute(grants.delete())
         questions = SqlStudioReviewQuestion.__table__
         with engine.begin() as connection:
             connection.execute(

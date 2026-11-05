@@ -11,7 +11,7 @@ from itertools import groupby
 from typing import Any, Literal, TypeVar, cast
 
 from pydantic import TypeAdapter
-from sqlalchemy import func, select, tuple_, update
+from sqlalchemy import and_, func, or_, select, tuple_, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, aliased
@@ -489,6 +489,7 @@ class StudioReviewStore:
         coordinator: ReviewProfile | None = None,
         required_indices: frozenset[int] = frozenset(),
         collaborators: dict[str, str | None] | None = None,
+        publishers: frozenset[str] = frozenset(),
     ) -> ReviewRun:
         """Persist the complete roster and its capture receipts in one transaction."""
         project_id = target.source_project_id
@@ -504,6 +505,8 @@ class StudioReviewStore:
             or len(collaborators) > MAX_REVIEW_COLLABORATORS
         ):
             raise ValueError("A shared run requires an owner and a bounded collaborator list")
+        if not publishers.issubset(collaborators or {}):
+            raise ValueError("Each publisher must also be a review collaborator")
         owner = _owner_scope(owner_user_id)
         key = hashlib.sha256(idempotency_key.encode()).digest()
         digest = _request_values(idempotency_key, request_hash)
@@ -559,6 +562,7 @@ class StudioReviewStore:
                         owner_user_id=owner_user_id,
                         user_generation=generation,
                         owner_generation=owner_generation,
+                        can_publish=user_id in publishers,
                     )
                     for user_id, generation in collaborators.items()
                 )
@@ -1177,20 +1181,20 @@ class StudioReviewStore:
                 entries=entries, next_cursor=entries[-1].id if len(rows) > limit else None
             )
 
-    def list_review_collaborators(self, run_id: str, *, owner: str) -> list[str]:
+    def list_review_collaborators(
+        self, run_id: str, *, owner: str, publishers_only: bool = False
+    ) -> list[str]:
         with self._session("list_review_collaborators") as session:
             if self._run_row(session, run_id, _owner_scope(owner)) is None:
                 raise ReviewNotFoundError("Review run not found")
+            grant = SqlStudioReviewCollaborator
+            query = select(grant.user_id).where(
+                grant.workspace_id == current_workspace_id(), grant.run_id == run_id
+            )
+            if publishers_only:
+                query = query.where(grant.can_publish.is_(True))
             return list(
-                session.scalars(
-                    select(SqlStudioReviewCollaborator.user_id)
-                    .where(
-                        SqlStudioReviewCollaborator.workspace_id == current_workspace_id(),
-                        SqlStudioReviewCollaborator.run_id == run_id,
-                    )
-                    .order_by(SqlStudioReviewCollaborator.user_id)
-                    .limit(MAX_REVIEW_COLLABORATORS)
-                )
+                session.scalars(query.order_by(grant.user_id).limit(MAX_REVIEW_COLLABORATORS))
             )
 
     def set_review_collaborator(
@@ -1201,6 +1205,7 @@ class StudioReviewStore:
         owner: str,
         target_generation: str | None = None,
         revoke: bool = False,
+        can_publish: bool | None = None,
     ) -> None:
         def write(session: Session) -> None:
             owner_generation = require_active_account(
@@ -1233,6 +1238,13 @@ class StudioReviewStore:
                     owner_user_id=owner,
                 )
                 session.add(grant)
+            if can_publish is not None:
+                grant.can_publish = can_publish
+            elif (grant.owner_generation, grant.user_generation) != (
+                owner_generation,
+                target_generation,
+            ):
+                grant.can_publish = False
             grant.owner_generation = owner_generation
             grant.user_generation = target_generation
 
@@ -1250,7 +1262,7 @@ class StudioReviewStore:
 
     def _require_discussion_access(
         self, session: Session, run_id: str, actor: str | None, owner: str | None, *, lock: bool
-    ) -> None:
+    ) -> SqlStudioReviewRun:
         run = self._run_row(session, run_id, _owner_scope(owner), lock=lock)
         if run is None or not self._discussion_owner_current(session, run, owner):
             raise ReviewNotFoundError("Review run not found")
@@ -1262,6 +1274,24 @@ class StudioReviewStore:
                 or not self._active_collaborator(session, grant)
             ):
                 raise ReviewNotFoundError("Review run not found")
+        return run
+
+    def _publication_allowed(
+        self, session: Session, run_id: str, actor: str | None, owner: str | None
+    ) -> bool:
+        if actor == owner:
+            return True
+        grant = self._collaborator(session, run_id, actor) if actor is not None else None
+        return bool(
+            grant
+            and grant.owner_user_id == owner
+            and grant.can_publish
+            and self._active_collaborator(session, grant)
+        )
+
+    def can_publish_inline(self, run_id: str, *, actor: str | None, owner: str | None) -> bool:
+        with self._session("read_inline_publication_authority") as session:
+            return self._publication_allowed(session, run_id, actor, owner)
 
     def list_discussion_comments(
         self, run_id: str, *, actor: str | None, owner: str | None
@@ -1350,24 +1380,38 @@ class StudioReviewStore:
             updated_at=row.updated_at,
             publication_state=cast(InlinePublicationState, row.publication_state),
             provider_url=row.provider_url,
+            publication_confirmed_by=row.publication_confirmed_by,
         )
 
     def list_inline_drafts(
-        self, run_id: str, *, actor: str | None, owner: str | None
+        self, run_id: str, *, actor: str | None, owner: str | None, for_publication: bool = False
     ) -> list[InlineDraft]:
         with self._session("list_inline_review_drafts") as session:
-            self._require_discussion_access(session, run_id, actor, owner, lock=False)
+            run = self._require_discussion_access(session, run_id, actor, owner, lock=False)
             generation = account_generation(actor) if actor is not None else None
-            rows = session.scalars(
-                select(SqlStudioInlineDraft)
-                .where(
-                    SqlStudioInlineDraft.workspace_id == current_workspace_id(),
-                    SqlStudioInlineDraft.run_id == run_id,
-                    SqlStudioInlineDraft.actor_scope == _owner_scope(actor),
-                    SqlStudioInlineDraft.actor_generation == generation,
-                    SqlStudioInlineDraft.discarded.is_(False),
+            draft = SqlStudioInlineDraft
+            visible = and_(
+                draft.actor_scope == _owner_scope(actor), draft.actor_generation == generation
+            )
+            if for_publication and actor != owner:
+                if not self._publication_allowed(session, run_id, actor, owner):
+                    raise ReviewNotFoundError("Publication permission is unavailable")
+                visible = or_(
+                    visible,
+                    and_(
+                        draft.actor_scope == _owner_scope(owner),
+                        draft.actor_generation == run.owner_generation,
+                    ),
                 )
-                .order_by(SqlStudioInlineDraft.created_at, SqlStudioInlineDraft.id)
+            rows = session.scalars(
+                select(draft)
+                .where(
+                    draft.workspace_id == current_workspace_id(),
+                    draft.run_id == run_id,
+                    visible,
+                    draft.discarded.is_(False),
+                )
+                .order_by(draft.created_at, draft.id)
                 .limit(_MAX_INLINE_DRAFTS)
             )
             return [self._inline_draft(row) for row in rows]
@@ -1467,6 +1511,7 @@ class StudioReviewStore:
         self,
         run_id: str,
         *,
+        actor: str | None,
         owner: str | None,
         selected: list[InlineDraftSelection],
         digest: str,
@@ -1474,7 +1519,15 @@ class StudioReviewStore:
         token = bytes.fromhex(digest)
 
         def write(session: Session) -> tuple[list[InlineDraft], bool]:
-            generation = self._lock_discussion_writer(session, run_id, owner, owner)
+            generation = self._lock_discussion_writer(session, run_id, actor, owner)
+            if not self._publication_allowed(session, run_id, actor, owner):
+                raise ReviewNotFoundError("Publication permission is unavailable")
+            run = self._run_row(session, run_id, _owner_scope(owner))
+            assert run is not None
+            scopes = {
+                (_owner_scope(actor), generation),
+                (_owner_scope(owner), run.owner_generation),
+            }
             rows = []
             for choice in selected:
                 row = session.get(
@@ -1483,7 +1536,7 @@ class StudioReviewStore:
                 if (
                     row is None
                     or row.discarded
-                    or (row.actor_scope, row.actor_generation) != (_owner_scope(owner), generation)
+                    or (row.actor_scope, row.actor_generation) not in scopes
                     or row.version != choice.version
                 ):
                     raise ReviewConflictError("The selected drafts changed. Create a new preview.")
@@ -1494,6 +1547,7 @@ class StudioReviewStore:
                 raise ReviewConflictError("A selected draft is already claimed for publication")
             for row in rows:
                 row.publication_digest = token
+                row.publication_confirmed_by = actor
                 row.publication_state = "sending"
                 row.updated_at = time.time_ns() // 1_000_000
             return [self._inline_draft(row) for row in rows], True

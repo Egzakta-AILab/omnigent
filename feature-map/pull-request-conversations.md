@@ -52,6 +52,8 @@ links findings to their captured changes.
   from the current diff.
 - `shared-review-inbox`: Named collaborators can open the saved review and its
   evidence from Inbox. Each entry shows the captured head.
+- `delegated-inline-publication`: The review owner can allow a named
+  collaborator to confirm selected drafts on the captured revision.
 
 ## How to get to it (user POV)
 
@@ -62,6 +64,10 @@ links findings to their captured changes.
   then open Changes.
 - `shared-review-inbox`: Open **Inbox → All → Shared PR reviews** as a named
   collaborator. Select the PR revision to open its discussion.
+- `delegated-inline-publication`: As the owner, open the review discussion
+  and choose **Share this review → Allow publishing** beside a collaborator.
+  As that collaborator, open the same discussion and choose **Publish inline
+  drafts**.
 
 A session with one PR opens its details directly. With multiple PRs, select a
 request from the list first; **All pull requests** returns to that list.
@@ -138,6 +144,12 @@ publication controls are hidden. Revoke the grant as the owner, then reload the
 collaborator's Inbox and the direct discussion URL. Both should lose access.
 The project case in `tests/server/integration/test_session_orchestration.py`
 covers grant, discovery, direct access, revocation and replay through the API.
+
+The `project` case of `test_studio_review_from_pr_panel` drives the grant
+and removal controls with scripted responses. The project case in
+`tests/server/integration/test_session_orchestration.py` checks that a
+delegated confirmation is attributed, a removed publisher cannot confirm,
+and replay does not send another comment.
 
 Render recovery has component coverage in
 `web/src/components/RenderErrorBoundary.test.tsx` and

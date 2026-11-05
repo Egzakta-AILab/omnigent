@@ -167,6 +167,7 @@ Keep drafts and fork PRs disabled unless you want that route to review them.
       "workspace": "/srv/egzakta-org",
       "repository": "KVARK",
       "collaborators": ["reviewer@example.com"],
+      "publishers": ["reviewer@example.com"],
       "reviewers": [
         {
           "agent_id": "33333333333333333333333333333333",
@@ -206,10 +207,18 @@ Optional `collaborators` lists existing Omnigent account IDs for that route.
 Each run saves its access grants with its captured revision. Coworkers open
 **Inbox → All → Shared PR reviews** to read the review, inspect attached
 evidence, discuss a finding, or ask an agent using their own connected host.
-The bot keeps ownership of its workspace and its publication approval.
 Sharing must be **On** to grant access. Leaving the list empty keeps new runs
 private. Removing an ID from the route affects future runs. Revoke access to
 earlier runs from **Share this review** as the review owner.
+
+Optional `publishers` selects accounts from the collaborator list. The owner
+can also choose **Share this review → Allow publishing** for an existing
+collaborator. In **Publish inline drafts**, a publisher can preview the
+review owner's drafts and their own drafts, then confirm selected comments.
+Each comment is sent separately to its code range through the review workspace's
+configured provider account. Omnigent checks the revision and records the
+account that confirmed the delivery. The owner can remove publishing access
+while keeping the collaborator's discussion access.
 
 ```sh
 uv run --no-sync python -m omnigent.studio.pr_webhook \
