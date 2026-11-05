@@ -11,12 +11,15 @@ from omnigent.db.db_models import (
     SqlStudioReviewEvent,
     SqlStudioReviewOperation,
     SqlStudioReviewPass,
+    SqlStudioReviewRun,
 )
 from omnigent.db.utils import _build_alembic_config
 
 _PREVIOUS = "d0a1f879a01d"
 _REVISION = "e6a2b4c8d013"
 _PROJECT_ORIGIN = "5f9ca09e07cd"
+_RUNS = "8f4b6c20a115"
+_RUN_REPORTS = "bd90f34ca312"
 _TABLES = {"studio_review_passes", "studio_review_operations", "studio_review_events"}
 
 
@@ -61,7 +64,13 @@ def test_upgrade_and_downgrade_preserve_existing_database(tmp_path: Path) -> Non
                 == "preserved"
             )
         _migrate(uri, engine, "upgrade", _PROJECT_ORIGIN)
-        for model in (SqlStudioReviewPass, SqlStudioReviewOperation, SqlStudioReviewEvent):
+        _migrate(uri, engine, "upgrade", _RUN_REPORTS)
+        for model in (
+            SqlStudioReviewPass,
+            SqlStudioReviewOperation,
+            SqlStudioReviewEvent,
+            SqlStudioReviewRun,
+        ):
             inspected = sa.inspect(engine)
             actual = {c["name"] for c in inspected.get_columns(model.__tablename__)}
             assert actual == set(model.__table__.c.keys())
@@ -70,6 +79,8 @@ def test_upgrade_and_downgrade_preserve_existing_database(tmp_path: Path) -> Non
             assert connection.execute(
                 sa.text("SELECT source_session_id, source_project_id FROM studio_review_passes")
             ).one() == (b"s" * 16, None)
+        _migrate(uri, engine, "downgrade", _PROJECT_ORIGIN)
+        assert "studio_review_runs" not in sa.inspect(engine).get_table_names()
         _migrate(uri, engine, "downgrade", _REVISION)
         with engine.connect() as connection:
             assert (
