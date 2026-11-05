@@ -6,7 +6,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 
 from omnigent.db.utils import builtin_agent_id
@@ -71,6 +71,11 @@ from omnigent.studio.reviews.report import (
     read_review_report,
     report_instructions,
 )
+from omnigent.studio.reviews.reproduction import (
+    MAX_REPRODUCTION_BYTES,
+    AttachedReproduction,
+    ReproductionReceipt,
+)
 from omnigent.studio.reviews.service import (
     CaptureProjectReviewRequest,
     CaptureReviewRequest,
@@ -94,6 +99,7 @@ IdempotencyKey = Annotated[
     str,
     Header(alias="Idempotency-Key", min_length=1, max_length=128, pattern=r"^[!-~]+$"),
 ]
+FindingKey = Annotated[str, Path(pattern=r"^[0-9a-f]{64}$")]
 
 
 class ReviewListResponse(BaseModel):
@@ -1120,14 +1126,9 @@ def create_studio_reviews_router(
         )
         return await verified_report(review, anchors)
 
-    @router.get("/studio/review-runs/{run_id}/report", response_model=ConsolidatedReviewReport)
-    async def get_review_run_report(
-        request: Request, response: Response, run_id: str
+    async def read_consolidation(
+        run: ReviewRun, anchors: frozenset[Anchor] | None, *, include_finding_keys: bool
     ) -> ConsolidatedReviewReport:
-        run = await owned_run(request, run_id)
-        response.headers["Cache-Control"] = "no-store"
-        anchors = await run_anchors(run.id, require_user(request, auth_provider))
-
         async def read_member(review: ReviewPass) -> ReviewerRunReport:
             try:
                 report = await verified_report(review, anchors)
@@ -1137,12 +1138,90 @@ def create_studio_reviews_router(
                 report = ReviewReport(state="incomplete")
             return ReviewerRunReport(review_id=review.id, report=report)
 
-        report = consolidate_reports(
-            await asyncio.gather(*(read_member(member) for member in run.selected_reviewers()))
+        return consolidate_reports(
+            await asyncio.gather(*(read_member(member) for member in run.selected_reviewers())),
+            include_finding_keys=include_finding_keys,
         )
+
+    @router.get("/studio/review-runs/{run_id}/report", response_model=ConsolidatedReviewReport)
+    async def get_review_run_report(
+        request: Request, response: Response, run_id: str, include_finding_keys: bool = False
+    ) -> ConsolidatedReviewReport:
+        run = await owned_run(request, run_id)
+        response.headers["Cache-Control"] = "no-store"
+        anchors = await run_anchors(run.id, require_user(request, auth_provider))
+        report = await read_consolidation(run, anchors, include_finding_keys=include_finding_keys)
         if run.coordinator is not None and run.plan is None:
             report = report.model_copy(update={"proposal": await current_proposal(run)})
         return report
+
+    async def require_saved_finding(
+        request: Request, run_id: str, finding_key: str
+    ) -> tuple[ReviewRun, str | None]:
+        run = await owned_run(request, run_id)
+        owner = require_user(request, auth_provider)
+        anchors = await run_anchors(run.id, owner)
+        if anchors is not None:
+            report = await read_consolidation(run, anchors, include_finding_keys=True)
+            if any(entry.finding_key == finding_key for entry in report.findings):
+                return run, owner
+        raise HTTPException(404, "The finding was not found in this captured diff")
+
+    @router.get(
+        "/studio/review-runs/{run_id}/findings/{finding_key}/reproductions",
+        response_model=list[AttachedReproduction],
+    )
+    async def get_finding_reproductions(
+        request: Request, response: Response, run_id: str, finding_key: FindingKey
+    ) -> list[AttachedReproduction]:
+        run, owner = await require_saved_finding(request, run_id, finding_key)
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return await asyncio.to_thread(
+                review_store.list_reproductions, run.id, finding_key, owner_user_id=owner
+            )
+        except ReviewNotFoundError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ReviewConflictError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @router.post(
+        "/studio/review-runs/{run_id}/findings/{finding_key}/reproductions",
+        response_model=AttachedReproduction,
+        dependencies=_WRITE_GATES,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": {"$ref": "#/components/schemas/ReproductionReceipt"}
+                    }
+                },
+            },
+        },
+    )
+    async def attach_finding_reproduction(
+        request: Request, response: Response, run_id: str, finding_key: FindingKey
+    ) -> AttachedReproduction:
+        run, owner = await require_saved_finding(request, run_id, finding_key)
+        response.headers["Cache-Control"] = "no-store"
+        payload = bytearray()
+        async for chunk in request.stream():
+            if len(chunk) > MAX_REPRODUCTION_BYTES - len(payload):
+                raise HTTPException(413, "The reproduction receipt exceeds 192 KiB")
+            payload.extend(chunk)
+        try:
+            receipt = ReproductionReceipt.model_validate_json(payload, strict=True)
+        except ValidationError as exc:
+            raise HTTPException(422, "Choose a valid Omnigent reproduction receipt") from exc
+        try:
+            return await asyncio.to_thread(
+                review_store.attach_reproduction, run.id, finding_key, receipt, owner_user_id=owner
+            )
+        except ReviewNotFoundError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ReviewConflictError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     @router.get(
         "/studio/reviews/{review_id}/operations/{operation_id}", response_model=ReviewOperation

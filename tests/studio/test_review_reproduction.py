@@ -116,7 +116,7 @@ def test_container_cleanup_after_invocation_error_or_lost_create(monkeypatch, lo
     options = {
         "commit": "a" * 40,
         "tree": io.BytesIO(),
-        "archive": reproduction._Capture(0, 0, "a" * 64),
+        "archive": reproduction._Capture(0, 10_240, "a" * 64),
         "image_id": "sha256:" + "a" * 64,
         "command": ("check",),
         "timeout": 5,

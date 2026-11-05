@@ -390,6 +390,13 @@ to include them in the output. The CLI exits successfully when both commands
 ran to completion, even when a test reports a failure. Shell exit codes 126
 and 127 are reserved for invocation failures.
 
+Open **Reproductions** on a finding in **Review runs**, choose the JSON file,
+and select **Attach receipt**. The panel accepts receipts for that run's
+captured revision and diff. It marks the file as an uploaded receipt and shows
+the base and head results separately. **Copy rerun command** uses the same
+image ID and arguments. Run it on a Docker-enabled machine with the required
+checkout. Attached receipts follow the review run's private access rules.
+
 For any workspace, open **Project settings → Repositories**, or open
 **Manage repositories** from the PR panel. The managers run on the connected
 macOS or Linux host. Choose a scan depth from 0 to 5 and click **Scan

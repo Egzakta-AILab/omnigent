@@ -17,14 +17,17 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import BinaryIO, Literal
 
-from pydantic import Field
+from pydantic import AwareDatetime, Field, field_validator
 
-from omnigent.studio.reviews.models import FrozenModel, Sha
+from omnigent.studio.reviews.models import FrozenModel, ReviewRoleDigest, Sha
 
 _SHA = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 _IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}")
 _ARCHIVE_LIMIT = 128 * 1024 * 1024
 _OUTPUT_LIMIT = 8 * 1024
+REPRODUCTION_CHUNK_BYTES = 12 * 1024
+MAX_REPRODUCTION_CHUNKS = 16
+MAX_REPRODUCTION_BYTES = MAX_REPRODUCTION_CHUNKS * REPRODUCTION_CHUNK_BYTES
 _ENGINE_LIMIT = 10
 _START_MARKER = b"Omnigent reproduction started\n"
 _COMMAND = """
@@ -44,16 +47,16 @@ class ReproductionError(RuntimeError):
 
 
 class ReproductionSide(FrozenModel):
-    commit: str
-    archive_sha256: str
-    archive_bytes: int
+    commit: Sha
+    archive_sha256: ReviewRoleDigest
+    archive_bytes: int = Field(gt=0, le=_ARCHIVE_LIMIT)
     state: Literal["exited", "timed_out", "setup_error"]
-    exit_code: int | None = None
+    exit_code: int | None = Field(default=None, ge=0, le=255)
     oom_killed: bool = False
     elapsed_ms: int = Field(ge=0)
-    output: str
-    output_sha256: str
-    output_bytes: int
+    output: str = Field(max_length=_OUTPUT_LIMIT)
+    output_sha256: ReviewRoleDigest
+    output_bytes: int = Field(ge=0, le=2**63 - 1)
     output_truncated: bool
 
 
@@ -67,14 +70,35 @@ class ReproductionSource(FrozenModel):
 
 class ReproductionReceipt(FrozenModel):
     schema_version: Literal["omnigent.studio.reproduction.v1"] = "omnigent.studio.reproduction.v1"
-    observed_at: datetime
+    observed_at: AwareDatetime
     runtime: Literal["docker-no-network"] = "docker-no-network"
-    image_id: str
-    command: tuple[str, ...]
-    timeout_seconds: int
+    image_id: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    command: tuple[str, ...] = Field(min_length=1, max_length=8192)
+    timeout_seconds: int = Field(ge=1, le=300)
     source: ReproductionSource | None = None
     base: ReproductionSide
     head: ReproductionSide
+
+    @field_validator("command")
+    @classmethod
+    def validate_command(cls, command: tuple[str, ...]) -> tuple[str, ...]:
+        if (
+            not command
+            or not command[0]
+            or command[0].startswith("-")
+            or sum(len(arg.encode()) + 1 for arg in command) > 8192
+        ):
+            raise ValueError("Provide a reproduction command of at most 8192 UTF-8 bytes")
+        if any("\0" in arg for arg in command):
+            raise ValueError("The reproduction command contains a null byte")
+        return command
+
+
+class AttachedReproduction(FrozenModel):
+    digest: ReviewRoleDigest
+    attached_at: int
+    provenance: Literal["uploaded"] = "uploaded"
+    receipt: ReproductionReceipt
 
 
 @dataclass(frozen=True)
@@ -348,15 +372,7 @@ def reproduce(
         raise ValueError("The reproduction commits do not match the saved review run")
     if not socket.is_absolute() or not repository.is_dir() or not 1 <= timeout <= 300:
         raise ValueError("Provide a local checkout, an absolute Docker socket, and 1–300 seconds")
-    if (
-        not command
-        or not command[0]
-        or command[0].startswith("-")
-        or sum(len(arg.encode()) + 1 for arg in command) > 8192
-    ):
-        raise ValueError("Provide a reproduction command of at most 8192 UTF-8 bytes")
-    if any("\0" in arg for arg in command):
-        raise ValueError("The reproduction command contains a null byte")
+    ReproductionReceipt.validate_command(command)
     if not image or len(image) > 256 or image.startswith("-"):
         raise ValueError("Provide an installed Docker image")
     with (

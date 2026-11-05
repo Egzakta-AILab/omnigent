@@ -1695,6 +1695,37 @@ def test_studio_review_from_pr_panel(
         patch_sha = hashlib.sha256(_PR_DIFF["patch"].encode()).hexdigest()
         run_reviewers = ("2" * 32, "3" * 32)
         run_started = False
+        finding_key = "7" * 64
+        attached_receipts: list[dict] = []
+        receipt = {
+            "observed_at": "2026-11-05T10:30:00Z",
+            "image_id": "sha256:" + "6" * 64,
+            "command": ["python", "check.py"],
+            "timeout_seconds": 60,
+            "base": {
+                "commit": base_sha,
+                "state": "exited",
+                "exit_code": 0,
+                "elapsed_ms": 220,
+                "output": "observed_requests=1",
+            },
+            "head": {
+                "commit": head_sha,
+                "state": "exited",
+                "exit_code": 1,
+                "elapsed_ms": 267,
+                "output": "observed_requests=3",
+            },
+        }
+
+        def project_reproductions(route: Route) -> None:
+            if route.request.method == "GET":
+                route.fulfill(json=attached_receipts)
+                return
+            assert route.request.method == "POST" and route.request.post_data_json == receipt
+            saved = {"digest": "8" * 64, "provenance": "uploaded", "receipt": receipt}
+            attached_receipts.append(saved)
+            route.fulfill(json=saved)
 
         def project_runs(route: Route) -> None:
             if route.request.method == "GET":
@@ -1758,7 +1789,11 @@ def test_studio_review_from_pr_panel(
                         for index, member_id in enumerate(run_reviewers)
                     ],
                     "findings": [
-                        {"finding": report["findings"][0], "review_ids": list(run_reviewers)}
+                        {
+                            "finding": report["findings"][0],
+                            "review_ids": list(run_reviewers),
+                            "finding_key": finding_key,
+                        }
                     ]
                     if run_started
                     else [],
@@ -1826,7 +1861,13 @@ def test_studio_review_from_pr_panel(
         )
         page.route(re.compile(r"/studio/review-runs(?:\?|$)"), project_runs)
         page.route(f"**/v1/studio/review-runs/{run_id}/start", start_project_run)
-        page.route(f"**/v1/studio/review-runs/{run_id}/report", project_run_report)
+        page.route(
+            re.compile(rf"/v1/studio/review-runs/{run_id}/report(?:\?|$)"), project_run_report
+        )
+        page.route(
+            f"**/v1/studio/review-runs/{run_id}/findings/{finding_key}/reproductions",
+            project_reproductions,
+        )
         page.route(
             re.compile(rf"/v1/studio/review-runs/{run_id}/patch(?:\?|$)"),
             lambda r: r.fulfill(
@@ -1906,6 +1947,22 @@ def test_studio_review_from_pr_panel(
         consolidation = runs_panel.get_by_role("region", name="Consolidation")
         expect(consolidation.get_by_text("Keep the input validation")).to_have_count(1)
         expect(consolidation.get_by_text(re.compile(r"1 unverified citation"))).to_be_visible()
+        consolidation.get_by_text("Reproductions", exact=True).click()
+        evidence_panel = consolidation.get_by_role("region", name="Finding reproductions")
+        evidence_panel.get_by_label("Reproduction receipt").set_input_files(
+            {
+                "name": "reproduction.json",
+                "mimeType": "application/json",
+                "buffer": json.dumps(receipt).encode(),
+            }
+        )
+        evidence_panel.get_by_role("button", name="Attach receipt", exact=True).click()
+        expect(evidence_panel.get_by_text(re.compile(r"Uploaded receipt"))).to_be_visible()
+        evidence_panel.get_by_text(re.compile(r"Head.*Exit 1")).click()
+        expect(evidence_panel.get_by_text("observed_requests=3", exact=True)).to_be_visible()
+        evidence_panel.scroll_into_view_if_needed()
+        page.screenshot(path=str(tmp_path / "review-reproduction.png"))
+        assert len(attached_receipts) == 1
         consolidation.get_by_role("button", name="Show in captured diff", exact=True).click()
         captured_diff = runs_panel.get_by_role("region", name="Captured diff", exact=True)
         expect(captured_diff.get_by_text("Review finding · src/app/main.py:2")).to_be_visible()
