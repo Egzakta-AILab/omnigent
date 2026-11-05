@@ -1932,33 +1932,42 @@ def register_core_routes(
             raise OmnigentError("A reviewer requires its own session", code=ErrorCode.CONFLICT)
         from omnigent.server.routes.studio_reviews import _owned_source
 
-        # Use the current filing when dispatch starts. Placement and reviewer
-        # settings still come from the captured review.
-        source = await _owned_source(
-            review.target.source_session_id,
-            user_id,
-            conversation_store,
-            permission_store,
-            auth_provider,
-        )
-        if (source.host_id, source.workspace) != (review.target.host_id, review.target.workspace):
-            raise OmnigentError("The review execution target changed", code=ErrorCode.CONFLICT)
-        legacy_project = (
-            source.labels.get(PROJECT_LABEL_KEY) if source.project_id is None else None
-        )
+        target = review.target
+        source = None
+        legacy_project = None
+        if target.source_session_id is not None:
+            # Use the source's current filing and keep the captured placement.
+            source = await _owned_source(
+                target.source_session_id,
+                user_id,
+                conversation_store,
+                permission_store,
+                auth_provider,
+            )
+            if (source.host_id, source.workspace) != (target.host_id, target.workspace):
+                raise OmnigentError("The review execution target changed", code=ErrorCode.CONFLICT)
+            if source.project_id is None:
+                legacy_project = source.labels.get(PROJECT_LABEL_KEY)
         profile = review.profile
+        body = SessionCreateRequest(
+            agent_id=profile.agent_id,
+            host_id=target.host_id,
+            workspace=target.workspace,
+            title=f"Review PR #{target.pr_number}",
+            labels={
+                "omnigent.studio.review": "true",
+                **({PROJECT_LABEL_KEY: legacy_project} if legacy_project else {}),
+            },
+            model_override=profile.model,
+            reasoning_effort=profile.reasoning_effort,
+            git=None,
+        )
+        if target.source_project_id is not None:
+            body = body.model_copy(update={"project_id": target.source_project_id})
         return await _create_existing_session(
             request,
             user_id,
-            SessionCreateRequest(
-                agent_id=profile.agent_id,
-                host_id=review.target.host_id,
-                workspace=review.target.workspace,
-                title=f"Review PR #{review.target.pr_number}",
-                labels={PROJECT_LABEL_KEY: legacy_project} if legacy_project else {},
-                model_override=profile.model,
-                reasoning_effort=profile.reasoning_effort,
-            ),
+            body,
             source=source,
             review_profile=profile,
             reviewer_session_id=session_id,

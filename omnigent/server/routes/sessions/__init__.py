@@ -1028,6 +1028,7 @@ def create_sessions_router(
         register_initial_file_upload=register_initial_file_upload,
         pull_request_refresher=pull_request_refresher,
         studio_review_store=studio_review_store,
+        project_store=project_store,
         create_reviewer=review_create,
         send_review=review_send,
     )

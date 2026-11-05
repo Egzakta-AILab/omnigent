@@ -32,7 +32,10 @@ interface RepositorySettings {
   truncated: boolean;
 }
 
-async function requestSettings(endpoint: string, init?: RequestInit): Promise<RepositorySettings> {
+export async function requestSettings(
+  endpoint: string,
+  init?: RequestInit,
+): Promise<RepositorySettings> {
   const response = await authenticatedFetch(endpoint, init);
   if (!response.ok) throw await apiErrorFromResponse(response);
   return (await response.json()) as RepositorySettings;
@@ -57,7 +60,8 @@ function RepositorySettingsForm({ endpoint }: { endpoint: string }) {
   const canScan = /^[0-5]$/.test(depth);
   const scan = useMutation({
     mutationFn: async () => {
-      const found = await requestSettings(`${endpoint}?depth=${depth}`);
+      const separator = endpoint.includes("?") ? "&" : "?";
+      const found = await requestSettings(`${endpoint}${separator}depth=${depth}`);
       if (snapshot && found.revision !== snapshot.revision) {
         throw new Error("Repository settings changed. Reload before scanning again.");
       }

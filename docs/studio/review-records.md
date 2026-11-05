@@ -1,9 +1,9 @@
 # Private review records
 
 The capture API creates a durable review record before agent execution. Each
-record freezes the linked PR's base and head SHA, source
-session, host, workspace, agent version, harness, selected skill or profile,
-and requested model settings. Existing session, agent and resource services
+record freezes the PR's base and head SHA, source project or session, host,
+workspace, agent version, harness, selected skill or profile, and requested
+model settings. Existing session, agent and resource services
 supply this context.
 
 ```mermaid
@@ -23,7 +23,12 @@ sequenceDiagram
 
 ## Capture a record
 
-Start this fork using the [local setup](README.md#local-checkout). Choose an
+For a project review, use `POST /v1/projects/PROJECT_ID/studio/reviews` with
+the same body below plus `host_id`, `workspace`, and `repository` (the relative
+checkout path or `.` for the root). The PR must match the checkout's GitHub
+origin. A successful start files the reviewer session directly in the project.
+
+For a session review, start this fork using the [local setup](README.md#local-checkout). Choose an
 owned session with a host and workspace, then attach a GitHub PR in its existing
 PR panel. The PR association must have synchronized before capture succeeds.
 

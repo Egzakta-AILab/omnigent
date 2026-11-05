@@ -60,6 +60,9 @@ export interface ReviewPass {
   id: string;
   target: {
     pr_url: string;
+    repository: string;
+    repository_path?: string | null;
+    pr_number: number;
     base_sha: string;
     head_sha: string;
     host_id: string;
@@ -119,6 +122,12 @@ export interface CaptureReview {
   profile_digest?: string;
 }
 
+export interface ProjectReviewWorkspace {
+  projectId: string;
+  hostId: string;
+  workspace: string;
+}
+
 export interface ReviewPage {
   object: "list";
   data: ReviewPass[];
@@ -126,8 +135,14 @@ export interface ReviewPage {
   accessDenied?: true;
 }
 
-function reviewListPath(sessionId: string) {
-  return `/v1/sessions/${encodeURIComponent(sessionId)}/studio/reviews`;
+export type ReviewScope = { sessionId: string } | { projectId: string; prUrl: string };
+
+function reviewListPath(scope: ReviewScope) {
+  const origin =
+    "sessionId" in scope
+      ? `sessions/${encodeURIComponent(scope.sessionId)}`
+      : `projects/${encodeURIComponent(scope.projectId)}`;
+  return `/v1/${origin}/studio/reviews`;
 }
 
 function reviewPath(reviewId: string) {
@@ -149,12 +164,13 @@ function postReview<T>(path: string, key: string, body: object): Promise<T> {
 }
 
 export async function listReviews(
-  sessionId: string,
+  scope: ReviewScope,
   after: string | null,
   signal: AbortSignal,
 ): Promise<ReviewPage> {
   const query = new URLSearchParams(after ? { after_id: after } : {});
-  const response = await authenticatedFetch(`${reviewListPath(sessionId)}?${query}`, { signal });
+  if ("projectId" in scope) query.set("pr_url", scope.prUrl);
+  const response = await authenticatedFetch(`${reviewListPath(scope)}?${query}`, { signal });
   if ([401, 403, 404].includes(response.status)) {
     // Cache a denial so a subsequent transport failure cannot revive stale access.
     return { object: "list", data: [], next_cursor: null, accessDenied: true };
@@ -171,11 +187,18 @@ export async function listReviews(
   return page;
 }
 
-export async function listReviewerProfiles(sessionId: string, signal: AbortSignal) {
-  const response = await authenticatedFetch(
-    `/v1/sessions/${encodeURIComponent(sessionId)}/studio/review-profiles`,
-    { signal },
-  );
+export function reviewProfilesPath(
+  scope: { sessionId: string } | ProjectReviewWorkspace,
+  editor = false,
+) {
+  const path = `studio/review-profiles${editor ? "/editor" : ""}`;
+  if ("sessionId" in scope) return `/v1/sessions/${encodeURIComponent(scope.sessionId)}/${path}`;
+  const query = new URLSearchParams({ host_id: scope.hostId, workspace: scope.workspace });
+  return `/v1/projects/${encodeURIComponent(scope.projectId)}/${path}?${query}`;
+}
+
+export async function listReviewerProfiles(endpoint: string, signal: AbortSignal) {
+  const response = await authenticatedFetch(endpoint, { signal });
   // A server from before the catalog was added can still run a custom skill.
   if (response.status === 404) return [];
   if (!response.ok) throw await apiErrorFromResponse(response);
@@ -244,9 +267,25 @@ export function saveReviewProfileEditor(
   });
 }
 
-export async function captureReview(sessionId: string, input: CaptureReview, key: string) {
-  const result = await postReview<{ review: ReviewPass }>(reviewListPath(sessionId), key, input);
+export async function captureReview(
+  scope: ReviewScope,
+  input: CaptureReview & { host_id?: string; workspace?: string; repository?: string },
+  key: string,
+) {
+  const result = await postReview<{ review: ReviewPass }>(reviewListPath(scope), key, input);
   return result.review;
+}
+
+export async function getReviewForSession(sessionId: string, signal: AbortSignal) {
+  const response = await authenticatedFetch(
+    `/v1/sessions/${encodeURIComponent(sessionId)}/studio/review`,
+    { signal },
+  );
+  if ([401, 403, 404].includes(response.status)) return null;
+  if (!response.ok) throw await apiErrorFromResponse(response);
+  const review = (await response.json()) as ReviewPass;
+  if (review.reviewer_session_id !== sessionId) throw new Error("Review session mismatch");
+  return review;
 }
 
 export function getReview(reviewId: string, signal: AbortSignal) {

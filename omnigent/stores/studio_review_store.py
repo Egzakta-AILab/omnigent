@@ -263,6 +263,7 @@ class StudioReviewStore:
                 owner_scope=owner,
                 owner_user_id=owner_user_id,
                 source_session_id=target.source_session_id,
+                source_project_id=target.source_project_id,
                 target_json=target_json,
                 profile_json=profile_json,
                 state=_PASS_STATES["prepared"],
@@ -305,26 +306,38 @@ class StudioReviewStore:
         self,
         *,
         owner_user_id: str | None,
-        source_session_id: str,
+        source_session_id: str | None = None,
+        source_project_id: str | None = None,
         limit: int,
         after_id: str | None = None,
     ) -> ReviewPage:
         if not 1 <= limit <= 100:
             raise ValueError("Page size must be between 1 and 100")
         owner = _owner_scope(owner_user_id)
-        source_session_id = require_uuid(source_session_id)
-        with self._session("list_owned_session_reviews") as session:
+        if (source_session_id is None) == (source_project_id is None):
+            raise ValueError("Review history requires one origin")
+        if source_session_id is not None:
+            source_session_id = require_uuid(source_session_id)
+            origin = SqlStudioReviewPass.source_session_id == source_session_id
+        else:
+            assert source_project_id is not None
+            source_project_id = require_uuid(source_project_id)
+            origin = SqlStudioReviewPass.source_project_id == source_project_id
+        with self._session("list_owned_origin_reviews") as session:
             query = select(SqlStudioReviewPass).where(
                 SqlStudioReviewPass.workspace_id == current_workspace_id(),
                 SqlStudioReviewPass.owner_scope == owner,
-                SqlStudioReviewPass.source_session_id == source_session_id,
+                origin,
             )
             if after_id is not None:
                 try:
                     cursor = self._pass_row(session, require_uuid(after_id), owner)
                 except ValueError:
                     cursor = None
-                if cursor is None or cursor.source_session_id != source_session_id:
+                if cursor is None or (cursor.source_session_id, cursor.source_project_id) != (
+                    source_session_id,
+                    source_project_id,
+                ):
                     raise ReviewNotFoundError("Review cursor not found")
                 query = query.where(
                     tuple_(SqlStudioReviewPass.created_at, SqlStudioReviewPass.id)

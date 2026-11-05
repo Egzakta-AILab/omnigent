@@ -24,6 +24,7 @@ from omnigent.studio.reviews.models import (
     ReviewRoleId,
     ReviewTarget,
     Sha,
+    require_uuid,
 )
 from omnigent.util.uuid import uuid_to_bytes
 
@@ -35,7 +36,7 @@ class CaptureUnavailableError(RuntimeError):
 class CaptureReviewRequest(BaseModel):
     """Caller intent; execution location and actual revisions come from the server."""
 
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, frozen=True)
 
     expected_base_sha: Sha
     expected_head_sha: Sha
@@ -85,11 +86,27 @@ class CaptureReviewRequest(BaseModel):
         return value.rstrip("/")
 
 
-def capture_fingerprint(source_session_id: str, body: CaptureReviewRequest) -> str:
+class CaptureProjectReviewRequest(CaptureReviewRequest):
+    """An explicit project workspace selection and a PR from one of its repositories."""
+
+    host_id: str
+    workspace: Annotated[str, StringConstraints(min_length=1, max_length=4096)]
+    repository: Annotated[str, StringConstraints(min_length=1, max_length=512)]
+    pr_url: Annotated[str, StringConstraints(min_length=1, max_length=2048)]
+
+    @field_validator("host_id")
+    @classmethod
+    def canonical_host_id(cls, value: str) -> str:
+        return require_uuid(value)
+
+
+def capture_fingerprint(
+    origin_id: str, body: CaptureReviewRequest, *, from_project: bool = False
+) -> str:
     """Identify caller intent separately from mutable remote context or agent metadata."""
     payload = {
         "action": "review.capture",
-        "source_session_id": source_session_id,
+        ("source_project_id" if from_project else "source_session_id"): origin_id,
         # Skill-only captures must continue to replay their original keys.
         **body.model_dump(
             exclude={"profile_id", "profile_digest"} if body.profile_id is None else None
@@ -109,7 +126,8 @@ class ReviewService:
         self,
         *,
         owner_user_id: str | None,
-        source_session_id: str,
+        source_session_id: str | None = None,
+        source_project_id: str | None = None,
         idempotency_key: str,
         body: CaptureReviewRequest,
         resolve_target: Callable[[], Awaitable[ReviewTarget]],
@@ -117,7 +135,12 @@ class ReviewService:
         resolve_role: Callable[[ReviewTarget], Awaitable[ReviewRole]],
     ) -> CaptureResult:
         """Replay exact intent or freeze a fresh target and validated reviewer profile."""
-        request_hash = capture_fingerprint(source_session_id, body)
+        origin_id = source_session_id if source_session_id is not None else source_project_id
+        if origin_id is None or (source_session_id is not None and source_project_id is not None):
+            raise ValueError("A review capture requires one origin")
+        request_hash = capture_fingerprint(
+            origin_id, body, from_project=source_project_id is not None
+        )
         existing = await asyncio.to_thread(
             self.store.find_operation,
             owner_user_id=owner_user_id,
@@ -136,8 +159,11 @@ class ReviewService:
 
         profile = await resolve_profile()
         target = await resolve_target()
-        if target.source_session_id != source_session_id:
-            raise CaptureUnavailableError("Review context did not match the selected session")
+        if (target.source_session_id, target.source_project_id) != (
+            source_session_id,
+            source_project_id,
+        ):
+            raise CaptureUnavailableError("Review context did not match the selected origin")
         if (target.base_sha, target.head_sha) != (body.expected_base_sha, body.expected_head_sha):
             raise ReviewConflictError(
                 "PR revision changed; refresh the PR before capturing a review"

@@ -89,10 +89,10 @@ apply only to that side chat. See the [side-chat settings recipe](sessions.md).
   (`restrict_to_agent_names`, see `native-harnesses.md`) does not offer, which
   New Chat reports as unavailable until the user picks an offered agent while
   project settings keeps storing it.
-- `project-workspace-start`: **Open workspace** creates an empty project
-  session on the selected host and directory. The regular Workspace panel
-  opens before any prompt. Native sessions with an empty draft select Terminal.
-  Typed text and attachments carry into Chat as an unsent draft.
+- `project-workspace-start` opens Workspace beside the project composer using
+  the selected host and directory. Browse files and pull requests, choose an
+  agent, and manage reviewer profiles before creating a session. Add a file
+  or PR reference to the first prompt, or launch a private review from the PR.
 - `config-cycle-hotkeys`: Ctrl+Alt+M cycles models and Ctrl+Alt+E cycles effort
   in both composers (Ctrl on every platform). The relevant menu briefly opens
   with the selected choice highlighted, preserving draft and input focus. In an
@@ -521,13 +521,13 @@ apply only to that side chat. See the [side-chat settings recipe](sessions.md).
 - Open a project's actions menu in the sidebar → **Project settings**, pick
   Claude Code, Codex, or Pi as the agent, then set **Model** and **Effort**.
   Click **New session in project** and check the pill shows both.
-- Open a new session in a project with a saved or remembered host and directory.
-  Choose **Open workspace**. Files, Pull Requests and Agents are available in
-  Workspace before a message. See
+- Open a project with a saved or remembered host and directory. Workspace is
+  open immediately. Preview a file and add it to the prompt. Select a pull
+  request and run a review directly from its Review tab. The reviewer opens
+  on the report. The original prompt and response are in **Open transcript**.
+  Browser coverage lives in
   `tests/e2e_ui/start_session/test_project_config_prefill.py::test_composer_prefills_from_project_config`
-  for draft handoff and
-  `tests/e2e_ui/github/test_github_tab.py::test_studio_review_from_pr_panel`
-  for opening the real session shell and running a review first.
+  and `tests/e2e_ui/github/test_github_tab.py::test_studio_review_from_pr_panel`.
 - Attach files or type `/` before the first send.
 - For a managed sandbox, submit a prompt and close the browser once the session
   URL appears, while provisioning is still in progress. Reopen that URL after

@@ -11,6 +11,7 @@ from pydantic import (
     StringConstraints,
     ValidationInfo,
     field_validator,
+    model_validator,
 )
 
 from omnigent.models.model_override import validate_model_override
@@ -142,7 +143,9 @@ class ReviewProfile(FrozenModel):
 
 
 class ReviewTarget(FrozenModel):
-    source_session_id: str
+    source_session_id: str | None = None
+    source_project_id: str | None = None
+    repository_path: Annotated[str, StringConstraints(min_length=1, max_length=512)] | None = None
     host_id: str
     workspace: Annotated[str, StringConstraints(min_length=1, max_length=4096)]
     pr_url: Annotated[str, StringConstraints(min_length=1, max_length=2048)]
@@ -151,10 +154,25 @@ class ReviewTarget(FrozenModel):
     base_sha: Sha
     head_sha: Sha
 
-    @field_validator("source_session_id", "host_id")
+    @field_validator("source_session_id", "source_project_id", "host_id")
     @classmethod
-    def normalize_target_id(cls, value: str) -> str:
-        return require_uuid(value)
+    def normalize_target_id(cls, value: str | None) -> str | None:
+        return require_uuid(value) if value is not None else None
+
+    @model_validator(mode="after")
+    def validate_origin(self) -> ReviewTarget:
+        if (self.source_session_id is None) == (self.source_project_id is None):
+            raise ValueError("A review requires one origin")
+        if (self.source_project_id is None) != (self.repository_path is None):
+            raise ValueError("A project review requires a workspace repository path")
+        return self
+
+    @property
+    def origin_id(self) -> str:
+        if self.source_session_id is not None:
+            return self.source_session_id
+        assert self.source_project_id is not None
+        return self.source_project_id
 
 
 class ReviewPass(FrozenModel):

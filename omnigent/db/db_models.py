@@ -1786,7 +1786,8 @@ class SqlStudioReviewPass(OmnigentBase):
     id: Mapped[str] = mapped_column(Uuid16, primary_key=True)
     owner_scope: Mapped[bytes] = mapped_column(_CKSUM32, nullable=False)
     owner_user_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
-    source_session_id: Mapped[str] = mapped_column(Uuid16, nullable=False)
+    source_session_id: Mapped[str | None] = mapped_column(Uuid16, nullable=True)
+    source_project_id: Mapped[str | None] = mapped_column(Uuid16, nullable=True)
     target_json: Mapped[str] = mapped_column(CompressedText, nullable=False)
     profile_json: Mapped[str] = mapped_column(CompressedText, nullable=False)
     state: Mapped[int] = mapped_column(SmallInteger, nullable=False)
@@ -1801,11 +1802,23 @@ class SqlStudioReviewPass(OmnigentBase):
             "dispatch_status IN (1, 2, 3, 4, 5, 6, 7)",
             name="ck_studio_review_dispatch_status",
         ),
+        CheckConstraint(
+            "(source_session_id IS NULL) <> (source_project_id IS NULL)",
+            name="ck_studio_review_origin",
+        ),
         Index(
             "ix_studio_review_pass_owner_session",
             "workspace_id",
             "owner_scope",
             "source_session_id",
+            "created_at",
+            "id",
+        ),
+        Index(
+            "ix_studio_review_pass_owner_project",
+            "workspace_id",
+            "owner_scope",
+            "source_project_id",
             "created_at",
             "id",
         ),
