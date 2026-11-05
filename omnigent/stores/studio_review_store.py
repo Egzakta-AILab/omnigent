@@ -40,7 +40,8 @@ from omnigent.db.utils import (
 )
 from omnigent.stores.artifact_store import ArtifactStore
 from omnigent.studio.reviews.artifacts import (
-    EvidenceMediaType,
+    EvidenceCheck,
+    EvidenceCheckSelection,
     EvidenceStorageError,
     FindingArtifact,
     inspect_evidence,
@@ -66,6 +67,7 @@ from omnigent.studio.reviews.evidence import (
     PATCH_CHUNK_BYTES,
     patch_digest,
 )
+from omnigent.studio.reviews.evidence_files import EvidenceMediaType
 from omnigent.studio.reviews.models import (
     MAX_RUN_REVIEWERS,
     CaptureResult,
@@ -647,6 +649,41 @@ class StudioReviewStore:
     def _finding_artifact_key(run_id: str, finding_key: str, digest: str) -> str:
         return f"studio-evidence/{current_workspace_id()}/{run_id}/{finding_key}/{digest}"
 
+    @staticmethod
+    def _serialize_finding_artifact(metadata: FindingArtifact) -> str:
+        serialized = metadata.model_dump_json()
+        encoded = encode(serialized)
+        if encoded is None or len(encoded) > 16_383:
+            raise ValueError("Evidence metadata exceeds its size limit")
+        return serialized
+
+    def _match_evidence_check(
+        self,
+        run_id: str,
+        finding_key: str,
+        selection: EvidenceCheckSelection,
+        *,
+        owner: str | None,
+        digest: str,
+        media_type: EvidenceMediaType,
+        size: int,
+    ) -> EvidenceCheck:
+        entries = self.list_reproductions(run_id, finding_key, owner_user_id=owner, actor=owner)
+        receipt = next(
+            (entry.receipt for entry in entries if entry.digest == selection.receipt_digest), None
+        )
+        if isinstance(receipt, ReproductionReceipt):
+            side = receipt.base if selection.side == "base" else receipt.head
+            for item in side.evidence:
+                if (item.name, item.digest, item.media_type, item.byte_size) == (
+                    selection.name,
+                    digest,
+                    media_type,
+                    size,
+                ):
+                    return EvidenceCheck(**selection.model_dump(), commit=side.commit)
+        raise ReviewConflictError("The file does not match the selected check receipt")
+
     def attach_finding_artifact(
         self,
         run_id: str,
@@ -657,10 +694,24 @@ class StudioReviewStore:
         *,
         owner: str | None,
         artifacts: ArtifactStore,
+        check_selection: EvidenceCheckSelection | None = None,
     ) -> FindingArtifact:
         measurements = inspect_evidence(media_type, content)
         digest = hashlib.sha256(content).hexdigest()
         binary_key, binary_digest = bytes.fromhex(finding_key), bytes.fromhex(digest)
+        check = (
+            self._match_evidence_check(
+                run_id,
+                finding_key,
+                check_selection,
+                owner=owner,
+                digest=digest,
+                media_type=media_type,
+                size=len(content),
+            )
+            if check_selection is not None
+            else None
+        )
 
         def write(session: Session) -> FindingArtifact:
             self._lock_discussion_writer(session, run_id, owner, owner)
@@ -684,7 +735,16 @@ class StudioReviewStore:
                     artifact, (current_workspace_id(), run_id, binary_key, binary_digest)
                 )
                 assert row is not None
-                return FindingArtifact.model_validate_json(row.metadata_json)
+                metadata = FindingArtifact.model_validate_json(row.metadata_json)
+                if check is None or check in metadata.checks:
+                    return metadata
+                if len(metadata.checks) >= 8:
+                    raise ReviewConflictError(
+                        "This evidence file has reached its check link limit"
+                    )
+                metadata = metadata.model_copy(update={"checks": (*metadata.checks, check)})
+                row.metadata_json = self._serialize_finding_artifact(metadata)
+                return metadata
             if (
                 len(keys) >= _MAX_ARTIFACTS_PER_RUN
                 or sum(key == binary_key for key, _ in keys) >= _MAX_ARTIFACTS_PER_FINDING
@@ -703,11 +763,9 @@ class StudioReviewStore:
                 byte_size=len(content),
                 attached_at=time.time_ns() // 1_000_000,
                 measurements=measurements,
+                checks=(check,) if check is not None else (),
             )
-            serialized = metadata.model_dump_json()
-            encoded = encode(serialized)
-            if encoded is None or len(encoded) > 16_383:
-                raise ValueError("Evidence metadata exceeds its size limit")
+            serialized = self._serialize_finding_artifact(metadata)
             # Write the deterministic key before publishing metadata. Retrying after
             # a transaction rollback writes the same bytes to the same key.
             try:

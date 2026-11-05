@@ -9,6 +9,7 @@ import os
 import re
 import selectors
 import subprocess
+import tarfile
 import tempfile
 import time
 import uuid
@@ -19,6 +20,12 @@ from typing import BinaryIO, Literal
 
 from pydantic import AwareDatetime, Field, RootModel, field_validator, model_validator
 
+from omnigent.studio.reviews.evidence_files import (
+    EVIDENCE_LIMITS,
+    MAX_CAPTURED_FILES,
+    CapturedEvidenceFile,
+    evidence_type_for_name,
+)
 from omnigent.studio.reviews.models import FrozenModel, ReviewRoleDigest, Sha
 
 _SHA = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
@@ -59,6 +66,19 @@ class ReproductionSide(FrozenModel):
     output_sha256: ReviewRoleDigest
     output_bytes: int = Field(ge=0, le=2**63 - 1)
     output_truncated: bool
+    evidence: tuple[CapturedEvidenceFile, ...] = Field(
+        default=(), max_length=MAX_CAPTURED_FILES, exclude_if=lambda value: not value
+    )
+
+    @model_validator(mode="after")
+    def valid_evidence(self) -> ReproductionSide:
+        if self.evidence and (
+            self.state != "exited"
+            or self.oom_killed
+            or len({item.name for item in self.evidence}) != len(self.evidence)
+        ):
+            raise ValueError("Evidence must identify distinct files from an exited check")
+        return self
 
 
 class ReproductionSource(FrozenModel):
@@ -77,8 +97,15 @@ class ReproductionReceipt(FrozenModel):
     command: tuple[str, ...] = Field(min_length=1, max_length=8192)
     timeout_seconds: int = Field(ge=1, le=300)
     source: ReproductionSource | None = None
+    included_paths: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
     base: ReproductionSide
     head: ReproductionSide
+
+    @field_validator("included_paths")
+    @classmethod
+    def validate_included_paths(cls, paths: tuple[str, ...]) -> tuple[str, ...]:
+        _validate_export_paths(paths)
+        return paths
 
     @field_validator("command")
     @classmethod
@@ -131,7 +158,7 @@ class FixVerificationReceipt(FrozenModel):
     @model_validator(mode="after")
     def validate_comparison(self) -> FixVerificationReceipt:
         ReproductionReceipt.validate_command(self.command)
-        _validate_fix_paths(self.included_paths)
+        _validate_export_paths(self.included_paths)
         if (
             self.before.commit != self.source.head_sha
             or self.after.commit == self.before.commit
@@ -177,6 +204,7 @@ class SharedReproductionReceipt(FrozenModel):
     observed_at: AwareDatetime
     image_id: str
     timeout_seconds: int
+    included_paths: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
     base: ReproductionSide
     head: ReproductionSide
 
@@ -220,6 +248,7 @@ class SharedAttachedReproduction(FrozenModel):
                 observed_at=receipt.observed_at,
                 image_id=receipt.image_id,
                 timeout_seconds=receipt.timeout_seconds,
+                included_paths=receipt.included_paths,
                 base=receipt.base,
                 head=receipt.head,
             ),
@@ -403,6 +432,67 @@ def _stage_fix(bare: Path, head: str, patch: bytes) -> str:
         ).decode("ascii")
 
 
+@dataclass(frozen=True)
+class EvidenceCollection:
+    names: tuple[str, ...]
+    directory: Path
+
+    def __post_init__(self) -> None:
+        if not 1 <= len(self.names) <= MAX_CAPTURED_FILES or len(set(self.names)) != len(
+            self.names
+        ):
+            raise ValueError(f"Select 1 to {MAX_CAPTURED_FILES} distinct evidence files")
+        for name in self.names:
+            evidence_type_for_name(name)
+
+
+def _collect_evidence_file(
+    docker: list[str], container: str, filename: str, destination: Path
+) -> CapturedEvidenceFile | None:
+    from omnigent.studio.reviews.artifacts import inspect_evidence
+
+    media_type = evidence_type_for_name(filename)
+    limit = EVIDENCE_LIMITS[media_type]
+    output = io.BytesIO()
+    try:
+        copied = _capture(
+            [*docker, "exec", container, "tar", "-cf", "-", "-C", "/evidence", filename],
+            destination=output,
+            timeout=_ENGINE_LIMIT,
+            limit=limit + 64 * 1024,
+            truncate=False,
+        )
+        if copied.status != 0:
+            return None
+        output.seek(0)
+        with tarfile.open(fileobj=output, mode="r:") as archive:
+            member = archive.next()
+            if (
+                member is None
+                or member.name != filename
+                or member.type not in (tarfile.REGTYPE, tarfile.AREGTYPE)
+                or not 0 < member.size <= limit
+            ):
+                return None
+            stream = archive.extractfile(member)
+            if stream is None:
+                return None
+            content = stream.read(limit + 1)
+            if len(content) != member.size or archive.next() is not None:
+                return None
+        inspect_evidence(media_type, content)
+    except (ReproductionError, tarfile.TarError, ValueError):
+        return None
+    with (destination / filename).open("xb") as file:
+        file.write(content)
+    return CapturedEvidenceFile(
+        name=filename,
+        digest=hashlib.sha256(content).hexdigest(),
+        media_type=media_type,
+        byte_size=len(content),
+    )
+
+
 def _run_side(
     docker: list[str],
     *,
@@ -412,6 +502,7 @@ def _run_side(
     image_id: str,
     command: tuple[str, ...],
     timeout: int,
+    collection: EvidenceCollection | None = None,
 ) -> ReproductionSide:
     name = f"omnigent-proof-{uuid.uuid4().hex}"
     created = False
@@ -445,6 +536,11 @@ def _run_side(
             "/work:rw,nodev,nosuid,exec,size=256m,mode=1777",
             "--tmpfs",
             "/tmp:rw,nodev,nosuid,exec,size=128m,mode=1777",
+            *(
+                ["--tmpfs", "/evidence:rw,nodev,nosuid,noexec,size=32m,mode=1777"]
+                if collection is not None
+                else []
+            ),
             "--env",
             "HOME=/tmp",
             "--log-driver",
@@ -454,16 +550,33 @@ def _run_side(
             "/bin/sh",
             image_id,
             "-c",
-            _COMMAND,
-            "omnigent",
-            str(timeout + _ENGINE_LIMIT),
-            *command,
+            *(
+                ["while :; do sleep 60; done"]
+                if collection is not None
+                else [_COMMAND, "omnigent", str(timeout + _ENGINE_LIMIT), *command]
+            ),
         )
         created = True
+        if collection is not None:
+            _engine(docker, "start", name)
+            execution = [
+                *docker,
+                "exec",
+                "--interactive",
+                name,
+                "/bin/sh",
+                "-c",
+                _COMMAND,
+                "omnigent",
+                str(timeout + _ENGINE_LIMIT),
+                *command,
+            ]
+        else:
+            execution = [*docker, "start", "--attach", "--interactive", name]
         started = time.monotonic()
         with tempfile.TemporaryFile() as output:
             observed = _capture(
-                [*docker, "start", "--attach", "--interactive", name],
+                execution,
                 stdin=tree,
                 destination=output,
                 timeout=timeout,
@@ -478,20 +591,35 @@ def _run_side(
         exit_code = None
         if observed.status is not None:
             state = json.loads(_engine(docker, "inspect", "--format", "{{json .State}}", name))
-            exit_code = state.get("ExitCode")
-            if state.get("Status") != "exited" or type(exit_code) is not int:
-                raise ReproductionError("Docker did not confirm the reproduction exit")
+            if collection is not None:
+                if state.get("Status") != "running":
+                    raise ReproductionError("The evidence container stopped before collection")
+                exit_code = observed.status
+            else:
+                exit_code = state.get("ExitCode")
+                if state.get("Status") != "exited" or type(exit_code) is not int:
+                    raise ReproductionError("Docker did not confirm the reproduction exit")
+        outcome = (
+            "timed_out"
+            if observed.status is None
+            else "exited"
+            if preview.startswith(_START_MARKER) and exit_code not in {126, 127}
+            else "setup_error"
+        )
+        evidence = ()
+        if collection is not None and outcome == "exited" and state.get("OOMKilled") is not True:
+            collection.directory.mkdir(mode=0o700)
+            evidence = tuple(
+                result
+                for filename in collection.names
+                if (result := _collect_evidence_file(docker, name, filename, collection.directory))
+                is not None
+            )
         return ReproductionSide(
             commit=commit,
             archive_sha256=archive.digest,
             archive_bytes=archive.size,
-            state=(
-                "timed_out"
-                if observed.status is None
-                else "exited"
-                if preview.startswith(_START_MARKER) and exit_code not in {126, 127}
-                else "setup_error"
-            ),
+            state=outcome,
             exit_code=exit_code,
             oom_killed=state.get("OOMKilled") is True,
             elapsed_ms=elapsed_ms,
@@ -499,6 +627,7 @@ def _run_side(
             output_sha256=observed.digest,
             output_bytes=observed.size,
             output_truncated=observed.size > len(preview),
+            evidence=evidence,
         )
     except (ReproductionError, KeyboardInterrupt) as exc:
         if not created:
@@ -528,6 +657,7 @@ def _compare_revisions(
     timeout: int,
     proposed_patch: bytes | None = None,
     paths: tuple[str, ...] = (),
+    collection: EvidenceCollection | None = None,
 ) -> tuple[str, ReproductionSide, ReproductionSide]:
     if not all(_SHA.fullmatch(commit) for commit in (base, head)):
         raise ValueError("Provide both full lowercase Git commit IDs")
@@ -571,10 +701,15 @@ def _compare_revisions(
                 image_id=image_id,
                 command=command,
                 timeout=timeout,
+                collection=(
+                    EvidenceCollection(collection.names, collection.directory / side)
+                    if collection is not None
+                    else None
+                ),
             )
-            for commit, tree, archive in (
-                (base, base_tree, base_archive),
-                (head, head_tree, head_archive),
+            for side, commit, tree, archive in (
+                ("base", base, base_tree, base_archive),
+                ("head", head, head_tree, head_archive),
             )
         )
     return image_id, before, after
@@ -590,10 +725,13 @@ def reproduce(
     socket: Path = Path("/var/run/docker.sock"),
     timeout: int = 60,
     source: ReproductionSource | None = None,
+    collection: EvidenceCollection | None = None,
+    paths: tuple[str, ...] = (),
 ) -> ReproductionReceipt:
     """Observe one command on two Git exports without mounting the host checkout."""
     if source is not None and (source.base_sha, source.head_sha) != (base, head):
         raise ValueError("The reproduction commits do not match the saved review run")
+    _validate_export_paths(paths)
     image_id, before, after = _compare_revisions(
         repository=repository,
         base=base,
@@ -602,6 +740,8 @@ def reproduce(
         command=command,
         socket=socket,
         timeout=timeout,
+        collection=collection,
+        paths=paths,
     )
     return ReproductionReceipt(
         observed_at=datetime.now(UTC),
@@ -609,6 +749,7 @@ def reproduce(
         command=command,
         timeout_seconds=timeout,
         source=source,
+        included_paths=paths,
         base=before,
         head=after,
     )
@@ -625,7 +766,7 @@ def validate_fix_patch(patch: bytes) -> None:
         raise ValueError("The proposed patch must contain text changes")
 
 
-def _validate_fix_paths(paths: tuple[str, ...]) -> None:
+def _validate_export_paths(paths: tuple[str, ...]) -> None:
     if len(paths) > 32 or any(
         len(path.encode()) > 1024
         or path in ("", ".")
@@ -651,7 +792,7 @@ def verify_fix(
 ) -> FixVerificationReceipt:
     """Compare the captured head with the same head plus a proposed text patch."""
     validate_fix_patch(patch)
-    _validate_fix_paths(paths)
+    _validate_export_paths(paths)
     image_id, before, after = _compare_revisions(
         repository=repository,
         base=source.head_sha,

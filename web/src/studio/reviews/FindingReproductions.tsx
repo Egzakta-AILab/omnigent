@@ -43,6 +43,16 @@ function rerunCommand(
     relative && relative !== "."
       ? run.target.workspace.replace(/\/$/, "") + "/" + relative
       : run.target.workspace;
+  const evidenceOptions =
+    "base" in receipt
+      ? [
+          ...new Set(
+            [...(receipt.base.evidence ?? []), ...(receipt.head.evidence ?? [])].map(
+              ({ name }) => name,
+            ),
+          ),
+        ].flatMap((name) => ["--capture-evidence", name])
+      : [];
   const args = [
     "--mode",
     mode,
@@ -58,6 +68,8 @@ function rerunCommand(
     receipt.image_id,
     "--timeout",
     String(receipt.timeout_seconds),
+    ...evidenceOptions,
+    ...(receipt.included_paths ?? []).flatMap((path) => ["--include-path", path]),
     "--output",
     `.omnigent/studio/reproduction-${Date.now()}.json`,
     "--",
@@ -87,6 +99,11 @@ function ReproductionOutcome({ label, side }: { label: string; side: Reproductio
       <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-all text-xs">
         {side.output || "No captured output"}
       </pre>
+      {!!side.evidence?.length && (
+        <p className="text-xs text-muted-foreground">
+          Captured files · {side.evidence.map(({ name }) => name).join(", ")}
+        </p>
+      )}
       {side.output_truncated && (
         <p className="text-xs text-muted-foreground">Output preview truncated.</p>
       )}
@@ -301,12 +318,31 @@ function Reproductions({
               </>
             ) : (
               <>
+                {!!receipt.included_paths?.length && (
+                  <p className="break-all text-xs text-muted-foreground">
+                    Export scope · {receipt.included_paths.join(", ")}
+                  </p>
+                )}
                 <ReproductionOutcome label="Base" side={receipt.base} />
                 <ReproductionOutcome label="Head" side={receipt.head} />
               </>
             )}
           </article>
         ))}
+      {canAttach && (
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={() => {
+            void copyText(findingKey).then(
+              () => setCopyStatus("Finding key copied."),
+              () => setCopyStatus("Couldn’t copy the finding key."),
+            );
+          }}
+        >
+          Copy finding key
+        </Button>
+      )}
       {copyStatus && <p role="status">{copyStatus}</p>}
       {!!run.patch_sha256 && (
         <FindingEvidence

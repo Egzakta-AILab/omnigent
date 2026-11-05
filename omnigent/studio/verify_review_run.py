@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 from pydantic import ValidationError
 
+from omnigent.runner.session_prs import PullRequestRef
 from omnigent.studio import setup
 from omnigent.studio.reviews.evidence import changed_anchors, patch_digest
 from omnigent.studio.reviews.models import MAX_RUN_REVIEWERS, ReviewRun, require_uuid
@@ -18,6 +19,17 @@ from omnigent.studio.reviews.report import (
 )
 from omnigent.studio.reviews.reproduction import ReproductionError, ReproductionSource
 from omnigent.studio.reviews.service import CaptureReviewRequest
+
+
+def _matches_pr_url(saved: str, expected: str | None) -> bool:
+    if saved == expected:
+        return True
+    if expected is None:
+        return False
+    try:
+        return PullRequestRef.from_url(saved) == PullRequestRef.from_url(expected)
+    except ValueError:
+        return False
 
 
 def read_reproduction_source(
@@ -48,7 +60,11 @@ def read_reproduction_source(
         raw = setup._Probe(client, []).get("run.capture", path)
     try:
         run = ReviewRun.model_validate(raw, strict=True)
-        if run.id != run_id or run.target.pr_url != expected_pr or run.patch_sha256 is None:
+        if (
+            run.id != run_id
+            or not _matches_pr_url(run.target.pr_url, expected_pr)
+            or run.patch_sha256 is None
+        ):
             raise ReproductionError(
                 "The saved run does not match the requested PR and captured diff"
             )

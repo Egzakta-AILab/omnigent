@@ -448,17 +448,62 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--include-path",
         action="append",
         default=[],
-        help="limit both fix snapshots to a Git path",
+        help="limit both snapshots to a Git path",
     )
     reproduction.add_argument("--image", required=True, help="locally installed test image")
     reproduction.add_argument("--socket", type=Path, default=Path("/var/run/docker.sock"))
     reproduction.add_argument("--timeout", type=int, default=60, help="seconds per revision")
     reproduction.add_argument("--output", type=Path, required=True, help="new private JSON file")
+    reproduction.add_argument(
+        "--capture-evidence",
+        action="append",
+        default=[],
+        metavar="FILENAME",
+        help="collect a named file from /evidence on each revision, up to two names",
+    )
     reproduction.add_argument("argv", nargs=argparse.REMAINDER, help="command after --")
+    proof = commands.add_parser("attach-proof", help="attach a saved check and its evidence")
+    proof.add_argument("--mode", choices=("local", "server"), required=True)
+    proof.add_argument("--server", required=True)
+    proof.add_argument("--finding", required=True, help="captured finding key")
+    proof.add_argument("--receipt", type=Path, required=True)
     args = parser.parse_args(argv)
+    if args.command == "attach-proof":
+        from omnigent.studio.attach_proof import attach_proof
+
+        try:
+            server = validate_server_url(args.server, args.mode)
+            try:
+                headers = _headers(server, None)
+            except Exception:  # noqa: BLE001 — credential errors may contain private values
+                parser.exit(2, "Could not load the instance credentials.\n")
+            with httpx.Client(
+                base_url=f"{server}/",
+                headers=headers,
+                timeout=60,
+                follow_redirects=False,
+                trust_env=False,
+            ) as client:
+                count = attach_proof(
+                    client, receipt_path=args.receipt.expanduser(), finding_key=args.finding
+                )
+        except httpx.HTTPStatusError as exc:
+            parser.exit(
+                2,
+                f"Could not attach all evidence (HTTP {exc.response.status_code}). "
+                "Retry with the same receipt.\n",
+            )
+        except httpx.HTTPError:
+            parser.exit(2, "Could not reach the evidence API. Retry with the same receipt.\n")
+        except (OSError, ValueError) as exc:
+            parser.exit(2, f"Could not attach evidence: {exc}\n")
+        print(f"Attached the check receipt and {count} file links.")
+        return 0
     if args.command == "reproduce":
+        from omnigent.studio.attach_proof import evidence_directory
         from omnigent.studio.reviews.reproduction import (
             MAX_FIX_PATCH_BYTES,
+            EvidenceCollection,
             FixVerificationReceipt,
             ReproductionError,
             reproduce,
@@ -469,8 +514,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         command = args.argv[1:] if args.argv[:1] == ["--"] else args.argv
         if args.output.exists():
             parser.error("Choose a new file for the reproduction receipt")
-        if args.include_path and args.fix_patch is None:
-            parser.error("--include-path requires --fix-patch")
+        if args.capture_evidence and args.fix_patch is not None:
+            parser.error("--capture-evidence currently supports base/head reproductions")
         try:
             source = None
             if any((args.run_id, args.mode, args.server, args.pr)):
@@ -502,7 +547,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                     source=source, patch=patch, paths=tuple(args.include_path), **options
                 )
             else:
-                result = reproduce(base=base, head=head, source=source, **options)
+                collection = None
+                if args.capture_evidence:
+                    collection = EvidenceCollection(
+                        tuple(args.capture_evidence), evidence_directory(args.output)
+                    )
+                    collection.directory.mkdir(mode=0o700, parents=True)
+                result = reproduce(
+                    base=base,
+                    head=head,
+                    source=source,
+                    collection=collection,
+                    paths=tuple(args.include_path),
+                    **options,
+                )
             args.output.parent.mkdir(parents=True, exist_ok=True)
             with tempfile.NamedTemporaryFile(
                 mode="w", encoding="utf-8", dir=args.output.parent, prefix=".reproduction-"
@@ -524,7 +582,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         if isinstance(result, FixVerificationReceipt):
             print(f"Comparison: {result.outcome.replace('_', ' ')}")
             return 0 if result.outcome == "fail_to_pass" else 1
-        return 0 if result.base.state == result.head.state == "exited" else 1
+        complete = result.base.state == result.head.state == "exited"
+        for label, side in sides:
+            missing = set(args.capture_evidence) - {item.name for item in side.evidence}
+            if missing:
+                print(f"{label} evidence unavailable: {', '.join(sorted(missing))}")
+                complete = False
+        return 0 if complete else 1
     if args.command == "contracts":
         from omnigent.studio.contracts import main as contracts_main
 

@@ -188,6 +188,7 @@ export interface ReproductionSide {
   oom_killed: boolean;
   output: string;
   output_truncated: boolean;
+  evidence?: { name: string; digest: string }[];
 }
 
 interface CheckReceiptSummary {
@@ -211,7 +212,12 @@ export interface AttachedReproduction {
   provenance: "uploaded";
   candidate_run_id?: string | null;
   receipt:
-    (CheckReceiptSummary & { base: ReproductionSide; head: ReproductionSide }) | FixCheckSummary;
+    | (CheckReceiptSummary & {
+        base: ReproductionSide;
+        head: ReproductionSide;
+        included_paths?: string[];
+      })
+    | FixCheckSummary;
 }
 
 export type DiscussionAnchor =
@@ -455,6 +461,7 @@ export interface FindingArtifact {
   byte_size: number;
   attached_at: number;
   provenance: "uploaded";
+  checks?: { receipt_digest: string; side: "base" | "head"; name: string; commit: string }[];
   measurements?: {
     method: string;
     metrics: { label: string; unit: string; baseline?: number | null; observed: number }[];
