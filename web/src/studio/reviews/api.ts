@@ -257,6 +257,15 @@ export interface InlinePublicationPreview {
 
 export type QuestionAction = "question" | "propose_fix" | "propose_check";
 
+export interface HostedCheckJob {
+  id: string;
+  state: "running" | "attached" | "partial" | "failed" | "unconfirmed";
+  image_id: string;
+  started_at: number;
+  receipt_digest?: string | null;
+  files_attached: number;
+}
+
 export interface ProposedCheck {
   command: string[];
   paths: string[];
@@ -288,6 +297,8 @@ export interface ReviewQuestion extends Pick<ReviewDiscussionComment, "id" | "an
   answer: string | null;
   proposed_patch?: string | null;
   proposed_check?: ProposedCheck | null;
+  proposed_check_digest?: string | null;
+  check_job?: HostedCheckJob | null;
   citations?: QuestionCitation[] | null;
   published_at: number | null;
   updated_at: number;
@@ -429,6 +440,19 @@ export function getReviewQuestion(runId: string, questionId: string, signal: Abo
   return reviewRequest<ReviewQuestion>(
     `${questionsPath(runId)}/${encodeURIComponent(questionId)}`,
     { signal },
+  );
+}
+
+export function approveHostedCheck(
+  runId: string,
+  proposalId: string,
+  proposalDigest: string,
+  imageId: string,
+) {
+  return postReview<HostedCheckJob>(
+    `${questionsPath(runId)}/${encodeURIComponent(proposalId)}/run-check`,
+    proposalId,
+    { proposal_digest: proposalDigest, image_id: imageId, confirm: true },
   );
 }
 

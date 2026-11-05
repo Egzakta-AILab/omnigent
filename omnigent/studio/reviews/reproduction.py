@@ -578,7 +578,7 @@ def _run_side(
             image_id,
             "-c",
             *(
-                ["while :; do sleep 60; done"]
+                [f"exec sleep {timeout + 60}"]
                 if collection is not None
                 else [_COMMAND, "omnigent", str(timeout + _ENGINE_LIMIT), *command]
             ),

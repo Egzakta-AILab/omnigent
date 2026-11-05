@@ -69,6 +69,12 @@ from omnigent.studio.reviews.evidence import (
     patch_digest,
 )
 from omnigent.studio.reviews.evidence_files import EvidenceMediaType
+from omnigent.studio.reviews.hosted_check_models import (
+    CHECK_JOB_SECONDS,
+    ApproveHostedCheck,
+    HostedCheckJob,
+    proposal_digest,
+)
 from omnigent.studio.reviews.models import (
     MAX_RUN_REVIEWERS,
     CaptureResult,
@@ -1415,6 +1421,16 @@ class StudioReviewStore:
     def _question_record(row: SqlStudioReviewQuestion) -> QuestionRecord:
         snapshot = QuestionInput.model_validate_json(row.input_json)
         answer = QuestionAnswer.model_validate_json(row.answer_json) if row.answer_json else None
+        check = answer.proposed_check if answer else None
+        job = (
+            HostedCheckJob.model_validate_json(row.check_job_json) if row.check_job_json else None
+        )
+        if (
+            job
+            and job.state == "running"
+            and time.time() * 1000 >= job.started_at + CHECK_JOB_SECONDS * 1000
+        ):
+            job = job.model_copy(update={"state": "unconfirmed"})
         return QuestionRecord(
             snapshot=snapshot,
             view=ReviewQuestion(
@@ -1429,7 +1445,9 @@ class StudioReviewStore:
                 citations=answer.citations if answer else None,
                 action=snapshot.execution.action,
                 proposed_patch=answer.proposed_patch if answer else None,
-                proposed_check=answer.proposed_check if answer else None,
+                proposed_check=check,
+                proposed_check_digest=proposal_digest(check) if check is not None else None,
+                check_job=job,
                 published_at=row.published_at,
                 updated_at=row.updated_at,
             ),
@@ -1465,6 +1483,50 @@ class StudioReviewStore:
             if row is not None and intent is not None and row.intent_hash != bytes.fromhex(intent):
                 raise ReviewConflictError("This question ID was used for a different request")
             return self._question_record(row) if row is not None else None
+
+    def claim_hosted_check(
+        self, run_id: str, question_id: str, approval: ApproveHostedCheck, *, owner: str | None
+    ) -> tuple[HostedCheckJob, bool]:
+        def write(session: Session) -> tuple[HostedCheckJob, bool]:
+            generation = self._lock_discussion_writer(session, run_id, owner, owner)
+            row = self._question_row(session, run_id, question_id, owner, generation)
+            if row is None:
+                raise ReviewNotFoundError("Sandbox check proposal not found")
+            question = self._question_record(row).view
+            if (
+                question.action != "propose_check"
+                or question.proposed_check_digest != approval.proposal_digest
+                or not isinstance(question.anchor, FindingDiscussionAnchor)
+            ):
+                raise ReviewConflictError("The sandbox check differs from the approved proposal")
+            if question.check_job is not None:
+                if question.check_job.image_id != approval.image_id:
+                    raise ReviewConflictError("This proposal already has a sandbox check")
+                return question.check_job, False
+            job = HostedCheckJob(
+                id=uuid.uuid4().hex,
+                state="running",
+                image_id=approval.image_id,
+                started_at=time.time_ns() // 1_000_000,
+            )
+            row.check_job_json = job.model_dump_json()
+            return job, True
+
+        return run_write_transaction(self._write, "claim_hosted_sandbox_check", write)
+
+    def finish_hosted_check(
+        self, run_id: str, question_id: str, job: HostedCheckJob, *, owner: str | None
+    ) -> None:
+        def write(session: Session) -> None:
+            generation = self._lock_discussion_writer(session, run_id, owner, owner)
+            row = self._question_row(session, run_id, question_id, owner, generation)
+            if row is None or row.check_job_json is None:
+                raise ReviewNotFoundError("Sandbox check not found")
+            current = HostedCheckJob.model_validate_json(row.check_job_json)
+            if current.id == job.id and current.state == "running":
+                row.check_job_json = job.model_dump_json()
+
+        run_write_transaction(self._write, "finish_hosted_sandbox_check", write)
 
     def claim_discussion_question(
         self,

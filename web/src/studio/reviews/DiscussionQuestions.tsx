@@ -115,6 +115,9 @@ function QuestionCard({
               <CheckProposal
                 check={question.proposed_check}
                 proposalId={question.id}
+                proposalDigest={question.proposed_check_digest}
+                initialJob={question.check_job}
+                viewerId={viewerId}
                 findingKey={question.anchor.finding_key}
                 discussion={discussion}
                 repository={discussion.check_repository}

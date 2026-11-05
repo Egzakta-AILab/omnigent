@@ -4129,6 +4129,62 @@
         "title": "HostModelOptionsResponse",
         "type": "object"
       },
+      "HostedCheckJob": {
+        "additionalProperties": false,
+        "properties": {
+          "files_attached": {
+            "default": 0,
+            "format": "int64",
+            "title": "Files Attached",
+            "type": "integer"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "image_id": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "Image Id",
+            "type": "string"
+          },
+          "receipt_digest": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Receipt Digest"
+          },
+          "started_at": {
+            "format": "int64",
+            "title": "Started At",
+            "type": "integer"
+          },
+          "state": {
+            "enum": [
+              "running",
+              "attached",
+              "partial",
+              "failed",
+              "unconfirmed"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "state",
+          "image_id",
+          "started_at"
+        ],
+        "title": "HostedCheckJob",
+        "type": "object"
+      },
       "ImportFailureRef": {
         "description": "One session that could not be imported, with a user-facing reason.\n\n`external_session_id` / `source` name the source session when known (a\nhost that reports only a count leaves them `None`); `reason` explains the\nfailure so the UI can show it instead of an anonymous \"N failed\". Also the\nshape of each `{\"event\": \"failed\", ...}` line on the stream endpoint.",
         "properties": {
@@ -8081,6 +8137,16 @@
             "title": "Body",
             "type": "string"
           },
+          "check_job": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HostedCheckJob"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "citations": {
             "anyOf": [
               {
@@ -8116,6 +8182,18 @@
                 "type": "null"
               }
             ]
+          },
+          "proposed_check_digest": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Proposed Check Digest"
           },
           "proposed_patch": {
             "anyOf": [
@@ -24751,6 +24829,91 @@
           }
         },
         "summary": "Get Review Question",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/studio/review-runs/{run_id}/discussion/questions/{question_id}/run-check": {
+      "post": {
+        "operationId": "approve_hosted_check_v1_studio_review_runs__run_id__discussion_questions__question_id__run_check_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "question_id",
+            "required": true,
+            "schema": {
+              "title": "Question Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "confirm": {
+                    "const": true,
+                    "title": "Confirm",
+                    "type": "boolean"
+                  },
+                  "image_id": {
+                    "pattern": "^sha256:[0-9a-f]{64}$",
+                    "title": "Image Id",
+                    "type": "string"
+                  },
+                  "proposal_digest": {
+                    "pattern": "^[0-9a-f]{64}$",
+                    "title": "Proposal Digest",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "proposal_digest",
+                  "image_id",
+                  "confirm"
+                ],
+                "title": "ApproveHostedCheck",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedCheckJob"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Approve Hosted Check",
         "tags": [
           "sessions"
         ]
