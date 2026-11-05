@@ -215,12 +215,20 @@ export interface AskReviewQuestion extends Pick<ReviewDiscussionComment, "id" | 
   workspace?: string;
 }
 
+export interface QuestionCitation {
+  path: string;
+  side: "base" | "head";
+  line: number;
+  quote: string;
+}
+
 export interface ReviewQuestion extends Pick<ReviewDiscussionComment, "id" | "anchor" | "body"> {
   session_id: string;
   harness: ReviewHarness;
   status: "dispatching" | "accepted" | "unknown";
   answer_state: "pending" | "incomplete" | "ready";
   answer: string | null;
+  citations?: QuestionCitation[] | null;
   published_at: number | null;
   updated_at: number;
 }
@@ -230,6 +238,7 @@ export interface SharedReviewAnswer {
   anchor: DiscussionAnchor;
   question: string;
   answer: string;
+  citations?: QuestionCitation[] | null;
   harness: ReviewHarness;
   requested_by: string | null;
   published_at: number;

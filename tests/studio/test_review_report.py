@@ -237,6 +237,57 @@ def test_reads_only_the_first_turn_when_input_is_bound(
         assert payload is None
 
 
+@pytest.mark.parametrize(
+    ("citations", "expected"),
+    [
+        ([{"path": "readme", "side": "head", "line": 115, "quote": "Run the build."}], "ready"),
+        (
+            [{"path": "readme", "side": "head", "line": 114, "quote": "Run the build."}],
+            "incomplete",
+        ),
+        (
+            [{"path": "readme", "side": "base", "line": 115, "quote": "Run the build."}],
+            "incomplete",
+        ),
+        (None, "incomplete"),
+        ([], "ready"),
+    ],
+)
+def test_checks_question_citations_against_the_exact_row(
+    review: ReviewPass, citations: list[dict[str, object]] | None, expected: str
+) -> None:
+    patch = (
+        "diff --git a/readme b/readme\n--- a/readme\n+++ b/readme\n"
+        "@@ -114 +114,2 @@\n Open the server URL.\n+Run the build.\n"
+    )
+    prompt = "Read the saved PR diff"
+    payload = {
+        "question_id": review.id,
+        "base_sha": review.target.base_sha,
+        "head_sha": review.target.head_sha,
+        "answer": "Build first.",
+        "citations": citations,
+    }
+    store = _transcript(
+        review,
+        _message(prompt, user=True),
+        _message(f"```studio-review-answer-v2\n{json.dumps(payload)}\n```"),
+    )
+    assert review.reviewer_session_id is not None
+    state, answer = read_question_answer(
+        store,
+        session_id=review.reviewer_session_id,
+        question_id=review.id,
+        target=review.target,
+        prompt_digest=hashlib.sha256(prompt.encode()).hexdigest(),
+        updated_at=0,
+        running=True,
+        captured_patch=patch,
+    )
+    assert state == expected
+    assert (answer is not None) == (expected == "ready")
+
+
 def test_reads_a_claude_report_split_across_persisted_text_blocks(review: ReviewPass) -> None:
     start, end = _report(review).rsplit("\n", 1)
     store = _transcript(

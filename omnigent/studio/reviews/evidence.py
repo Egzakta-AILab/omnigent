@@ -125,6 +125,10 @@ def changed_anchors(patch: str) -> frozenset[Anchor]:
     return frozenset(changed_lines(patch))
 
 
-def displayed_anchors(patch: str) -> frozenset[Anchor]:
+def displayed_lines(patch: str) -> dict[Anchor, str]:
     """Return changed and context rows present on each side of the saved diff."""
-    return frozenset(_patch_lines(patch, include_context=True))
+    return _patch_lines(patch, include_context=True)
+
+
+def displayed_anchors(patch: str) -> frozenset[Anchor]:
+    return frozenset(displayed_lines(patch))

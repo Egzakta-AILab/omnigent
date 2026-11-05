@@ -2044,7 +2044,11 @@ def test_studio_review_from_pr_panel(
                     route.fulfill(status=503, json={"detail": "Answer temporarily unavailable"})
                     return
             question.update(
-                answer_state="ready", answer="The added line handles only valid input."
+                answer_state="ready",
+                answer="The added line handles only valid input.",
+                citations=[
+                    {"path": "src/app/main.py", "side": "head", "line": 2, "quote": "added line"}
+                ],
             )
             if route.request.method == "POST":
                 question["published_at"] = review["created_at"]
@@ -2054,6 +2058,7 @@ def test_studio_review_from_pr_panel(
                         "anchor": question["anchor"],
                         "question": question["body"],
                         "answer": question["answer"],
+                        "citations": question["citations"],
                         "harness": question["harness"],
                         "requested_by": "fixture-owner",
                         "published_at": question["published_at"],
@@ -2138,6 +2143,8 @@ def test_studio_review_from_pr_panel(
         expect(
             thread.get_by_text("The added line handles only valid input.", exact=True)
         ).to_be_visible()
+        excerpts = thread.get_by_role("region", name="Matched diff excerpts")
+        expect(excerpts.get_by_text("added line", exact=True)).to_be_visible()
         expect(thread.get_by_role("link", name="Open private session")).to_have_attribute(
             "href", "/c/" + "9" * 32
         )
@@ -2145,6 +2152,7 @@ def test_studio_review_from_pr_panel(
         expect(
             thread.get_by_text("Codex answer · Shared by fixture-owner", exact=True)
         ).to_be_visible()
+        expect(excerpts.get_by_text("added line", exact=True)).to_be_visible()
         expect(thread.get_by_role("link", name="Open private session")).to_have_count(0)
         page.screenshot(path=str(tmp_path / "review-agent-answer.png"))
         return

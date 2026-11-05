@@ -14,6 +14,7 @@ import {
   shareReviewAnswer,
   type AskReviewQuestion,
   type DiscussionAnchor,
+  type QuestionCitation,
   type ReviewDiscussion,
   type ReviewQuestion,
   type SharedReviewAnswer,
@@ -22,6 +23,31 @@ import {
 export interface QuestionAttempt {
   intent: string;
   id: string;
+}
+
+function AnswerCitations({ citations }: { citations?: QuestionCitation[] | null }) {
+  if (!citations?.length) {
+    return (
+      <p className="text-xs text-muted-foreground">
+        {citations ? "No excerpts cited" : "Citation verification unavailable for this answer"}
+      </p>
+    );
+  }
+  return (
+    <section aria-label="Matched diff excerpts" className="space-y-1">
+      <p className="text-xs font-medium">Matched diff excerpts</p>
+      <ul className="space-y-1">
+        {citations.map(({ path, side, line, quote }, index) => (
+          <li key={JSON.stringify([path, side, line, index])} className="rounded border p-2">
+            <p className="break-all text-xs text-muted-foreground">
+              {path}:{line} · {side === "base" ? "Base" : "Head"}
+            </p>
+            <code className="whitespace-pre-wrap break-all">{quote}</code>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
 }
 
 function QuestionCard({
@@ -68,9 +94,12 @@ function QuestionCard({
       <p className="text-xs font-medium">Private · {REVIEW_HARNESS_LABELS[question.harness]}</p>
       <p className="whitespace-pre-wrap break-words">{question.body}</p>
       {question.answer ? (
-        <p className="whitespace-pre-wrap break-words rounded-md bg-muted/60 p-2">
-          {question.answer}
-        </p>
+        <>
+          <p className="whitespace-pre-wrap break-words rounded-md bg-muted/60 p-2">
+            {question.answer}
+          </p>
+          <AnswerCitations citations={question.citations} />
+        </>
       ) : result.isError ? (
         <p role="alert">{result.error.message}</p>
       ) : (
@@ -363,6 +392,7 @@ export function DiscussionQuestions({
           </p>
           <p className="whitespace-pre-wrap break-words text-muted-foreground">{item.question}</p>
           <p className="whitespace-pre-wrap break-words">{item.answer}</p>
+          <AnswerCitations citations={item.citations} />
         </article>
       ))}
       {questions

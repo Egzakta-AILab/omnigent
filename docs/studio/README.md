@@ -424,9 +424,12 @@ Collaborators choose a connected host and working directory under their own
 account.
 
 **Ask privately** sends the question and captured diff to the agent. The
-session uses the selected native agent's permissions. Open the private session
-to inspect it, then use **Share answer** to add the question and answer to the
-internal thread.
+session uses the selected native agent's permissions. It receives numbered
+rows near the selected line. Omnigent checks each cited path, side, line and
+quote against the saved diff. A failed check leaves the reply available in
+the private session for inspection. When the answer is ready, **Share answer**
+adds it and its matched excerpts to the internal thread. The excerpts show
+which text the agent cited. Judge its interpretation separately.
 
 For any workspace, open **Project settings → Repositories**, or open
 **Manage repositories** from the PR panel. The managers run on the connected
