@@ -329,6 +329,26 @@ select an individual reviewer to inspect the report. The run keeps its
 first complete report for each reviewer once read and shows a reason when
 a reviewer cannot start. A run with missing reports shows partial coverage.
 
+New runs save the revision-checked diff before dispatch. **Show in captured
+diff** opens a finding's cited line from that saved copy, even after the PR
+advances. Findings whose path, side, or line is absent from the changed rows
+appear under **Unverified citations** in the individual report. Earlier runs
+without a saved diff show that citation checks are unavailable.
+
+To verify a saved run independently, supply the PR URL and the full revision
+SHAs you expect it to have reviewed.
+
+```sh
+uv run --no-sync python scripts/verify_studio.py review-run \
+  --mode local --server http://127.0.0.1:6767 --run-id RUN_ID \
+  --pr https://github.com/YOUR_ORG/YOUR_REPO/pull/17 \
+  --base BASE_SHA --head HEAD_SHA --minimum-reviewers 2 --json
+```
+
+The receipt checks report coverage, the patch digest, changed-line citations,
+and the reviewer attribution of consolidated findings. It records observations
+from the saved run. Sandbox checks have separate execution receipts.
+
 For any workspace, open **Project settings → Repositories**, or open
 **Manage repositories** from the PR panel. The managers run on the connected
 macOS or Linux host. Choose a scan depth from 0 to 5 and click **Scan

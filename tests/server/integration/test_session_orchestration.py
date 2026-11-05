@@ -3158,6 +3158,9 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
     current_head = "b" * 40
     base_sha = "a" * 40
 
+    patch = "diff --git a/hello b/hello\n--- a/hello\n+++ b/hello\n@@ -1 +1 @@\n-before\n+after\n"
+    captured_patch = patch
+
     def answer_host(connection, payload):
         frame = decode_host_frame(payload)
         if isinstance(frame, HostStatFrame):
@@ -3188,7 +3191,7 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
                 assert frame.params["capture"] is True
                 result = {
                     "object": "session.github.pr_diff",
-                    "patch": "diff --git a/hello b/hello\n@@ -1 +1 @@\n-before\n+after\n",
+                    "patch": patch,
                     "base_sha": base_sha,
                     "head_sha": current_head,
                 }
@@ -3410,6 +3413,22 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
         }
 
         run_path = f"/v1/studio/review-runs/{run['id']}"
+        frozen = await auth_client.get(f"{run_path}/patch")
+        assert frozen.status_code == 200, frozen.text
+        assert frozen.json()["patch"] == captured_patch
+        assert frozen.json()["sha256"] == run["patch_sha256"]
+        cited = await auth_client.get(
+            f"{run_path}/patch", params={"path": "hello", "side": "head", "line": 1}
+        )
+        assert cited.json()["source_line"] == "after"
+        invalid_citation = await auth_client.get(
+            f"{run_path}/patch", params={"path": "hello", "side": "base", "line": 200}
+        )
+        assert invalid_citation.json()["source_line"] is None
+        forbidden_patch = await auth_client.get(
+            f"{run_path}/patch", headers={"X-Forwarded-Email": "bob"}
+        )
+        assert forbidden_patch.status_code == 404
         current_head = "c" * 40
         stale_run = await auth_client.post(f"{run_path}/start", json={})
         assert stale_run.status_code == 200, stale_run.text
@@ -3420,6 +3439,12 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
         )
         assert len(launches) == 1
         current_head = "b" * 40
+        patch = captured_patch.replace("+after", "+different")
+        drift = await auth_client.post(f"{run_path}/start", json={})
+        assert drift.status_code == 200, drift.text
+        assert len(drift.json()["errors"]) == len(members)
+        assert len(launches) == 1
+        patch = captured_patch
         started_run = await auth_client.post(f"{run_path}/start", json={})
         assert started_run.status_code == 200, started_run.text
         assert started_run.json()["errors"] == {}
@@ -3443,9 +3468,9 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
             "title": "Validate the input",
             "detail": "The new branch accepts invalid values.",
             "severity": "high",
-            "path": "src/service.py",
+            "path": "hello",
             "side": "head",
-            "line": 2,
+            "line": 1,
         }
 
         def save_assistant_message(member_id: str, text: str) -> None:
@@ -3472,7 +3497,7 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
                     "base_sha": base_sha,
                     "head_sha": current_head,
                     "summary": "Independent reviewer report",
-                    "findings": [finding],
+                    "findings": [finding, {**finding, "line": 200}],
                 }
             )
             save_assistant_message(member_id, "```studio-review-v1\n" + envelope + "\n```")
@@ -3480,6 +3505,18 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
         assert ready.status_code == 200, ready.text
         assert len(ready.json()["findings"]) == 1
         assert set(ready.json()["findings"][0]["review_ids"]) == members
+        assert all(
+            entry["report"]["citation_validation"] == "checked"
+            and entry["report"]["unverified_findings"][0]["line"] == 200
+            for entry in ready.json()["reviewers"]
+        )
+        review_store = StudioReviewStore(db_uri)
+        for member_id in members:
+            member = review_store.get(member_id, owner_user_id="alice")
+            assert member is not None
+            snapshot = review_store.get_report_snapshot(member)
+            assert snapshot is not None
+            assert set(json.loads(snapshot)) == {"state", "summary", "findings", "message_id"}
         save_assistant_message(next(iter(members)), "A later response from the reviewer.")
         assert (await auth_client.get(f"{run_path}/report")).json() == ready.json()
 

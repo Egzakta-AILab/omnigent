@@ -100,6 +100,8 @@ export interface ReviewReport {
   summary: string | null;
   findings: ReviewFinding[];
   message_id: string | null;
+  citation_validation?: "not_checked" | "checked" | "unavailable";
+  unverified_findings?: ReviewFinding[];
 }
 
 export interface ReviewSource {
@@ -135,6 +137,7 @@ export interface ReviewRun {
   target: ReviewPass["target"];
   reviewers: ReviewPass[];
   created_at: number;
+  patch_sha256?: string | null;
 }
 
 export interface ReviewRunPage {
@@ -182,6 +185,31 @@ export async function listProjectReviewRuns(
     throw new Error("Invalid review run history");
   }
   return page;
+}
+
+export async function getCapturedReviewDiff(
+  run: ReviewRun,
+  source: ReviewSource | null,
+  signal: AbortSignal,
+) {
+  const query = source
+    ? `?${new URLSearchParams({ path: source.path, side: source.side, line: String(source.line) })}`
+    : "";
+  const evidence = await reviewRequest<{
+    base_sha: string;
+    head_sha: string;
+    sha256: string;
+    patch: string;
+    source_line?: string | null;
+  }>(`${reviewRunPath(run.id)}/patch${query}`, { signal });
+  if (
+    evidence.base_sha !== run.target.base_sha ||
+    evidence.head_sha !== run.target.head_sha ||
+    evidence.sha256 !== run.patch_sha256
+  ) {
+    throw new Error("The saved diff does not match this review run.");
+  }
+  return evidence;
 }
 
 export function getReviewRunReport(runId: string, signal: AbortSignal) {

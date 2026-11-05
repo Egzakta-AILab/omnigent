@@ -18,6 +18,7 @@ from omnigent.db.db_models import (
     SqlStudioReviewEvent,
     SqlStudioReviewOperation,
     SqlStudioReviewPass,
+    SqlStudioReviewPatchChunk,
     SqlStudioReviewRun,
     current_workspace_id,
 )
@@ -25,6 +26,12 @@ from omnigent.db.utils import (
     get_or_create_engine,
     make_named_managed_session_maker,
     run_write_transaction,
+)
+from omnigent.studio.reviews.evidence import (
+    MAX_PATCH_CHUNKS,
+    MAX_REVIEW_PATCH_BYTES,
+    PATCH_CHUNK_BYTES,
+    patch_digest,
 )
 from omnigent.studio.reviews.models import (
     MAX_RUN_REVIEWERS,
@@ -353,6 +360,7 @@ class StudioReviewStore:
                 target=ReviewTarget.model_validate_json(row.target_json),
                 reviewers=by_run[row.id],
                 created_at=row.created_at,
+                patch_sha256=row.patch_sha256,
             )
             for row in rows
         ]
@@ -389,6 +397,7 @@ class StudioReviewStore:
         request_hash: str,
         target: ReviewTarget,
         profiles: list[ReviewProfile],
+        patch: str,
     ) -> ReviewRun:
         """Persist the complete roster and its capture receipts in one transaction."""
         project_id = target.source_project_id
@@ -397,6 +406,10 @@ class StudioReviewStore:
         owner = _owner_scope(owner_user_id)
         key = hashlib.sha256(idempotency_key.encode()).digest()
         digest = _request_values(idempotency_key, request_hash)
+        patch_bytes = patch.encode("utf-8")
+        if not 1 <= len(patch_bytes) <= MAX_REVIEW_PATCH_BYTES:
+            raise ValueError("Review run diff exceeds the patch byte budget")
+        patch_sha256 = patch_digest(patch)
 
         def write(session: Session) -> ReviewRun:
             existing = self._run_request(session, owner, key, digest)
@@ -414,8 +427,22 @@ class StudioReviewStore:
                     request_key=key,
                     request_hash=digest,
                     target_json=_snapshot(target),
+                    patch_sha256=patch_sha256,
                     created_at=now,
                 )
+            )
+            session.add_all(
+                [
+                    SqlStudioReviewPatchChunk(
+                        workspace_id=current_workspace_id(),
+                        run_id=run_id,
+                        position=position,
+                        payload=patch_bytes[offset : offset + PATCH_CHUNK_BYTES],
+                    )
+                    for position, offset in enumerate(
+                        range(0, len(patch_bytes), PATCH_CHUNK_BYTES)
+                    )
+                ]
             )
             members = [
                 self._insert_capture(
@@ -435,6 +462,7 @@ class StudioReviewStore:
                 target=target,
                 reviewers=sorted(members, key=lambda member: member.id),
                 created_at=now,
+                patch_sha256=patch_sha256,
             )
 
         try:
@@ -457,6 +485,45 @@ class StudioReviewStore:
                 )
             )
             return self._materialize_runs(session, [row], owner)[0] if row else None
+
+    def get_run_patch(self, run_id: str, *, owner_user_id: str | None) -> str | None:
+        run_id = require_uuid(run_id)
+        with self._session("get_owned_review_run_patch") as session:
+            run = session.execute(
+                select(SqlStudioReviewRun.patch_sha256).where(
+                    SqlStudioReviewRun.workspace_id == current_workspace_id(),
+                    SqlStudioReviewRun.owner_scope == _owner_scope(owner_user_id),
+                    SqlStudioReviewRun.id == run_id,
+                )
+            ).one_or_none()
+            if run is None:
+                raise ReviewNotFoundError("Review run not found")
+            digest = run[0]
+            if digest is None:
+                return None
+            chunks = list(
+                session.scalars(
+                    select(SqlStudioReviewPatchChunk)
+                    .where(
+                        SqlStudioReviewPatchChunk.workspace_id == current_workspace_id(),
+                        SqlStudioReviewPatchChunk.run_id == run_id,
+                    )
+                    .order_by(SqlStudioReviewPatchChunk.position)
+                    .limit(MAX_PATCH_CHUNKS + 1)
+                )
+            )
+        if not 1 <= len(chunks) <= MAX_PATCH_CHUNKS or any(
+            chunk.position != position or not 1 <= len(chunk.payload) <= PATCH_CHUNK_BYTES
+            for position, chunk in enumerate(chunks)
+        ):
+            raise ReviewConflictError("The captured review diff failed its integrity check")
+        try:
+            patch = b"".join(chunk.payload for chunk in chunks).decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ReviewConflictError("The captured review diff is not valid UTF-8 text") from exc
+        if patch_digest(patch) != digest:
+            raise ReviewConflictError("The captured review diff failed its integrity check")
+        return patch
 
     def list_runs(
         self,

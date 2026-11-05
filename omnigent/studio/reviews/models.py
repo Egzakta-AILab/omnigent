@@ -200,6 +200,7 @@ class ReviewRun(FrozenModel):
     target: ReviewTarget
     reviewers: list[ReviewPass]
     created_at: int
+    patch_sha256: str | None = None
 
 
 class ReviewRunPage(FrozenModel):

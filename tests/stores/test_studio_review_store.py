@@ -452,11 +452,13 @@ def test_actual_keyset_query_uses_owner_session_index(
 def test_project_run_captures_roster_atomically_and_replays(store: StudioReviewStore) -> None:
     project = uuid.uuid4().hex
     target = _target(source_session_id=None, source_project_id=project, repository_path=".")
+    patch = "x" * (12 * 1024 - 1) + "é"
     options = {
         "owner_user_id": OWNER,
         "idempotency_key": "run",
         "request_hash": "a" * 64,
         "target": target,
+        "patch": patch,
         "profiles": [_profile(skill="backend"), _profile(skill="security")],
     }
     run = store.capture_run(**options)
@@ -465,6 +467,9 @@ def test_project_run_captures_roster_atomically_and_replays(store: StudioReviewS
     assert all(review.run_id == run.id and review.target == target for review in run.reviewers)
     assert all(review.reviewer_session_id is None for review in run.reviewers)
     assert store.get_run(run.id, owner_user_id=OTHER) is None
+    assert store.get_run_patch(run.id, owner_user_id=OWNER) == patch
+    with pytest.raises(ReviewNotFoundError):
+        store.get_run_patch(run.id, owner_user_id=OTHER)
     assert store.list_runs(
         project_id=project, owner_user_id=OWNER, pr_url=target.pr_url, limit=10
     ).entries == [run]
@@ -504,6 +509,7 @@ def test_project_run_rolls_back_all_captures_on_invalid_snapshot(store: StudioRe
             request_hash="a" * 64,
             target=target,
             profiles=[_profile(), oversized],
+            patch="test patch",
         )
     assert (
         store.list_runs(

@@ -46,6 +46,7 @@ from omnigent.stores.studio_review_store import (
     ReviewNotFoundError,
     StudioReviewStore,
 )
+from omnigent.studio.reviews.evidence import Anchor, Side, changed_anchors, changed_lines
 from omnigent.studio.reviews.launch import SKILL_NAME, review_prompt, run_review, verified_patch
 from omnigent.studio.reviews.models import (
     CaptureResult,
@@ -57,12 +58,14 @@ from omnigent.studio.reviews.models import (
     ReviewRun,
     ReviewRunPage,
     ReviewTarget,
+    Sha,
 )
 from omnigent.studio.reviews.report import (
     ConsolidatedReviewReport,
     ReviewerRunReport,
     ReviewReport,
     consolidate_reports,
+    qualify_citations,
     read_review_report,
     report_instructions,
 )
@@ -101,6 +104,14 @@ class ReviewListResponse(BaseModel):
 class StartReviewRunResponse(BaseModel):
     run: ReviewRun
     errors: dict[str, str]
+
+
+class ReviewRunDiffResponse(BaseModel):
+    base_sha: Sha
+    head_sha: Sha
+    sha256: str
+    patch: str
+    source_line: str | None = None
 
 
 class ReviewEventsResponse(BaseModel):
@@ -156,6 +167,25 @@ async def _read_project_review_resource(
         raise HTTPException(503, "The review host could not read this pull request") from exc
     except HostFsUnavailableError as exc:
         raise HTTPException(503, "The review host could not read this pull request") from exc
+
+
+async def _capture_project_patch(workspace: ProjectWorkspace, target: ReviewTarget) -> str:
+    payload = await _read_project_review_resource(
+        workspace,
+        "studio_project_pull_request_patch",
+        {
+            "repository": target.repository_path,
+            "pr_url": target.pr_url,
+            "base_sha": target.base_sha,
+            "head_sha": target.head_sha,
+            "capture": True,
+            "require_active": True,
+        },
+    )
+    try:
+        return verified_patch(payload, target)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from None
 
 
 async def _capture_project_target(
@@ -557,6 +587,18 @@ def create_studio_reviews_router(
         await require_owned_project(project_store, run.target.source_project_id, user_id)
         return run
 
+    async def saved_run_patch(run_id: str, owner: str | None) -> str | None:
+        try:
+            return await asyncio.to_thread(review_store.get_run_patch, run_id, owner_user_id=owner)
+        except ReviewNotFoundError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ReviewConflictError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    async def run_anchors(run_id: str, owner: str | None) -> frozenset[Anchor] | None:
+        patch = await saved_run_patch(run_id, owner)
+        return changed_anchors(patch) if patch is not None else None
+
     @router.post(
         "/projects/{project_id}/studio/review-runs",
         response_model=ReviewRun,
@@ -598,6 +640,11 @@ def create_studio_reviews_router(
                 raise HTTPException(
                     409, "PR revision changed; refresh the PR before capturing a run"
                 )
+            patch = await _capture_project_patch(workspace, target)
+            try:
+                changed_anchors(patch)
+            except ValueError as exc:
+                raise HTTPException(409, "The review diff contains a malformed text hunk") from exc
             profiles = []
             for member in body.reviewers:
                 profile = await resolve_profile(user_id, member)
@@ -612,6 +659,7 @@ def create_studio_reviews_router(
                 request_hash=digest,
                 target=target,
                 profiles=profiles,
+                patch=patch,
             )
         except ReviewConflictError as exc:
             raise HTTPException(409, str(exc)) from exc
@@ -651,6 +699,37 @@ def create_studio_reviews_router(
     ) -> ReviewRun:
         response.headers["Cache-Control"] = "no-store"
         return await owned_run(request, run_id)
+
+    @router.get("/studio/review-runs/{run_id}/patch", response_model=ReviewRunDiffResponse)
+    async def get_review_run_patch(
+        request: Request,
+        response: Response,
+        run_id: str,
+        path: Annotated[str, Query(min_length=1, max_length=1024)] | None = None,
+        side: Side | None = None,
+        line: Annotated[int, Query(ge=1, le=2**31 - 1)] | None = None,
+    ) -> ReviewRunDiffResponse:
+        run = await owned_run(request, run_id)
+        patch = await saved_run_patch(run.id, require_user(request, auth_provider))
+        if patch is None or run.patch_sha256 is None:
+            raise HTTPException(404, "This review run has no captured diff")
+        if any(value is not None for value in (path, side, line)) and any(
+            value is None for value in (path, side, line)
+        ):
+            raise HTTPException(422, "A citation needs a path, side and line")
+        source_line = (
+            changed_lines(patch).get((path, side, line))
+            if path is not None and side is not None and line is not None
+            else None
+        )
+        response.headers["Cache-Control"] = "no-store"
+        return ReviewRunDiffResponse(
+            base_sha=run.target.base_sha,
+            head_sha=run.target.head_sha,
+            sha256=run.patch_sha256,
+            patch=patch,
+            source_line=source_line,
+        )
 
     async def review_history(
         user_id: str | None,
@@ -819,22 +898,13 @@ def create_studio_reviews_router(
                     )
                 role_instructions = selected_role.instructions
             if workspace is not None:
-                payload = await _read_project_review_resource(
-                    workspace,
-                    "studio_project_pull_request_patch",
-                    {
-                        "repository": target.repository_path,
-                        "pr_url": target.pr_url,
-                        "base_sha": target.base_sha,
-                        "head_sha": target.head_sha,
-                        "capture": True,
-                        "require_active": True,
-                    },
-                )
-                try:
-                    patch = verified_patch(payload, target)
-                except ValueError as exc:
-                    raise HTTPException(409, str(exc)) from None
+                patch = await _capture_project_patch(workspace, target)
+                if review.run_id is not None:
+                    captured_patch = await saved_run_patch(review.run_id, owner)
+                    if captured_patch is not None and captured_patch != patch:
+                        raise HTTPException(
+                            409, "The pull request diff differs from the saved review run"
+                        )
             else:
                 assert read_patch is not None
                 patch = await read_patch(request, target)
@@ -940,7 +1010,9 @@ def create_studio_reviews_router(
             errors=dict(outcome for outcome in outcomes if outcome is not None),
         )
 
-    async def verified_report(review: ReviewPass) -> ReviewReport:
+    async def verified_report(
+        review: ReviewPass, anchors: frozenset[Anchor] | None
+    ) -> ReviewReport:
         if review.reviewer_session_id is not None:
             conv = await asyncio.to_thread(
                 conversation_store.get_conversation, review.reviewer_session_id
@@ -963,13 +1035,15 @@ def create_studio_reviews_router(
         if review.run_id is not None:
             snapshot = await asyncio.to_thread(review_store.get_report_snapshot, review)
             if snapshot is not None:
-                return ReviewReport.model_validate_json(snapshot)
+                return qualify_citations(ReviewReport.model_validate_json(snapshot), anchors)
         report = await asyncio.to_thread(read_review_report, conversation_store, review)
         if review.run_id is not None and report.state == "ready":
             snapshot = await asyncio.to_thread(
-                review_store.save_report_snapshot, review, report.model_dump_json()
+                review_store.save_report_snapshot,
+                review,
+                report.model_dump_json(exclude={"citation_validation", "unverified_findings"}),
             )
-            return ReviewReport.model_validate_json(snapshot)
+            return qualify_citations(ReviewReport.model_validate_json(snapshot), anchors)
         return report
 
     @router.get("/studio/reviews/{review_id}/report", response_model=ReviewReport)
@@ -978,7 +1052,12 @@ def create_studio_reviews_router(
     ) -> ReviewReport:
         review = await owned_review(request, review_id)
         response.headers["Cache-Control"] = "no-store"
-        return await verified_report(review)
+        anchors = (
+            await run_anchors(review.run_id, review.owner_user_id)
+            if review.run_id is not None
+            else None
+        )
+        return await verified_report(review, anchors)
 
     @router.get("/studio/review-runs/{run_id}/report", response_model=ConsolidatedReviewReport)
     async def get_review_run_report(
@@ -986,10 +1065,11 @@ def create_studio_reviews_router(
     ) -> ConsolidatedReviewReport:
         run = await owned_run(request, run_id)
         response.headers["Cache-Control"] = "no-store"
+        anchors = await run_anchors(run.id, require_user(request, auth_provider))
 
         async def read_member(review: ReviewPass) -> ReviewerRunReport:
             try:
-                report = await verified_report(review)
+                report = await verified_report(review, anchors)
             except HTTPException as exc:
                 if exc.status_code not in (403, 404, 409):
                     raise

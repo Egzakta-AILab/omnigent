@@ -4,6 +4,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Link } from "@/lib/routing";
 import {
+  getCapturedReviewDiff,
   getReviewRunReport,
   listProjectReviewRuns,
   startReview,
@@ -13,7 +14,14 @@ import {
   type ReviewRunReport,
   type ReviewSource,
 } from "./api";
-import { FindingCard, reviewSettingsLabel, uniqueReviewFindings } from "./ReviewResult";
+import {
+  FindingCard,
+  reviewSettingsLabel,
+  uniqueReviewFindings,
+  UnverifiedFindings,
+} from "./ReviewResult";
+
+import { ReviewDiff } from "./ReviewDiff";
 
 type Revision = Pick<ReviewSource, "prUrl" | "baseSha" | "headSha">;
 
@@ -64,6 +72,7 @@ export function ReviewRunsPanel({
 }) {
   const queryClient = useQueryClient();
   const [selectedMember, setSelectedMember] = useState("");
+  const [captured, setCaptured] = useState<{ runId: string; source: ReviewSource | null }>();
   const key = reviewRunsKey(viewerId, projectId, revision.prUrl);
   const runs = useInfiniteQuery({
     queryKey: key,
@@ -83,6 +92,20 @@ export function ReviewRunsPanel({
   });
   const entries = (runs.data?.pages ?? []).flatMap((page) => page.entries);
   const run = entries.find((entry) => entry.id === selectedRunId) ?? entries[0];
+  const capturedOpen = !!run?.patch_sha256 && captured?.runId === run.id && !runs.isRefetchError;
+  const capturedSource = capturedOpen ? (captured?.source ?? null) : null;
+  const savedDiff = useQuery({
+    queryKey: ["studio-review-run-patch", viewerId, run?.id, run?.patch_sha256, capturedSource],
+    queryFn: ({ signal }) => getCapturedReviewDiff(run!, capturedSource, signal),
+    enabled: capturedOpen,
+    retry: false,
+    placeholderData: (old, query) =>
+      query?.queryKey[1] === viewerId &&
+      query?.queryKey[2] === run?.id &&
+      query?.queryKey[3] === run?.patch_sha256
+        ? old
+        : undefined,
+  });
   const report = useQuery({
     queryKey: ["studio-review-run-report", viewerId, run?.id],
     queryFn: ({ signal }) => getReviewRunReport(run!.id, signal),
@@ -126,6 +149,14 @@ export function ReviewRunsPanel({
   const memberReport = report.data?.reviewers.find(
     (entry) => entry.review_id === member?.id,
   )?.report;
+  const unverifiedCount =
+    report.data?.reviewers.reduce(
+      (total, entry) => total + (entry.report.unverified_findings?.length ?? 0),
+      0,
+    ) ?? 0;
+  const openCapturedSource = run.patch_sha256
+    ? (source: ReviewSource) => setCaptured({ runId: run.id, source })
+    : undefined;
   const canStart =
     current && run.reviewers.some((entry) => entry.dispatch_status === "not_requested");
   const errors =
@@ -151,6 +182,7 @@ export function ReviewRunsPanel({
           onChange={(event) => {
             onSelectRun(event.target.value);
             setSelectedMember("");
+            setCaptured(undefined);
             start.reset();
           }}
         >
@@ -217,6 +249,35 @@ export function ReviewRunsPanel({
           Refresh run
         </Button>
       </div>
+      {run.patch_sha256 && (
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => setCaptured(capturedOpen ? undefined : { runId: run.id, source: null })}
+        >
+          {capturedOpen ? "Close captured diff" : "Open captured diff"}
+        </Button>
+      )}
+      {capturedOpen && (
+        <section aria-label="Captured diff" className="space-y-2 rounded-md border p-2">
+          <h4 className="font-medium">Captured diff</h4>
+          <p className="break-all font-mono text-xs text-muted-foreground">
+            SHA-256 {run.patch_sha256}
+          </p>
+          {savedDiff.isPending && <p role="status">Loading captured diff…</p>}
+          {savedDiff.error && <p role="alert">{savedDiff.error.message}</p>}
+          {savedDiff.data !== undefined && !savedDiff.isError && (
+            <ReviewDiff
+              key={run.id}
+              patch={savedDiff.data.patch}
+              truncated={false}
+              source={capturedSource}
+              sourceLine={savedDiff.isPlaceholderData ? null : savedDiff.data.source_line}
+              onClearSource={() => setCaptured({ runId: run.id, source: null })}
+            />
+          )}
+        </section>
+      )}
       {start.error && (
         <p role="alert" className="text-destructive">
           {start.error.message}
@@ -277,11 +338,13 @@ export function ReviewRunsPanel({
                       finding={finding}
                       review={member}
                       current={current}
-                      onOpenSource={onOpenSource}
+                      onOpenSource={run.patch_sha256 ? undefined : onOpenSource}
+                      onOpenCapturedSource={openCapturedSource}
                     />
                   ),
                 )}
               </ol>
+              <UnverifiedFindings findings={memberReport?.unverified_findings} review={member} />
             </>
           ) : (
             <>
@@ -290,7 +353,18 @@ export function ReviewRunsPanel({
                   Partial coverage. Only available reports are included.
                 </p>
               )}
-              {report.data.findings.length === 0 && ready > 0 && (
+              {ready > 0 && !run.patch_sha256 && (
+                <p className="text-muted-foreground">
+                  This run has no saved diff for citation checks.
+                </p>
+              )}
+              {unverifiedCount > 0 && (
+                <p className="text-muted-foreground">
+                  {unverifiedCount} unverified {unverifiedCount === 1 ? "citation" : "citations"}.
+                  Open the individual reports to inspect them.
+                </p>
+              )}
+              {report.data.findings.length === 0 && ready > 0 && unverifiedCount === 0 && (
                 <p className="text-muted-foreground">The available reports contain no findings.</p>
               )}
               <ol className="space-y-3">
@@ -304,7 +378,8 @@ export function ReviewRunsPanel({
                           finding={finding}
                           review={origin}
                           current={current}
-                          onOpenSource={onOpenSource}
+                          onOpenSource={run.patch_sha256 ? undefined : onOpenSource}
+                          onOpenCapturedSource={openCapturedSource}
                         />
                       </ol>
                       <div className="flex flex-wrap items-center gap-1 text-xs text-muted-foreground">

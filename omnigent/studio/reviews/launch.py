@@ -15,9 +15,9 @@ from omnigent.stores.studio_review_store import (
     ReviewTransitionError,
     StudioReviewStore,
 )
+from omnigent.studio.reviews.evidence import MAX_REVIEW_PATCH_BYTES as MAX_REVIEW_PATCH_BYTES
 from omnigent.studio.reviews.models import ReviewPass, ReviewTarget
 
-MAX_REVIEW_PATCH_BYTES = 48 * 1024
 _MAX_PROMPT_BYTES = 72 * 1024
 SKILL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
 _logger = logging.getLogger(__name__)
