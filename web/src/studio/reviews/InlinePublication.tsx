@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
+import { triggerBrowserDownload } from "@/hooks/useFileContent";
 import {
   confirmInlinePublication,
   previewInlinePublication,
@@ -150,6 +151,19 @@ export function InlinePublication({
               {confirm.isPending
                 ? "Publishing…"
                 : `Publish ${snapshot.drafts.length} inline ${snapshot.drafts.length === 1 ? "comment" : "comments"}`}
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={pending}
+              onClick={() =>
+                triggerBrowserDownload(
+                  new Blob([JSON.stringify(snapshot, null, 2)], { type: "application/json" }),
+                  `publication-preview-${snapshot.digest.slice(0, 8)}.json`,
+                )
+              }
+            >
+              Download preview
             </Button>
             <Button
               size="sm"

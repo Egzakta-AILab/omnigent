@@ -149,7 +149,7 @@ _T = TypeVar("_T")
 _HASH = re.compile(r"^[0-9a-f]{64}$")
 _MAX_SNAPSHOT_BYTES = 12_000
 _MAX_RECEIPTS_PER_RUN = 24
-_MAX_RECEIPTS_PER_FINDING = 4
+_MAX_RECEIPTS_PER_FINDING = 8
 _MAX_ARTIFACTS_PER_RUN = 12
 _MAX_ARTIFACTS_PER_FINDING = 6
 _MAX_DISCUSSION_COMMENTS = 200
@@ -1663,6 +1663,7 @@ class StudioReviewStore:
                 answer=answer.answer if answer else None,
                 citations=answer.citations if answer else None,
                 action=snapshot.execution.action,
+                proof_digest=snapshot.proof_digest,
                 proposed_patch=answer.proposed_patch if answer else None,
                 proposed_check=check,
                 proposed_check_digest=proposal_digest(check) if check is not None else None,
@@ -1872,6 +1873,7 @@ class StudioReviewStore:
                             question=question.body,
                             answer=question.answer,
                             citations=question.citations,
+                            proof_digest=question.proof_digest,
                             harness=question.harness,
                             requested_by=row.actor_user_id,
                             published_at=question.published_at,

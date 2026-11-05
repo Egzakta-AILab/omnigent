@@ -2253,8 +2253,25 @@ def create_studio_reviews_router(
         if patch is None:
             raise HTTPException(404, "This review has no captured diff")
         finding = await validate_discussion_anchor(access.run, body.anchor, patch)
+        proof = None
+        if body.proof_digest is not None and isinstance(body.anchor, FindingDiscussionAnchor):
+            try:
+                proofs = await asyncio.to_thread(
+                    review_store.list_reproductions,
+                    access.run.id,
+                    body.anchor.finding_key,
+                    owner_user_id=access.owner,
+                    actor=access.actor,
+                )
+            except ReviewNotFoundError as exc:
+                raise HTTPException(404, "Check receipt not found on this finding") from exc
+            except ReviewConflictError as exc:
+                raise HTTPException(409, str(exc)) from exc
+            proof = next((entry for entry in proofs if entry.digest == body.proof_digest), None)
+            if proof is None:
+                raise HTTPException(404, "Check receipt not found on this finding")
         try:
-            prompt = question_prompt(body, access.run.target, patch, finding)
+            prompt = question_prompt(body, access.run.target, patch, finding, proof)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
         execution = await question_execution(request, access, body)
@@ -2264,6 +2281,7 @@ def create_studio_reviews_router(
             execution=execution,
             prompt_digest=hashlib.sha256(prompt.rstrip().encode()).hexdigest(),
             requires_citations=True,
+            proof_digest=body.proof_digest,
         )
         try:
             record, created = await asyncio.to_thread(

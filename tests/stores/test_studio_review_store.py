@@ -6,6 +6,7 @@ import hashlib
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
 
 import pytest
 import sqlalchemy as sa
@@ -26,6 +27,11 @@ from omnigent.studio.reviews.models import (
     ReviewPlan,
     ReviewProfile,
     ReviewTarget,
+)
+from omnigent.studio.reviews.reproduction import (
+    ReproductionReceipt,
+    ReproductionSide,
+    ReproductionSource,
 )
 
 OWNER = "owner@example.test"
@@ -645,6 +651,58 @@ def test_project_run_captures_roster_atomically_and_replays(store: StudioReviewS
     )
     assert {first_page.entries[0].id, second_page.entries[0].id} == {run.id, newer.id}
     assert second_page.next_cursor is None
+
+
+def test_finding_retains_receipts_across_multiple_fix_attempts(store: StudioReviewStore) -> None:
+    target = _target(
+        source_session_id=None, source_project_id=uuid.uuid4().hex, repository_path="."
+    )
+    patch = "diff --git a/file b/file\n"
+    run = store.capture_run(
+        owner_user_id=OWNER,
+        idempotency_key="run",
+        request_hash="a" * 64,
+        target=target,
+        patch=patch,
+        profiles=[_profile()],
+    )
+    finding = "c" * 64
+    base = ReproductionSide(
+        commit=target.base_sha,
+        archive_sha256="d" * 64,
+        archive_bytes=1,
+        state="exited",
+        exit_code=0,
+        elapsed_ms=1,
+        output="",
+        output_sha256=hashlib.sha256(b"").hexdigest(),
+        output_bytes=0,
+        output_truncated=False,
+    )
+    receipt = ReproductionReceipt(
+        observed_at=datetime(2026, 1, 1, tzinfo=UTC),
+        image_id="sha256:" + "e" * 64,
+        command=("check",),
+        timeout_seconds=60,
+        source=ReproductionSource(
+            run_id=run.id,
+            pr_url=target.pr_url,
+            patch_sha256=hashlib.sha256(patch.encode()).hexdigest(),
+            base_sha=target.base_sha,
+            head_sha=target.head_sha,
+        ),
+        base=base,
+        head=base.model_copy(update={"commit": target.head_sha}),
+    )
+    checks = [receipt.model_copy(update={"command": ("check", str(index))}) for index in range(8)]
+    saved = [
+        store.attach_reproduction(run.id, finding, check, owner_user_id=OWNER) for check in checks
+    ]
+    assert store.attach_reproduction(run.id, finding, checks[0], owner_user_id=OWNER) == saved[0]
+    with pytest.raises(ReviewConflictError, match="reproduction receipt limit"):
+        store.attach_reproduction(run.id, finding, receipt, owner_user_id=OWNER)
+    listed = store.list_reproductions(run.id, finding, owner_user_id=OWNER, actor=OWNER)
+    assert {entry.digest: entry for entry in listed} == {entry.digest: entry for entry in saved}
 
 
 def test_project_run_rolls_back_all_captures_on_invalid_snapshot(store: StudioReviewStore) -> None:

@@ -433,6 +433,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     run.add_argument("--minimum-reviewers", type=int, default=1)
     run.add_argument("--output", type=Path, help="write a JSON receipt")
     run.add_argument("--json", action="store_true", help="print the JSON receipt")
+    lifecycle = commands.add_parser("lifecycle", help="verify a saved proof and candidate lineage")
+    lifecycle.add_argument("--mode", choices=("local", "server"), required=True)
+    lifecycle.add_argument("--server", required=True, help="explicit trusted instance URL")
+    lifecycle.add_argument("--pr", required=True, help="expected pull request URL")
+    lifecycle.add_argument("--run-id", required=True)
+    lifecycle.add_argument("--finding", required=True, help="saved finding key")
+    lifecycle.add_argument("--question", required=True, help="saved proof-backed question ID")
+    lifecycle.add_argument("--candidate", required=True, help="saved candidate review run ID")
+    lifecycle.add_argument("--output", type=Path, help="write a JSON receipt")
+    lifecycle.add_argument("--json", action="store_true", help="print the JSON receipt")
+    publication = commands.add_parser(
+        "publication", help="read back a previously confirmed GitHub inline comment"
+    )
+    publication.add_argument("--mode", choices=("local", "server"), required=True)
+    publication.add_argument("--server", required=True, help="explicit trusted instance URL")
+    publication.add_argument("--preview", type=Path, required=True, help="retained preview JSON")
+    publication.add_argument("--draft", required=True, help="one selected draft ID")
+    publication.add_argument("--author", required=True, help="expected GitHub login")
+    publication.add_argument("--output", type=Path, help="write a JSON receipt")
+    publication.add_argument("--json", action="store_true", help="print the JSON receipt")
     reproduction = commands.add_parser("reproduce", help="compare two Git revisions in Docker")
     reproduction.add_argument("--repository", type=Path, required=True)
     reproduction.add_argument("--base", help="full base commit ID")
@@ -619,7 +639,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         from omnigent.studio.contracts import main as contracts_main
 
         return contracts_main(output=args.output, json_output=args.json)
-    if args.command in ("review", "review-run"):
+    if args.command in ("review", "review-run", "lifecycle", "publication"):
         try:
             if args.command == "review":
                 from omnigent.studio.verify_review import collect_review
@@ -632,7 +652,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     pr_url=args.pr,
                 )
                 ready_key, label = "review_ready", "Saved review"
-            else:
+            elif args.command == "review-run":
                 from omnigent.studio.verify_review_run import collect_review_run
 
                 receipt = collect_review_run(
@@ -645,6 +665,39 @@ def main(argv: Sequence[str] | None = None) -> int:
                     minimum_reviewers=args.minimum_reviewers,
                 )
                 ready_key, label = "run_ready", "Saved review run"
+            elif args.command == "lifecycle":
+                from omnigent.studio.verify_lifecycle import collect_lifecycle
+
+                receipt = collect_lifecycle(
+                    mode=args.mode,
+                    server_url=args.server,
+                    run_id=args.run_id,
+                    pr_url=args.pr,
+                    finding_key=args.finding,
+                    question_id=args.question,
+                    candidate_id=args.candidate,
+                )
+                ready_key, label = "lifecycle_ready", "Saved review lifecycle"
+            else:
+                from omnigent.studio.reviews.discussion import InlinePublicationPreview
+                from omnigent.studio.verify_publication import collect_publication
+
+                try:
+                    with args.preview.open("rb") as file:
+                        raw_preview = file.read(128 * 1024 + 1)
+                    if len(raw_preview) > 128 * 1024:
+                        raise ValueError
+                    preview = InlinePublicationPreview.model_validate_json(raw_preview)
+                except (OSError, ValueError):
+                    parser.error("Provide a valid retained publication preview JSON file")
+                receipt = collect_publication(
+                    mode=args.mode,
+                    server_url=args.server,
+                    preview=preview,
+                    draft_id=args.draft,
+                    author=args.author,
+                )
+                ready_key, label = "publication_ready", "GitHub publication"
         except ValueError as exc:
             parser.error(str(exc))
         serialized = json.dumps(receipt, indent=2) + "\n"

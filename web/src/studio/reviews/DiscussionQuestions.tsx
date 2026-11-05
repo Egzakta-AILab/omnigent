@@ -11,7 +11,9 @@ import { Link } from "@/lib/routing";
 import { CheckProposal } from "./CheckProposal";
 import {
   askReviewQuestion,
+  findingReproductionsKey,
   getReviewQuestion,
+  listFindingReproductions,
   REVIEW_HARNESS_LABELS,
   shareReviewAnswer,
   type AskReviewQuestion,
@@ -103,6 +105,11 @@ function QuestionCard({
         {REVIEW_HARNESS_LABELS[question.harness]}
       </p>
       <p className="whitespace-pre-wrap break-words">{question.body}</p>
+      {question.proof_digest && (
+        <p className="text-xs text-muted-foreground">
+          Check receipt · {question.proof_digest.slice(0, 8)}
+        </p>
+      )}
       {question.answer ? (
         <>
           <p className="whitespace-pre-wrap break-words rounded-md bg-muted/60 p-2">
@@ -195,17 +202,27 @@ function QuestionCard({
 function AskForm({
   discussion,
   anchor,
+  viewerId,
   action,
   attempt,
   refresh,
 }: {
   discussion: ReviewDiscussion;
   anchor: DiscussionAnchor;
+  viewerId: string | null;
   action: QuestionAction;
   attempt: RefObject<QuestionAttempt | undefined>;
   refresh: () => Promise<void>;
 }) {
   const [selection, setSelection] = useState("");
+  const [proofDigest, setProofDigest] = useState("");
+  const findingKey = anchor.kind === "finding" ? anchor.finding_key : "";
+  const proofs = useQuery({
+    queryKey: findingReproductionsKey(viewerId, discussion.id, findingKey),
+    queryFn: ({ signal }) => listFindingReproductions(discussion.id, findingKey, signal),
+    enabled: !!findingKey,
+    retry: false,
+  });
   const isProposal = action !== "question";
   const [body, setBody] = useState(
     action === "propose_check"
@@ -272,6 +289,7 @@ function AskForm({
           anchor,
           body: body.trim(),
           ...(isProposal ? { action } : {}),
+          ...(proofDigest ? { proof_digest: proofDigest } : {}),
           ...(reviewerKey
             ? { reviewer_key: reviewerKey }
             : {
@@ -293,6 +311,25 @@ function AskForm({
             ? "The agent drafts a patch from the captured diff in a private session using its native permissions. Review the patch before running a fix check."
             : "The agent receives the captured diff in a private session on the selected host, using its native permissions. Read its answer before sharing it."}
       </p>
+      {!!proofs.data?.length && (
+        <label className="grid gap-1">
+          <span>Include check receipt</span>
+          <select
+            className="w-full rounded-md border bg-background p-1"
+            value={proofDigest}
+            disabled={ask.isPending}
+            onChange={(event) => setProofDigest(event.target.value)}
+          >
+            <option value="">None</option>
+            {proofs.data.map(({ digest, receipt }) => (
+              <option key={digest} value={digest}>
+                {"base" in receipt ? "Reproduction" : "Fix comparison"} ·{" "}
+                {new Date(receipt.observed_at).toLocaleString()} · {digest.slice(0, 8)}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
       <label className="grid gap-1">
         <span>Answer with</span>
         <select
@@ -476,6 +513,11 @@ export function DiscussionQuestions({
             {REVIEW_HARNESS_LABELS[item.harness]} answer · Shared by {item.requested_by ?? "Local"}
           </p>
           <p className="whitespace-pre-wrap break-words text-muted-foreground">{item.question}</p>
+          {item.proof_digest && (
+            <p className="text-xs text-muted-foreground">
+              Check receipt · {item.proof_digest.slice(0, 8)}
+            </p>
+          )}
           <p className="whitespace-pre-wrap break-words">{item.answer}</p>
           <AnswerCitations citations={item.citations} />
         </article>
@@ -530,6 +572,7 @@ export function DiscussionQuestions({
               action={open}
               discussion={discussion}
               anchor={anchor}
+              viewerId={viewerId}
               attempt={attempt}
               refresh={refresh}
             />
