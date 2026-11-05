@@ -1676,6 +1676,25 @@ class SqlStudioReviewComment(OmnigentBase):
     created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
 
+class SqlStudioReviewQuestion(OmnigentBase):
+    """Single-dispatch agent question and its explicitly shared answer."""
+
+    __tablename__ = "studio_review_questions"
+    workspace_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    run_id: Mapped[str] = mapped_column(Uuid16, primary_key=True)
+    id: Mapped[str] = mapped_column(Uuid16, primary_key=True)
+    actor_scope: Mapped[bytes] = mapped_column(_CKSUM32, nullable=False)
+    actor_user_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    actor_generation: Mapped[str | None] = mapped_column(Uuid16, nullable=True)
+    intent_hash: Mapped[bytes] = mapped_column(_CKSUM32, nullable=False)
+    input_json: Mapped[str] = mapped_column(CompressedText, nullable=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False)
+    answer_json: Mapped[str | None] = mapped_column(CompressedText, nullable=True)
+    published_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    updated_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
 class SqlStudioReviewPass(OmnigentBase):
     """Owner-private frozen PR context; execution remains owned by sessions."""
 
