@@ -6644,6 +6644,16 @@
         "additionalProperties": false,
         "description": "View of the report as observed in the reviewer's durable transcript.",
         "properties": {
+          "citation_validation": {
+            "default": "not_checked",
+            "enum": [
+              "not_checked",
+              "checked",
+              "unavailable"
+            ],
+            "title": "Citation Validation",
+            "type": "string"
+          },
           "findings": {
             "items": {
               "$ref": "#/components/schemas/ReviewFinding"
@@ -6681,6 +6691,13 @@
               }
             ],
             "title": "Summary"
+          },
+          "unverified_findings": {
+            "items": {
+              "$ref": "#/components/schemas/ReviewFinding"
+            },
+            "title": "Unverified Findings",
+            "type": "array"
           }
         },
         "required": [
@@ -6812,6 +6829,17 @@
             "title": "Id",
             "type": "string"
           },
+          "patch_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Patch Sha256"
+          },
           "reviewers": {
             "items": {
               "$ref": "#/components/schemas/ReviewPass"
@@ -6830,6 +6858,47 @@
           "created_at"
         ],
         "title": "ReviewRun",
+        "type": "object"
+      },
+      "ReviewRunDiffResponse": {
+        "properties": {
+          "base_sha": {
+            "pattern": "^[0-9a-f]{40}(?:[0-9a-f]{24})?$",
+            "title": "Base Sha",
+            "type": "string"
+          },
+          "head_sha": {
+            "pattern": "^[0-9a-f]{40}(?:[0-9a-f]{24})?$",
+            "title": "Head Sha",
+            "type": "string"
+          },
+          "patch": {
+            "title": "Patch",
+            "type": "string"
+          },
+          "sha256": {
+            "title": "Sha256",
+            "type": "string"
+          },
+          "source_line": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Line"
+          }
+        },
+        "required": [
+          "base_sha",
+          "head_sha",
+          "sha256",
+          "patch"
+        ],
+        "title": "ReviewRunDiffResponse",
         "type": "object"
       },
       "ReviewRunPage": {
@@ -22001,6 +22070,104 @@
           }
         },
         "summary": "Get Project Review Run",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/studio/review-runs/{run_id}/patch": {
+      "get": {
+        "operationId": "get_review_run_patch_v1_studio_review_runs__run_id__patch_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "path",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 1024,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Path"
+            }
+          },
+          {
+            "in": "query",
+            "name": "side",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "base",
+                    "head"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Side"
+            }
+          },
+          {
+            "in": "query",
+            "name": "line",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maximum": 2147483647,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Line"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewRunDiffResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Review Run Patch",
         "tags": [
           "sessions"
         ]

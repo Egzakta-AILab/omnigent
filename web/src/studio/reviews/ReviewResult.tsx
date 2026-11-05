@@ -43,12 +43,14 @@ export function FindingCard({
   current,
   headRepoUrl,
   onOpenSource,
+  onOpenCapturedSource,
 }: {
   finding: ReviewFinding;
   review: ReviewPass;
   current: boolean;
   headRepoUrl?: string | null;
   onOpenSource?: (source: ReviewSource) => void;
+  onOpenCapturedSource?: (source: ReviewSource) => void;
 }) {
   const source = reviewSource(review, finding);
   // GitHub's old diff side uses the merge base, which can differ from the PR base tip.
@@ -85,11 +87,16 @@ export function FindingCard({
       <p className="font-mono text-xs text-muted-foreground [overflow-wrap:anywhere]">
         {finding.path}:{finding.line} · {finding.side === "base" ? "Base" : "Head"}
       </p>
-      {((current && onOpenSource) || blobUrl) && (
+      {((current && onOpenSource) || onOpenCapturedSource || blobUrl) && (
         <div className="flex flex-wrap items-center gap-1">
           {current && onOpenSource && (
             <Button variant="outline" size="sm" onClick={() => onOpenSource(source)}>
               Show in diff
+            </Button>
+          )}
+          {onOpenCapturedSource && (
+            <Button variant="outline" size="sm" onClick={() => onOpenCapturedSource(source)}>
+              Show in captured diff
             </Button>
           )}
           {blobUrl && (
@@ -102,6 +109,29 @@ export function FindingCard({
         </div>
       )}
     </li>
+  );
+}
+
+export function UnverifiedFindings({
+  findings,
+  review,
+}: {
+  findings?: ReviewFinding[];
+  review: ReviewPass;
+}) {
+  if (!findings?.length) return null;
+  return (
+    <details className="space-y-2 rounded-md border border-border p-2">
+      <summary className="text-sm">Unverified citations ({findings.length})</summary>
+      <p className="text-xs text-muted-foreground">
+        These findings cite lines outside the changes in the captured diff.
+      </p>
+      <ol className="space-y-2">
+        {Array.from(uniqueReviewFindings(findings), ([findingKey, finding]) => (
+          <FindingCard key={findingKey} finding={finding} review={review} current={false} />
+        ))}
+      </ol>
+    </details>
   );
 }
 
@@ -170,6 +200,9 @@ export function ReviewResult({
             <p className="whitespace-pre-wrap [overflow-wrap:anywhere]">{report.data.summary}</p>
           )}
           {standalone && <h3 className="font-medium">Findings ({findings.size})</h3>}
+          {report.data?.citation_validation === "unavailable" && (
+            <p className="text-muted-foreground">This run has no saved diff for citation checks.</p>
+          )}
           {findings.size ? (
             <ol className="space-y-2">
               {Array.from(findings, ([key, finding]) => (
@@ -184,8 +217,13 @@ export function ReviewResult({
               ))}
             </ol>
           ) : (
-            <p className="text-muted-foreground">The reviewer reported no findings.</p>
+            <p className="text-muted-foreground">
+              {report.data?.unverified_findings?.length
+                ? "None of the findings cite a changed line."
+                : "The reviewer reported no findings."}
+            </p>
           )}
+          <UnverifiedFindings findings={report.data?.unverified_findings} review={review} />
         </>
       ) : report.data?.state === "incomplete" ? (
         <div className="space-y-2">

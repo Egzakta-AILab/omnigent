@@ -17,6 +17,7 @@ from omnigent.entities.conversation import (
 )
 from omnigent.errors import StaleCursorError
 from omnigent.stores.conversation_store import ConversationStore
+from omnigent.studio.reviews.evidence import Anchor
 from omnigent.studio.reviews.models import FrozenModel, ReviewPass, Sha
 
 _REPORT_FENCE = "```studio-review-v1"
@@ -69,6 +70,27 @@ class ReviewReport(FrozenModel):
     summary: str | None = None
     findings: list[ReviewFinding] = Field(default_factory=list)
     message_id: str | None = None
+    citation_validation: Literal["not_checked", "checked", "unavailable"] = "not_checked"
+    unverified_findings: list[ReviewFinding] = Field(default_factory=list)
+
+
+def qualify_citations(report: ReviewReport, anchors: frozenset[Anchor] | None) -> ReviewReport:
+    """Keep every assertion visible while separating unsupported citations."""
+    if report.state != "ready" or report.citation_validation == "checked":
+        return report
+    if anchors is None:
+        return report.model_copy(update={"citation_validation": "unavailable"})
+    valid, rejected = [], []
+    for finding in report.findings:
+        target = valid if (finding.path, finding.side, finding.line) in anchors else rejected
+        target.append(finding)
+    return report.model_copy(
+        update={
+            "citation_validation": "checked",
+            "findings": valid,
+            "unverified_findings": rejected,
+        }
+    )
 
 
 class ReviewerRunReport(FrozenModel):

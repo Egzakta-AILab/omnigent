@@ -421,22 +421,47 @@ def main(argv: Sequence[str] | None = None) -> int:
     review.add_argument("--pr", required=True, help="expected GitHub pull request URL")
     review.add_argument("--output", type=Path, help="write a JSON receipt")
     review.add_argument("--json", action="store_true", help="print the JSON receipt")
+    run = commands.add_parser("review-run", help="verify a saved PR review run and its citations")
+    run.add_argument("--mode", choices=("local", "server"), required=True)
+    run.add_argument("--server", required=True, help="explicit trusted instance URL")
+    run.add_argument("--run-id", required=True)
+    run.add_argument("--pr", required=True, help="expected pull request URL")
+    run.add_argument("--base", required=True, help="expected full base SHA")
+    run.add_argument("--head", required=True, help="expected full head SHA")
+    run.add_argument("--minimum-reviewers", type=int, default=1)
+    run.add_argument("--output", type=Path, help="write a JSON receipt")
+    run.add_argument("--json", action="store_true", help="print the JSON receipt")
     args = parser.parse_args(argv)
     if args.command == "contracts":
         from omnigent.studio.contracts import main as contracts_main
 
         return contracts_main(output=args.output, json_output=args.json)
-    if args.command == "review":
-        from omnigent.studio.verify_review import collect_review
-
+    if args.command in ("review", "review-run"):
         try:
-            receipt = collect_review(
-                mode=args.mode,
-                server_url=args.server,
-                review_id=args.review_id,
-                harness=args.harness,
-                pr_url=args.pr,
-            )
+            if args.command == "review":
+                from omnigent.studio.verify_review import collect_review
+
+                receipt = collect_review(
+                    mode=args.mode,
+                    server_url=args.server,
+                    review_id=args.review_id,
+                    harness=args.harness,
+                    pr_url=args.pr,
+                )
+                ready_key, label = "review_ready", "Saved review"
+            else:
+                from omnigent.studio.verify_review_run import collect_review_run
+
+                receipt = collect_review_run(
+                    mode=args.mode,
+                    server_url=args.server,
+                    run_id=args.run_id,
+                    pr_url=args.pr,
+                    base_sha=args.base,
+                    head_sha=args.head,
+                    minimum_reviewers=args.minimum_reviewers,
+                )
+                ready_key, label = "run_ready", "Saved review run"
         except ValueError as exc:
             parser.error(str(exc))
         serialized = json.dumps(receipt, indent=2) + "\n"
@@ -449,10 +474,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.json:
             print(serialized, end="")
         else:
-            print("Saved review ready" if receipt["review_ready"] else "Saved review unconfirmed")
+            print(f"{label} ready" if receipt[ready_key] else f"{label} unconfirmed")
             for check in receipt["checks"]:
                 print(f"  {check['status']:7} {check['name']}: {check['reason']}")
-        return 0 if receipt["review_ready"] else 1
+        return 0 if receipt[ready_key] else 1
     harnesses = [
         h
         for selected in (args.harness or ["both"])

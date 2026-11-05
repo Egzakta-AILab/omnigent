@@ -23,6 +23,7 @@ None sends a message, so all stay fast and LLM-free.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -1583,6 +1584,7 @@ def test_studio_review_from_pr_panel(
         run_posts: list[str] = []
         run: dict = {}
         run_id = "f" * 32
+        patch_sha = hashlib.sha256(_PR_DIFF["patch"].encode()).hexdigest()
         run_reviewers = ("2" * 32, "3" * 32)
         run_started = False
 
@@ -1598,6 +1600,7 @@ def test_studio_review_from_pr_panel(
             run.update(
                 id=run_id,
                 target=review["target"],
+                patch_sha256=patch_sha,
                 reviewers=[
                     {
                         **review,
@@ -1632,6 +1635,16 @@ def test_studio_review_from_pr_panel(
                                 **report,
                                 "state": "ready" if run_started else "pending",
                                 "summary": f"Reviewer {index + 1} report" if run_started else None,
+                                "citation_validation": "checked" if run_started else "not_checked",
+                                "unverified_findings": [
+                                    {
+                                        **report["findings"][0],
+                                        "title": "Invented citation",
+                                        "line": 999,
+                                    },
+                                ]
+                                if run_started and index == 1
+                                else [],
                             },
                         }
                         for index, member_id in enumerate(run_reviewers)
@@ -1707,6 +1720,12 @@ def test_studio_review_from_pr_panel(
         page.route(f"**/v1/studio/review-runs/{run_id}/start", start_project_run)
         page.route(f"**/v1/studio/review-runs/{run_id}/report", project_run_report)
         page.route(
+            re.compile(rf"/v1/studio/review-runs/{run_id}/patch(?:\?|$)"),
+            lambda r: r.fulfill(
+                json={**revision, "patch": _PR_DIFF["patch"], "sha256": patch_sha}
+            ),
+        )
+        page.route(
             "**/v1/skills?*",
             lambda r: r.fulfill(
                 json={
@@ -1778,8 +1797,14 @@ def test_studio_review_from_pr_panel(
         expect(runs_panel.get_by_text("2 / 2 reports ready")).to_be_visible()
         consolidation = runs_panel.get_by_role("region", name="Consolidation")
         expect(consolidation.get_by_text("Keep the input validation")).to_have_count(1)
+        expect(consolidation.get_by_text(re.compile(r"1 unverified citation"))).to_be_visible()
+        consolidation.get_by_role("button", name="Show in captured diff", exact=True).click()
+        captured_diff = runs_panel.get_by_role("region", name="Captured diff", exact=True)
+        expect(captured_diff.get_by_text("Review finding · src/app/main.py:2")).to_be_visible()
         consolidation.get_by_role("button", name=re.compile(r"^security-review")).click()
         expect(runs_panel.get_by_text("Reviewer 2 report")).to_be_visible()
+        runs_panel.get_by_text("Unverified citations (1)", exact=True).click()
+        expect(runs_panel.get_by_text("Invented citation", exact=True)).to_be_visible()
         expect(runs_panel.get_by_role("link", name="Open reviewer report")).to_have_attribute(
             "href", f"/c/{run_reviewers[1]}?view=review"
         )
