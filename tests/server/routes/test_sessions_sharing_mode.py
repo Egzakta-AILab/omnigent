@@ -432,6 +432,20 @@ async def test_info_reports_default_on(
         assert resp.json()["sharing_mode"] == "on"
 
 
+@pytest.mark.parametrize("stamp", ["a" * 40, "bad-build-metadata"])
+async def test_info_exposes_only_valid_build_source(
+    db_uri: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stamp: str
+) -> None:
+    monkeypatch.setenv("OMNIGENT_BUILD_SOURCE_COMMIT", stamp)
+    async with _client(_build_app(db_uri, tmp_path)) as client:
+        response = await client.get("/v1/info")
+    assert response.status_code == 200
+    if len(stamp) == 40:
+        assert response.json()["source_commit"] == stamp
+    else:
+        assert "source_commit" not in response.json()
+
+
 @pytest.mark.parametrize(
     "mode,expected",
     [

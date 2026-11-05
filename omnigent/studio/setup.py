@@ -433,6 +433,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     creator_release.add_argument("--package", type=Path, required=True, help="JSON definition")
     creator_release.add_argument("--expect", choices=("enabled", "disabled"), default="enabled")
     creator_release.add_argument("--version", type=int, help="expected selected version")
+    release_a = commands.add_parser("release-a", help="verify Release A acceptance evidence")
+    release_a.add_argument(
+        "--matrix", default="local:codex,local:claude,server:codex,server:claude"
+    )
+    release_a.add_argument("--pr", help="representative pull request URL")
+    release_a.add_argument("--second-repo", help="absolute checkout path on its host")
+    release_a.add_argument("--manifest", type=Path, help="explicit instance and retained evidence")
+    release_a.add_argument(
+        "--schema", action="store_true", help="print the evidence manifest schema"
+    )
+    release_a.add_argument("--output", type=Path, help="write a JSON receipt copy")
     review = commands.add_parser("review", help="verify a saved native review report")
     review.add_argument("--mode", choices=("local", "server"), required=True)
     review.add_argument("--server", required=True, help="explicit trusted instance URL")
@@ -509,6 +520,29 @@ def main(argv: Sequence[str] | None = None) -> int:
     proof.add_argument("--finding", required=True, help="captured finding key")
     proof.add_argument("--receipt", type=Path, required=True)
     args = parser.parse_args(argv)
+    if args.command == "release-a":
+        from omnigent.studio.release_a import ROUTES, ReleaseEvidence, collect_release_a
+
+        if args.schema:
+            print(json.dumps(ReleaseEvidence.model_json_schema(), indent=2))
+            return 0
+        if not args.pr or not args.second_repo:
+            parser.error("Provide --pr and --second-repo to verify Release A")
+        if sorted(args.matrix.split(",")) != sorted(ROUTES):
+            parser.error("Release A requires all four local and server routes exactly once")
+        try:
+            receipt = collect_release_a(
+                pr_url=args.pr, second_repo=args.second_repo, manifest=args.manifest
+            )
+            serialized = json.dumps(receipt, indent=2) + "\n"
+            if args.output:
+                args.output.write_text(serialized, encoding="utf-8")
+        except ValueError as exc:
+            parser.error(str(exc))
+        except OSError:
+            parser.error("Could not write the release receipt")
+        print(serialized, end="")
+        return 0 if receipt["release_ready"] else 1
     if args.command == "creator-contracts":
         from pydantic import ValidationError
 

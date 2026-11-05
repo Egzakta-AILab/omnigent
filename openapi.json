@@ -9697,6 +9697,17 @@
           "smart_routing_sources": {
             "$ref": "#/components/schemas/SmartRoutingSourcesInfo"
           },
+          "source_commit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Commit"
+          },
           "studio_reviews": {
             "default": false,
             "title": "Studio Reviews",
