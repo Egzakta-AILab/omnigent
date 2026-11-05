@@ -54,6 +54,9 @@ import { CapabilitiesProvider } from "@/lib/CapabilitiesContext";
 import type { ServerInfo } from "@/lib/capabilities";
 import { NewChatLandingScreen, resetLandingDraft } from "./NewChatDialog";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { clearSessionDrafts, getSessionDraft } from "@/lib/sessionDrafts";
+import { readSessionWorkspaceState } from "@/lib/sessionWorkspaceState";
+import { setPendingInitialPrompt } from "@/store/chatStore";
 
 // A `?project=` visit prefills the composer from the project's STORED config
 // (host / working directory / agent / worktree). A field the config leaves
@@ -327,6 +330,8 @@ async function submitAndReadBody(): Promise<Record<string, unknown>> {
 beforeEach(() => {
   navigateMock.mockReset();
   vi.mocked(authenticatedFetch).mockReset();
+  vi.mocked(setPendingInitialPrompt).mockClear();
+  clearSessionDrafts();
   // The landing draft is module-scoped and survives unmount by design; clear it
   // so a case that never submits can't leak its state into the next test.
   resetLandingDraft();
@@ -362,21 +367,43 @@ afterEach(() => {
 
 describe("NewChatLandingScreen project prefill", () => {
   it.each(["proj_alpha", null])(
-    "browses the effective working directory for a project without saved settings (%s)",
+    "opens a real session in the effective workspace without sending a prompt (%s)",
     async (projectId) => {
       setProjects([{ id: projectId, name: "Alpha" }]);
       setProjectConfig(undefined);
       renderLanding();
 
-      const open = await screen.findByRole("button", { name: "Open project workspace" });
-      fireEvent.click(open);
-      expect(screen.getByRole("dialog", { name: "Project workspace" })).toBeInTheDocument();
-      expect(useHostFilesystem).toHaveBeenCalledWith("host_1", RECENT_WORKSPACE);
+      const open = await screen.findByRole("button", { name: "Open workspace" });
+      await waitFor(() => expect(open).toBeEnabled());
       expect(authenticatedFetch).not.toHaveBeenCalled();
+      vi.mocked(authenticatedFetch).mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ id: "conv_empty" }),
+      } as Response);
+      fireEvent.click(open);
+      fireEvent.click(open);
+      await waitFor(() => expect(navigateMock).toHaveBeenCalledWith("/c/conv_empty"));
+      const creates = vi
+        .mocked(authenticatedFetch)
+        .mock.calls.filter(([path]) => path === "/v1/sessions");
+      expect(creates).toHaveLength(1);
+      const body = JSON.parse(creates[0][1]?.body as string);
+      expect(body).toMatchObject({
+        host_id: "host_1",
+        workspace: RECENT_WORKSPACE,
+        agent_id: "ag_hello",
+      });
+      if (projectId === null) expect(body.labels.omni_project).toBe("Alpha");
+      else expect(body.project_id).toBe(projectId);
+      expect(body).not.toHaveProperty("initial_input");
+      expect(body).not.toHaveProperty("initial_items");
+      expect(body).not.toHaveProperty("smart_routing_message");
+      expect(setPendingInitialPrompt).not.toHaveBeenCalled();
+      expect(readSessionWorkspaceState("conv_empty").open).toBe(true);
     },
   );
 
-  it("does not browse a remembered working directory on a fallback host", async () => {
+  it("does not open a remembered working directory on a fallback host", async () => {
     writeProjectLaunchDefaults("proj_alpha", { hostId: "offline_host", workspace: REPO }, {});
     renderLanding();
 
@@ -385,11 +412,14 @@ describe("NewChatLandingScreen project prefill", () => {
         `Working directory: ${REPO}`,
       ),
     );
-    expect(screen.queryByRole("button", { name: "Open project workspace" })).toBeNull();
+    const open = screen.getByRole("button", { name: "Open workspace" });
+    expect(open).toBeDisabled();
+    fireEvent.click(open);
+    expect(authenticatedFetch).not.toHaveBeenCalled();
     expect(useHostFilesystem).not.toHaveBeenCalledWith("host_1", REPO);
   });
 
-  it("browses the saved project workspace independently of the session draft's launch target", async () => {
+  it("opens the selected launch workspace and carries text over as an unsent draft", async () => {
     const config = { host_id: "host_1", workspace: REPO, agent_id: "ag_hello" };
     setProjectConfig(config);
     vi.mocked(useHosts).mockReturnValue({
@@ -407,18 +437,25 @@ describe("NewChatLandingScreen project prefill", () => {
         `Working directory: ${RECENT_WORKSPACE}`,
       ),
     );
-    fireEvent.click(screen.getByRole("button", { name: "Open project workspace" }));
-    expect(screen.getByRole("dialog", { name: "Project workspace" })).toBeInTheDocument();
-    expect(useHostFilesystem).toHaveBeenCalledWith("host_1", REPO);
-    expect(screen.queryByTestId("workspace-picker-new-folder")).not.toBeInTheDocument();
-    expect(screen.queryByTestId("workspace-picker-select")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByTestId("workspace-picker-close"));
-
-    expect(await submitAndReadBody()).toMatchObject({
+    fireEvent.change(screen.getByTestId("new-chat-landing-input"), {
+      target: { value: "Save this draft" },
+    });
+    vi.mocked(authenticatedFetch).mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ id: "conv_with_draft" }),
+    } as Response);
+    fireEvent.click(screen.getByRole("button", { name: "Open workspace" }));
+    await waitFor(() => expect(navigateMock).toHaveBeenCalledWith("/c/conv_with_draft"));
+    const [, init] = vi.mocked(authenticatedFetch).mock.calls[0];
+    const body = JSON.parse(init?.body as string);
+    expect(body).toMatchObject({
       project_id: "proj_alpha",
       host_id: "host_2",
       workspace: RECENT_WORKSPACE,
     });
+    expect(body).not.toHaveProperty("initial_input");
+    expect(setPendingInitialPrompt).not.toHaveBeenCalled();
+    expect(getSessionDraft("conv_with_draft")).toEqual({ text: "Save this draft", files: [] });
   });
 
   it("discards project A's parked draft slots so project B's remount seeds B's defaults", async () => {
@@ -1122,6 +1159,49 @@ describe("NewChatLandingScreen project prefill", () => {
       ),
     );
   }
+
+  it.each([
+    { draft: "", view: "terminal" },
+    { draft: "Unsent native draft", view: "chat" },
+  ])(
+    "opens native $view with the configured model and effort without sending",
+    async ({ draft, view }) => {
+      setCodexAgentAndModels(["low", "high"]);
+      setProjectConfig({
+        host_id: "host_1",
+        workspace: REPO,
+        agent_id: CODEX_AGENT_ID,
+        model: "gpt-mini",
+        effort: "low",
+      });
+      renderLanding();
+      const open = await screen.findByRole("button", { name: "Open workspace" });
+      await waitFor(() => expect(open).toBeEnabled());
+      if (draft)
+        fireEvent.change(screen.getByTestId("new-chat-landing-input"), {
+          target: { value: draft },
+        });
+      vi.mocked(authenticatedFetch).mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ id: "conv_terminal_workspace" }),
+      } as Response);
+      fireEvent.click(open);
+      await waitFor(() =>
+        expect(navigateMock).toHaveBeenCalledWith(`/c/conv_terminal_workspace?view=${view}`),
+      );
+      const [, init] = vi.mocked(authenticatedFetch).mock.calls[0];
+      expect(JSON.parse(init?.body as string)).toMatchObject({
+        project_id: "proj_alpha",
+        host_id: "host_1",
+        workspace: REPO,
+        agent_id: CODEX_AGENT_ID,
+        model_override: "gpt-mini",
+        reasoning_effort: "low",
+      });
+      expect(setPendingInitialPrompt).not.toHaveBeenCalled();
+      expect(getSessionDraft("conv_terminal_workspace")?.text ?? "").toBe(draft);
+    },
+  );
 
   it("seeds reasoning_effort from the project default, outranking the remembered effort", async () => {
     setClaudeAgentAndModels();

@@ -69,6 +69,8 @@ checkout's branch.
 **Link this PR** makes the found PR available in the current session.
 Choose **Manage profiles** in Review to create or edit workspace guidance. The
 same editor is available in Project settings for a saved host and directory.
+From an empty session, use **Workspace → + → Reviewer profiles** before linking
+a PR.
 
 With a pointer, hovering the composer's PR link previews each PR's status. The
 icon beside each title opens that PR in a new browser tab without opening the
@@ -116,9 +118,9 @@ pagination, old-side placement, revision, permission and failure matrices.
 drives **Review** from the rail, both composer layouts and Canvas. It scripts
 GitHub, host catalogs and review responses to check model and reasoning
 selection, a retry after a lost start response, report repair, and navigation
-to a captured line. The rail case scans and promotes a nested checkout, links
-its branch PR, and creates and uses a workspace profile from the enclosing
-workspace.
+to a captured line. The rail case starts an empty project session with Terminal
+and the Workspace panel open, scans and promotes a nested checkout, links its
+branch PR, and runs a review without sending a chat message from the source.
 The other cases choose a native skill. The rail also checks that an earlier
 report stays separate from the updated diff.
 Use the [local review walkthrough](../docs/studio/README.md#run-a-review-locally)
