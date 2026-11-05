@@ -100,6 +100,7 @@ from omnigent.studio.reviews.models import (
     ReviewTarget,
     require_uuid,
 )
+from omnigent.studio.reviews.publication import delivery_reference
 from omnigent.studio.reviews.questions import question_session_id
 from omnigent.studio.reviews.reproduction import (
     MAX_REPRODUCTION_BYTES,
@@ -1381,6 +1382,11 @@ class StudioReviewStore:
             publication_state=cast(InlinePublicationState, row.publication_state),
             provider_url=row.provider_url,
             publication_confirmed_by=row.publication_confirmed_by,
+            publication_reference=(
+                delivery_reference(row.id, row.publication_digest)
+                if row.publication_digest is not None
+                else None
+            ),
         )
 
     def list_inline_drafts(
@@ -1635,6 +1641,44 @@ class StudioReviewStore:
             return self._inline_draft(row)
 
         return run_write_transaction(self._write, "finish_inline_review_publication", write)
+
+    def reconcile_inline_publication(
+        self,
+        run_id: str,
+        draft: InlineDraft,
+        *,
+        actor: str | None,
+        owner: str | None,
+        provider_url: str,
+    ) -> InlineDraft:
+        """Record a provider match that has already been verified by the workspace host."""
+
+        def write(session: Session) -> InlineDraft:
+            self._lock_discussion_writer(session, run_id, actor, owner)
+            if not self._publication_allowed(session, run_id, actor, owner):
+                raise ReviewNotFoundError("Publication permission is unavailable")
+            row = session.get(SqlStudioInlineDraft, (current_workspace_id(), run_id, draft.id))
+            if row is None or row.discarded or row.publication_confirmed_by != actor:
+                raise ReviewNotFoundError("Inline publication not found")
+            saved = self._inline_draft(row)
+            if (
+                saved.version != draft.version
+                or saved.publication_reference != draft.publication_reference
+            ):
+                raise ReviewConflictError("The inline publication changed")
+            if row.publication_state == "posted" and row.provider_url == provider_url:
+                return saved
+            if (
+                row.publication_state not in ("sending", "unknown")
+                or not saved.publication_reference
+            ):
+                raise ReviewConflictError("This inline publication cannot be reconciled")
+            row.publication_state = "posted"
+            row.provider_url = provider_url
+            row.updated_at = time.time_ns() // 1_000_000
+            return self._inline_draft(row)
+
+        return run_write_transaction(self._write, "reconcile_inline_review_publication", write)
 
     @staticmethod
     def _question_record(row: SqlStudioReviewQuestion) -> QuestionRecord:

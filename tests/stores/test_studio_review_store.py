@@ -21,6 +21,11 @@ from omnigent.stores.studio_review_store import (
     ReviewTransitionError,
     StudioReviewStore,
 )
+from omnigent.studio.reviews.discussion import (
+    CreateReviewComment,
+    DiffDiscussionAnchor,
+    InlineDraftSelection,
+)
 from omnigent.studio.reviews.models import (
     CaptureResult,
     ReviewerDecision,
@@ -703,6 +708,65 @@ def test_finding_retains_receipts_across_multiple_fix_attempts(store: StudioRevi
         store.attach_reproduction(run.id, finding, receipt, owner_user_id=OWNER)
     listed = store.list_reproductions(run.id, finding, owner_user_id=OWNER, actor=OWNER)
     assert {entry.digest: entry for entry in listed} == {entry.digest: entry for entry in saved}
+
+
+def test_inline_reconciliation_preserves_the_original_reservation(
+    store: StudioReviewStore,
+) -> None:
+    run = store.capture_run(
+        owner_user_id=None,
+        idempotency_key="run",
+        request_hash="a" * 64,
+        target=_target(
+            source_session_id=None, source_project_id=uuid.uuid4().hex, repository_path="."
+        ),
+        patch="diff --git a/file b/file\n",
+        profiles=[_profile()],
+    )
+    anchor = DiffDiscussionAnchor(kind="diff", path="file", side="head", start=1, end=1)
+    draft = store.create_inline_draft(
+        run.id,
+        CreateReviewComment(id=uuid.uuid4().hex, anchor=anchor, body="Check this."),
+        anchor,
+        actor=None,
+        owner=None,
+    )
+    digest = "c" * 64
+    selected = [InlineDraftSelection(id=draft.id, version=draft.version)]
+    [sending], claimed = store.claim_inline_publication(
+        run.id,
+        actor=None,
+        owner=None,
+        selected=selected,
+        digest=digest,
+    )
+    assert claimed and sending.publication_reference
+    unknown = store.finish_inline_publication(run.id, draft.id, digest=digest, provider_url=None)
+    url = f"{run.target.pr_url}#discussion_r42"
+    posted = store.reconcile_inline_publication(
+        run.id, unknown, actor=None, owner=None, provider_url=url
+    )
+    assert posted.publication_state == "posted" and posted.provider_url == url
+    assert posted.publication_reference == sending.publication_reference
+    assert (
+        store.finish_inline_publication(run.id, draft.id, digest=digest, provider_url=None)
+        == posted
+    )
+    assert store.claim_inline_publication(
+        run.id,
+        actor=None,
+        owner=None,
+        selected=selected,
+        digest=digest,
+    ) == ([posted], False)
+    with pytest.raises(ReviewConflictError):
+        store.reconcile_inline_publication(
+            run.id,
+            unknown,
+            actor=None,
+            owner=None,
+            provider_url=f"{run.target.pr_url}#discussion_r43",
+        )
 
 
 def test_project_run_rolls_back_all_captures_on_invalid_snapshot(store: StudioReviewStore) -> None:

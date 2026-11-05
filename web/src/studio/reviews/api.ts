@@ -245,6 +245,7 @@ export interface InlineDraft {
   publication_state?: "draft" | "sending" | "posted" | "unknown";
   provider_url?: string | null;
   publication_confirmed_by?: string | null;
+  publication_reference?: string | null;
 }
 
 export interface InlinePublicationPreview {
@@ -423,6 +424,14 @@ export async function discardInlineDraft(runId: string, id: string, version: num
 
 export function previewInlinePublication(runId: string, drafts: InlineDraft[]) {
   return submitInlinePublication(runId, "preview", drafts);
+}
+
+export function reconcileInlinePublication(runId: string, draft: InlineDraft, providerUrl: string) {
+  return postReview<InlineDraft>(
+    `${inlineDraftsPath(runId)}/${encodeURIComponent(draft.id)}/reconcile`,
+    draft.id,
+    { version: draft.version, provider_url: providerUrl },
+  );
 }
 
 export function confirmInlinePublication(runId: string, preview: InlinePublicationPreview) {

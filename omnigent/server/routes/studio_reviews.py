@@ -88,6 +88,7 @@ from omnigent.studio.reviews.discussion import (
     QuestionExecution,
     QuestionInput,
     QuestionRecord,
+    ReconcileInlinePublication,
     ReportDraftResult,
     ReviewCollaboratorInput,
     ReviewComment,
@@ -132,6 +133,7 @@ from omnigent.studio.reviews.models import (
     Sha,
 )
 from omnigent.studio.reviews.plan import plan_digest, plan_instructions, read_plan_proposal
+from omnigent.studio.reviews.publication import delivery_body
 from omnigent.studio.reviews.questions import question_prompt, read_question_answer
 from omnigent.studio.reviews.report import (
     ConsolidatedReviewReport,
@@ -332,7 +334,9 @@ async def _publish_inline_draft(
             params={
                 "repository": target.repository_path,
                 "pr_url": target.pr_url,
-                "body": draft.body,
+                "body": delivery_body(draft.body, draft.publication_reference)
+                if draft.publication_reference
+                else draft.body,
                 "anchor": draft.anchor.model_dump(mode="json"),
                 "base_sha": target.base_sha,
                 "head_sha": target.head_sha,
@@ -2109,6 +2113,69 @@ def create_studio_reviews_router(
                 )
         response.headers["Cache-Control"] = "no-store"
         return preview.model_copy(update={"drafts": drafts})
+
+    @router.post(
+        "/studio/review-runs/{run_id}/discussion/inline-drafts/{draft_id}/reconcile",
+        response_model=InlineDraft,
+        dependencies=_WRITE_GATES,
+        openapi_extra=_discussion_request_schema(ReconcileInlinePublication),
+    )
+    async def reconcile_inline_comment(
+        request: Request, run_id: str, draft_id: str
+    ) -> InlineDraft:
+        body = await _bounded_json(request, ReconcileInlinePublication, limit=4096)
+        draft_id = _identifier(draft_id)
+        access = await require_inline_draft_access(request, run_id)
+        if not await can_publish_inline(access):
+            raise HTTPException(403, "This account cannot reconcile inline comments")
+        run, target = access.run, access.run.target
+        try:
+            drafts = await asyncio.to_thread(
+                review_store.list_inline_drafts,
+                run.id,
+                actor=access.actor,
+                owner=access.owner,
+                for_publication=True,
+            )
+            draft = next((item for item in drafts if item.id == draft_id), None)
+            if draft is None or draft.publication_confirmed_by != access.actor:
+                raise ReviewNotFoundError("Inline publication not found")
+            if draft.version != body.version:
+                raise ReviewConflictError("The inline publication changed")
+            if draft.publication_state == "posted" and draft.provider_url == body.provider_url:
+                return draft
+            if (
+                draft.publication_state not in ("sending", "unknown")
+                or not draft.publication_reference
+            ):
+                raise ReviewConflictError("This inline publication cannot be reconciled")
+            workspace = await captured_project_workspace(request, target, access.owner)
+            verified = await _read_project_review_resource(
+                workspace,
+                "studio_project_pull_request_publication",
+                {
+                    "repository": target.repository_path,
+                    "pr_url": target.pr_url,
+                    "provider_url": body.provider_url,
+                    "anchor": draft.anchor.model_dump(mode="json"),
+                    "head_sha": target.head_sha,
+                    "body": delivery_body(draft.body, draft.publication_reference),
+                },
+            )
+            if verified.get("matched") is not True:
+                raise ReviewConflictError("GitHub comment does not match this delivery")
+            return await asyncio.to_thread(
+                review_store.reconcile_inline_publication,
+                run.id,
+                draft,
+                actor=access.actor,
+                owner=access.owner,
+                provider_url=body.provider_url,
+            )
+        except ReviewNotFoundError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ReviewConflictError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     async def question_execution(
         request: Request, access: DiscussionAccess, body: AskReviewQuestion

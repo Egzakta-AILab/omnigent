@@ -5,6 +5,7 @@ import { triggerBrowserDownload } from "@/hooks/useFileContent";
 import {
   confirmInlinePublication,
   previewInlinePublication,
+  reconcileInlinePublication,
   type InlineDraft,
   type InlinePublicationPreview,
 } from "./api";
@@ -13,6 +14,46 @@ const MAX_SELECTED = 8;
 
 function anchorLabel({ path, start, end, side }: InlineDraft["anchor"]) {
   return `${path}:${start}${start === end ? "" : `–${end}`} · ${side === "base" ? "Base" : "Head"}`;
+}
+
+function CheckDelivery({
+  runId,
+  draft,
+  refresh,
+}: {
+  runId: string;
+  draft: InlineDraft;
+  refresh: () => Promise<void>;
+}) {
+  const [url, setUrl] = useState("");
+  const check = useMutation({
+    mutationFn: () => reconcileInlinePublication(runId, draft, url.trim()),
+    onSuccess: refresh,
+  });
+  return (
+    <form
+      className="space-y-1"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (url.trim() && !check.isPending) check.mutate();
+      }}
+    >
+      <label className="grid gap-1 text-xs">
+        GitHub inline comment URL
+        <input
+          className="rounded-md border bg-background p-1"
+          type="url"
+          value={url}
+          maxLength={2048}
+          onChange={(event) => setUrl(event.target.value)}
+        />
+      </label>
+      <Button size="sm" variant="outline" disabled={!url.trim() || check.isPending}>
+        {check.isPending ? "Checking…" : "Check delivery"}
+      </Button>
+      {check.error && <p role="alert">{check.error.message}</p>}
+    </form>
+  );
 }
 
 export function InlinePublication({
@@ -104,7 +145,12 @@ export function InlinePublication({
                       Open published comment
                     </a>
                   ) : (
-                    <p>Delivery unconfirmed. Check the pull request for this comment.</p>
+                    <>
+                      <p>Delivery unconfirmed. Check the pull request for this comment.</p>
+                      {draft.publication_reference && (
+                        <CheckDelivery runId={runId} draft={draft} refresh={refresh} />
+                      )}
+                    </>
                   )}
                   {draft.publication_confirmed_by && (
                     <p className="break-words text-xs text-muted-foreground">
@@ -146,6 +192,10 @@ export function InlinePublication({
               </li>
             ))}
           </ol>
+          <p className="text-xs text-muted-foreground">
+            Studio adds a delivery reference in the comment source so you can check it if
+            confirmation is interrupted.
+          </p>
           <div className="flex flex-wrap gap-2">
             <Button size="sm" disabled={pending} onClick={() => confirm.mutate(snapshot)}>
               {confirm.isPending

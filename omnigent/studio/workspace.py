@@ -8,6 +8,7 @@ from omnigent.git_providers import ParsedRemote
 from omnigent.runner import github_resource, pr_resource
 from omnigent.runner.session_prs import PullRequestRef
 from omnigent.studio.reviews.discussion import DiffDiscussionAnchor
+from omnigent.studio.reviews.publication import github_comment_id, matches_github_anchor
 from omnigent.workspace_fs import WorkspaceReaderError
 from omnigent.workspace_repositories import resolve_workspace_github_repository
 
@@ -16,6 +17,7 @@ PULL_REQUEST_OPS = frozenset(
         "studio_project_pull_requests",
         "studio_project_pull_request",
         "studio_project_pull_request_patch",
+        "studio_project_pull_request_publication",
     }
 )
 _FULL_SHA = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
@@ -39,6 +41,19 @@ def read_project_pull_requests(root: Path, op: str, params: dict[str, Any]) -> d
         }
 
     reference = workspace_pr_reference(params.get("pr_url"), remote)
+    if op == "studio_project_pull_request_publication":
+        url = params.get("provider_url")
+        if reference.host != "github.com" or not isinstance(url, str):
+            raise ValueError("Provide a github.com inline comment URL")
+        comment_id = github_comment_id(reference, url)
+        if comment_id is None:
+            raise ValueError("Choose an inline comment on this pull request")
+        anchor = DiffDiscussionAnchor.model_validate(params.get("anchor"))
+        data = github_resource.read_review_comment(str(checkout), reference, comment_id)
+        return {
+            "matched": data.get("body") == params.get("body")
+            and matches_github_anchor(data, reference, anchor, url, comment_id, params["head_sha"])
+        }
     if op == "studio_project_pull_request":
         result = github_resource.read_workspace_pull_request(
             str(checkout), reference, include_files=params.get("include_files") is True

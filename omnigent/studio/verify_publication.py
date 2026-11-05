@@ -1,11 +1,9 @@
 """Read back a confirmed Studio inline comment from GitHub."""
 
 import json
-import re
 import subprocess
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import urlsplit
 
 import httpx
 
@@ -13,6 +11,11 @@ from omnigent.runner.session_prs import PullRequestRef
 from omnigent.studio import setup
 from omnigent.studio.reviews.discussion import InlineDraft, InlinePublicationPreview
 from omnigent.studio.reviews.models import ReviewRun, require_uuid
+from omnigent.studio.reviews.publication import (
+    delivery_body,
+    github_comment_id,
+    matches_github_anchor,
+)
 from omnigent.studio.verify_review_run import _matches_pr_url
 
 
@@ -37,14 +40,6 @@ def _github_comment(pr: PullRequestRef, comment_id: int) -> dict[str, Any]:
     return data
 
 
-def _comment_id(pr: PullRequestRef, value: str) -> int | None:
-    link = urlsplit(value)
-    if link.query or not _matches_pr_url(link._replace(fragment="").geturl(), pr.url):
-        return None
-    match = re.fullmatch(r"discussion_r([1-9][0-9]{0,18})", link.fragment)
-    return int(match[1]) if match else None
-
-
 def _matches_comment(
     data: dict[str, Any],
     pr: PullRequestRef,
@@ -54,24 +49,15 @@ def _matches_comment(
     head_sha: str,
     author: str,
 ) -> bool:
-    anchor = draft.anchor
-    side = "LEFT" if anchor.side == "base" else "RIGHT"
-    is_range = anchor.start != anchor.end
     user = data.get("user")
+    bodies = [draft.body]
+    if draft.publication_reference:
+        bodies.append(delivery_body(draft.body, draft.publication_reference))
     return (
-        data.get("id") == comment_id
-        and data.get("html_url") == draft.provider_url
-        and str(data.get("pull_request_url", "")).casefold()
-        == f"https://api.github.com/repos/{pr.repository}/pulls/{pr.number}".casefold()
-        and data.get("in_reply_to_id") is None
-        and data.get("subject_type") == "line"
-        and data.get("path") == anchor.path
-        and data.get("side") == side
-        and data.get("original_commit_id") == head_sha
-        and data.get("original_line") == anchor.end
-        and data.get("original_start_line") == (anchor.start if is_range else None)
-        and (not is_range or data.get("start_side") == side)
-        and data.get("body") == draft.body
+        matches_github_anchor(
+            data, pr, draft.anchor, draft.provider_url or "", comment_id, head_sha
+        )
+        and data.get("body") in bodies
         and isinstance(user, dict)
         and isinstance(user.get("login"), str)
         and user["login"].casefold() == author.casefold()
@@ -157,10 +143,7 @@ def collect_publication(
             probe.check("studio_receipt", "fail", "saved_draft_differs_from_preview")
             return result
         [draft] = matches
-        try:
-            comment_id = _comment_id(pr, draft.provider_url or "")
-        except ValueError:
-            comment_id = None
+        comment_id = github_comment_id(pr, draft.provider_url or "")
         if draft.publication_state != "posted" or comment_id is None:
             probe.check(
                 "studio_receipt", "fail", f"publication_{draft.publication_state}_unverified"
