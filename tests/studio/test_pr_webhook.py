@@ -17,6 +17,7 @@ from omnigent.studio.pr_webhook import (
     create_receiver,
 )
 from omnigent.studio.pr_webhook_inbox import WebhookInbox
+from tests._helpers.polling import poll_until_async
 
 _SECRET = b"a local webhook test secret of at least 32 bytes"
 _BASE, _HEAD, _NEXT = "a" * 40, "b" * 40, "c" * 40
@@ -44,6 +45,7 @@ def route() -> WebhookRoute:
 
 def _event(
     *,
+    number: int = 17,
     action: str = "opened",
     head: str = _HEAD,
     draft: bool = False,
@@ -54,10 +56,10 @@ def _event(
     repo = {"id": repo_id, "full_name": "Example/Project"}
     return {
         "action": action,
-        "number": 17,
+        "number": number,
         "repository": repo,
         "pull_request": {
-            "number": 17,
+            "number": number,
             "state": "open",
             "draft": draft,
             "title": "Unicode fixture π",
@@ -79,17 +81,23 @@ async def _send(receiver: httpx.AsyncClient, event: dict, *, corrupt: bool = Fal
 
 
 def _run(
-    route: WebhookRoute, *, launched: bool = False, coordinated: bool = False, wrong: bool = False
+    route: WebhookRoute,
+    *,
+    launched: bool = False,
+    coordinated: bool = False,
+    wrong: bool = False,
+    number: int = 17,
 ) -> dict:
-    run_id, member_id = "4" * 32, "5" * 32
+    run_id = "4" * 32 if number == 17 else f"{number:032x}"
+    member_id = "5" * 32
     target = {
         "source_project_id": route.project_id,
         "repository_path": route.repository,
         "host_id": route.host_id,
         "workspace": route.workspace,
-        "pr_url": "https://github.com/example/project/pull/17",
+        "pr_url": f"https://github.com/example/project/pull/{number}",
         "repository": "example/project",
-        "pr_number": 17,
+        "pr_number": number,
         "base_sha": _BASE,
         "head_sha": _NEXT if wrong else _HEAD,
     }
@@ -176,6 +184,59 @@ async def test_only_signed_in_scope_revisions_enter_the_durable_inbox(
     assert {
         json.loads(job.payload)["reviewers"][0]["expected_head_sha"] for job in (first, competing)
     } == {_HEAD, _NEXT}
+
+
+@pytest.mark.asyncio
+async def test_slow_review_dispatch_leaves_capacity_for_other_deliveries(
+    tmp_path: Path, route: WebhookRoute
+) -> None:
+    inbox = WebhookInbox(tmp_path / "reviews.db")
+    releases = {number: asyncio.Event() for number in (18, 19, 20)}
+    captures: list[int] = []
+    starts: list[int] = []
+
+    async def handle(call: httpx.Request) -> httpx.Response:
+        assert call.method == "POST"
+        if "/projects/" in call.url.path:
+            member = json.loads(call.content)["reviewers"][0]
+            number = int(member["pr_url"].rsplit("/", 1)[1])
+            captures.append(number)
+            await releases[number].wait()
+            return httpx.Response(200, json=_run(route, number=number))
+        assert call.url.path.endswith("/start")
+        number = int(call.url.path.split("/")[-2], 16)
+        starts.append(number)
+        return httpx.Response(200, json={"run": _run(route, launched=True, number=number)})
+
+    studio = httpx.AsyncClient(base_url="http://studio", transport=httpx.MockTransport(handle))
+    app = create_receiver(WebhookConfig(routes=[route]), inbox, studio, {route.id: _SECRET})
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://receiver"
+        ) as receiver,
+    ):
+        assert await _send(receiver, _event(number=18)) == 202
+        await poll_until_async(lambda: captures == [18], timeout_s=5)
+        assert await _send(receiver, _event(number=19)) == 202
+        await poll_until_async(lambda: captures == [18, 19], timeout_s=5)
+        assert await _send(receiver, _event(number=20)) == 202
+        assert sorted(row["state"] for row in inbox.recent()) == [
+            "capturing",
+            "capturing",
+            "queued",
+        ]
+        releases[19].set()
+        await poll_until_async(lambda: captures == [18, 19, 20], timeout_s=5)
+        assert starts == [19]
+        assert await _send(receiver, _event(number=19)) == 202
+        releases[20].set()
+        releases[18].set()
+        await poll_until_async(
+            lambda: all(row["state"] == "started" for row in inbox.recent()), timeout_s=5
+        )
+    assert sorted(starts) == [18, 19, 20]
+    assert len(inbox.recent()) == 3
 
 
 @pytest.mark.asyncio

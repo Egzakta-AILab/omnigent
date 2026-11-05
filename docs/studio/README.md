@@ -262,6 +262,10 @@ Route GitHub's JSON **Pull requests** webhook over HTTPS to
 checks the HMAC-SHA256 signature on the original request body and acknowledges
 after saving the eligible delivery. [GitHub webhook validation](https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries)
 
+The receiver processes up to two deliveries at a time. A slow capture, start,
+or draft check leaves room for another delivery. Additional deliveries wait
+in the durable inbox.
+
 Opened, reopened, ready-for-review, and synchronized PRs create one Studio run
 per base and head pair. A coordinator, if configured, starts a planning session
 and waits for roster approval in Studio. The bot finds the run in its project's
