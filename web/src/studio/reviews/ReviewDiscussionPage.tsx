@@ -14,6 +14,7 @@ import {
   type ReviewDiscussion,
 } from "./api";
 import { FindingReproductions } from "./FindingReproductions";
+import { InlineDrafts, type DraftAttempt } from "./InlineDrafts";
 import { DiscussionQuestions, type QuestionAttempt } from "./DiscussionQuestions";
 import { ReviewDiff } from "./ReviewDiff";
 
@@ -123,6 +124,7 @@ function DiscussionContent({
   const [copyStatus, setCopyStatus] = useState("");
   const attempt = useRef<{ fingerprint: string; id: string } | undefined>(undefined);
   const questionAttempt = useRef<QuestionAttempt | undefined>(undefined);
+  const draftAttempt = useRef<DraftAttempt | undefined>(undefined);
   const send = useMutation({
     mutationFn: (message: Parameters<typeof postReviewDiscussionComment>[1]) =>
       postReviewDiscussionComment(discussion.id, message),
@@ -155,6 +157,7 @@ function DiscussionContent({
   const ranges = new Map(
     [
       ...discussion.comments,
+      ...(discussion.inline_drafts ?? []).map((draft) => ({ anchor: draft.thread })),
       ...(discussion.questions ?? []),
       ...(discussion.agent_answers ?? []),
     ].flatMap(({ anchor: threadAnchor }) =>
@@ -312,6 +315,18 @@ function DiscussionContent({
                 ) : (
                   <p className="text-sm text-muted-foreground">No replies yet.</p>
                 )}
+                <InlineDrafts
+                  key={`draft-${activeKey}`}
+                  runId={discussion.id}
+                  anchor={anchor}
+                  drafts={(discussion.inline_drafts ?? []).filter(
+                    (draft) => anchorKey(draft.thread) === activeKey,
+                  )}
+                  suggestedBody={selectedFinding?.finding.detail}
+                  canEdit={discussion.can_draft_inline === true}
+                  attempt={draftAttempt}
+                  refresh={refresh}
+                />
                 <DiscussionQuestions
                   key={activeKey}
                   discussion={discussion}

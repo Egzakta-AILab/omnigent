@@ -3967,6 +3967,64 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
         assert (await auth_client.get(f"{candidate_path}/patch")).json()["patch"] == checked_patch
         candidate_view = (await auth_client.get(f"{candidate_path}/discussion")).json()
         assert candidate_view["candidate"]["finding_key"] == finding_key
+        drafts_path = f"{discussion_path}/inline-drafts"
+        owner_draft = {"id": uuid4().hex, "anchor": owner_question["anchor"], "body": "Draft."}
+        assert (
+            await auth_client.post(f"{candidate_path}/discussion/inline-drafts", json=owner_draft)
+        ).status_code == 409
+        assert (
+            await auth_client.post(collaborators_path, json={"user_id": "bob"})
+        ).status_code == 204
+        created_draft = await auth_client.post(drafts_path, json=owner_draft)
+        assert created_draft.status_code == 200, created_draft.text
+        initial_draft = created_draft.json()
+        assert initial_draft["anchor"] == {
+            "kind": "diff",
+            "path": "hello",
+            "side": "head",
+            "start": 1,
+            "end": 1,
+        }
+        assert (await auth_client.post(drafts_path, json=owner_draft)).json() == initial_draft
+        assert (await auth_client.get(discussion_path, headers=foreign_headers)).json()[
+            "inline_drafts"
+        ] == []
+        bob_draft = {
+            **owner_draft,
+            "id": uuid4().hex,
+            "anchor": {
+                "kind": "diff",
+                "path": "hello",
+                "side": "base",
+                "start": 1,
+                "end": 1,
+            },
+        }
+        assert (
+            await auth_client.post(drafts_path, json=bob_draft, headers=foreign_headers)
+        ).status_code == 200
+        bad_anchor = {**bob_draft, "anchor": {**bob_draft["anchor"], "start": 2, "end": 2}}
+        assert (
+            await auth_client.post(drafts_path, json=bad_anchor, headers=foreign_headers)
+        ).status_code == 422
+        assert (await auth_client.get(discussion_path)).json()["inline_drafts"] == [initial_draft]
+        draft_path = f"{drafts_path}/{initial_draft['id']}"
+        update = {"version": 1, "body": "Suggest keeping the validation at this line."}
+        assert (
+            await auth_client.put(draft_path, json=update, headers=foreign_headers)
+        ).status_code == 404
+        edited = await auth_client.put(draft_path, json=update)
+        assert edited.status_code == 200 and edited.json()["version"] == 2
+        assert (await auth_client.put(draft_path, json=update)).json() == edited.json()
+        assert (
+            await auth_client.put(draft_path, json={**update, "body": "A stale overwrite."})
+        ).status_code == 409
+        for _ in range(2):
+            assert (
+                await auth_client.post(f"{draft_path}/discard", json={"version": 2})
+            ).status_code == 204
+        assert (await auth_client.get(discussion_path)).json()["inline_drafts"] == []
+        assert (await auth_client.post(drafts_path, json=owner_draft)).status_code == 409
         return
 
     created = await create_reviewer(request, "alice", review, review.id)

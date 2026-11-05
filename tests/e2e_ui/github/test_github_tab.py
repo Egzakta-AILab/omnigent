@@ -2036,10 +2036,47 @@ def test_studio_review_from_pr_panel(
         assert not ordinary_creates and not review_events
         collaborators: list[str] = []
         replies: list[dict] = []
+        inline_drafts: dict[str, dict] = {}
         questions: list[dict] = []
         agent_answers: list[dict] = []
         answer_reads = 0
         discussion_path = f"**/v1/studio/review-runs/{run_id}/discussion"
+
+        def draft_inline_comment(route: Route) -> None:
+            message = route.request.post_data_json
+            if route.request.method == "POST":
+                assert message["anchor"] == {"kind": "finding", "finding_key": finding_key}
+                saved = {
+                    **message,
+                    "thread": message["anchor"],
+                    "anchor": {
+                        "kind": "diff",
+                        "path": "src/app/main.py",
+                        "side": "head",
+                        "start": 2,
+                        "end": 2,
+                    },
+                    "version": 1,
+                    "created_at": review["created_at"],
+                    "updated_at": review["created_at"],
+                }
+                inline_drafts[message["id"]] = saved
+                route.fulfill(json=saved)
+                return
+            draft = inline_drafts[route.request.url.rsplit("/", 1)[-1]]
+            assert route.request.method == "PUT" and message["version"] == draft["version"]
+            draft.update(body=message["body"], version=draft["version"] + 1)
+            route.fulfill(json=draft)
+
+        def discard_inline_comment(route: Route) -> None:
+            draft_id = route.request.url.split("/")[-2]
+            assert route.request.post_data_json["version"] == inline_drafts[draft_id]["version"]
+            del inline_drafts[draft_id]
+            route.fulfill(status=204)
+
+        page.route(f"{discussion_path}/inline-drafts", draft_inline_comment)
+        page.route(f"{discussion_path}/inline-drafts/*", draft_inline_comment)
+        page.route(f"{discussion_path}/inline-drafts/*/discard", discard_inline_comment)
 
         def grant_discussion_access(route: Route) -> None:
             assert route.request.post_data_json == {"user_id": "reviewer@example.test"}
@@ -2165,9 +2202,11 @@ def test_studio_review_from_pr_panel(
                     ],
                     "findings": [{"key": finding_key, "finding": report["findings"][0]}],
                     "comments": replies,
+                    "inline_drafts": list(inline_drafts.values()),
                     "questions": questions,
                     "agent_answers": agent_answers,
                     "can_comment": True,
+                    "can_draft_inline": True,
                     "can_ask": True,
                     "can_use_review_workspace": True,
                     "review_workspace_host_id": host_id,
@@ -2187,6 +2226,21 @@ def test_studio_review_from_pr_panel(
         )
         page.get_by_role("button", name="Post internal reply", exact=True).click()
         expect(page.get_by_text("Can we reproduce with empty input?", exact=True)).to_be_visible()
+        drafts = page.get_by_role("region", name="Private inline drafts")
+        drafts.get_by_role("button", name="Draft inline comment").click()
+        drafts.get_by_role("textbox", name="Inline comment draft").fill("Check the input first.")
+        drafts.get_by_role("button", name="Save draft").click()
+        expect(drafts.get_by_text("src/app/main.py:2 · Head", exact=True)).to_be_visible()
+        expect(drafts.get_by_text("Check the input first.", exact=True)).to_be_visible()
+        drafts.get_by_role("button", name="Edit draft").click()
+        drafts.get_by_role("textbox", name="Inline comment draft").fill(
+            "Validate empty input first."
+        )
+        drafts.get_by_role("button", name="Save draft").click()
+        expect(drafts.get_by_text("Validate empty input first.", exact=True)).to_be_visible()
+        page.screenshot(path=str(tmp_path / "review-inline-draft.png"))
+        drafts.get_by_role("button", name="Discard draft").click()
+        expect(drafts.get_by_text("Validate empty input first.", exact=True)).to_have_count(0)
         page.screenshot(path=str(tmp_path / "review-discussion.png"))
         page.get_by_role("region", name="Review context").locator(
             '[data-column-number="2"][data-line-type="change-addition"]'
