@@ -1836,6 +1836,33 @@ class SqlStudioReviewReceiptChunk(OmnigentBase):
     )
 
 
+class SqlStudioReviewCollaborator(OmnigentBase):
+    """Explicit access to a single captured review within a project."""
+
+    __tablename__ = "studio_review_collaborators"
+    workspace_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    run_id: Mapped[str] = mapped_column(Uuid16, primary_key=True)
+    user_key: Mapped[bytes] = mapped_column(_CKSUM32, primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    owner_user_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    user_generation: Mapped[str | None] = mapped_column(Uuid16, nullable=True)
+    owner_generation: Mapped[str | None] = mapped_column(Uuid16, nullable=True)
+
+
+class SqlStudioReviewComment(OmnigentBase):
+    """Internal discussion on a finding or line range in a captured patch."""
+
+    __tablename__ = "studio_review_comments"
+    workspace_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    run_id: Mapped[str] = mapped_column(Uuid16, primary_key=True)
+    id: Mapped[str] = mapped_column(Uuid16, primary_key=True)
+    author_user_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    author_generation: Mapped[str | None] = mapped_column(Uuid16, nullable=True)
+    anchor_json: Mapped[str] = mapped_column(CompressedText, nullable=False)
+    body: Mapped[str] = mapped_column(CompressedText, nullable=False)
+    created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
 class SqlStudioReviewPass(OmnigentBase):
     """Owner-private frozen PR context; execution remains owned by sessions."""
 
