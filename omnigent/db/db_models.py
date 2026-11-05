@@ -1785,6 +1785,7 @@ class SqlStudioReviewRun(OmnigentBase):
     )
     id: Mapped[str] = mapped_column(Uuid16, primary_key=True)
     owner_scope: Mapped[bytes] = mapped_column(_CKSUM32, nullable=False)
+    owner_generation: Mapped[str | None] = mapped_column(Uuid16, nullable=True)
     project_id: Mapped[str] = mapped_column(Uuid16, nullable=False)
     pr_key: Mapped[bytes] = mapped_column(_CKSUM32, nullable=False)
     request_key: Mapped[bytes] = mapped_column(_CKSUM32, nullable=False)
