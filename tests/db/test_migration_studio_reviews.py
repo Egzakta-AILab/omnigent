@@ -8,6 +8,8 @@ import sqlalchemy as sa
 from alembic import command
 
 from omnigent.db.db_models import (
+    SqlStudioReviewCollaborator,
+    SqlStudioReviewComment,
     SqlStudioReviewEvent,
     SqlStudioReviewOperation,
     SqlStudioReviewPass,
@@ -21,7 +23,7 @@ _PREVIOUS = "d0a1f879a01d"
 _REVISION = "e6a2b4c8d013"
 _PROJECT_ORIGIN = "5f9ca09e07cd"
 _RUNS = "8f4b6c20a115"
-_RUN_REPORTS = "5a7d60f93b12"
+_RUN_REPORTS = "4a5dfb4cc915"
 _TABLES = {"studio_review_passes", "studio_review_operations", "studio_review_events"}
 
 
@@ -74,6 +76,8 @@ def test_upgrade_and_downgrade_preserve_existing_database(tmp_path: Path) -> Non
             SqlStudioReviewRun,
             SqlStudioReviewPatchChunk,
             SqlStudioReviewReceiptChunk,
+            SqlStudioReviewCollaborator,
+            SqlStudioReviewComment,
         ):
             inspected = sa.inspect(engine)
             actual = {c["name"] for c in inspected.get_columns(model.__tablename__)}
