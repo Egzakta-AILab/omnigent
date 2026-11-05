@@ -422,6 +422,11 @@ Keep the patch file to reproduce the comparison. The
 command exits zero when the check fails on the captured head and passes
 with the patch. The receipt describes this check on these two snapshots.
 
+From the finding, open **Reproductions**, choose the fix-check JSON receipt
+and the matching patch, and select **Attach receipt**. The attached check
+shows both results, the export scope, and the proposed diff. People with
+access to the saved review can inspect the attachment.
+
 ### Discuss a saved review
 
 Select **Discuss finding** to open its thread, or **Discuss review** to open

@@ -7,6 +7,7 @@ import {
   attachFindingReproduction,
   listFindingReproductions,
   type AttachedReproduction,
+  type FixCheckSummary,
   type ReproductionSide,
   type ReviewRun,
 } from "./api";
@@ -90,20 +91,51 @@ function ReproductionOutcome({ label, side }: { label: string; side: Reproductio
   );
 }
 
+const FIX_OUTCOMES: Record<FixCheckSummary["outcome"], string> = {
+  fail_to_pass: "Failed before, passed after",
+  pass_to_pass: "Passed in both snapshots",
+  fail_to_fail: "Failed in both snapshots",
+  pass_to_fail: "Passed before, failed after",
+  inconclusive: "Inconclusive comparison",
+};
+
+function FixCheckDetails({ receipt }: { receipt: FixCheckSummary }) {
+  return (
+    <>
+      <p className="font-medium">{FIX_OUTCOMES[receipt.outcome]}</p>
+      <p className="break-all text-xs text-muted-foreground">
+        Export scope · {receipt.included_paths.join(", ") || "Full tracked snapshot"}
+      </p>
+      <ReproductionOutcome label="Captured head" side={receipt.before} />
+      <ReproductionOutcome label="Proposed snapshot" side={receipt.after} />
+      <details className="rounded-md border border-border px-2 py-1">
+        <summary className="cursor-pointer text-xs">View proposed patch</summary>
+        <pre className="mt-1 max-h-72 overflow-auto whitespace-pre-wrap break-all text-xs">
+          {receipt.patch}
+        </pre>
+      </details>
+    </>
+  );
+}
+
 function Reproductions({
   run,
   findingKey,
   viewerId,
+  canAttach = !!run.target,
 }: {
   run: Pick<ReviewRun, "id"> & Partial<Pick<ReviewRun, "target">>;
   findingKey: string;
   viewerId: string | null;
+  canAttach?: boolean;
 }) {
   const queryClient = useQueryClient();
   const queryKey = ["studio-finding-reproductions", viewerId, run.id, findingKey] as const;
   const [file, setFile] = useState<File>();
+  const [patchFile, setPatchFile] = useState<File>();
   const [copyStatus, setCopyStatus] = useState("");
   const fileInput = useRef<HTMLInputElement>(null);
+  const patchInput = useRef<HTMLInputElement>(null);
   const receipts = useQuery({
     queryKey,
     queryFn: ({ signal }) => listFindingReproductions(run.id, findingKey, signal),
@@ -112,10 +144,13 @@ function Reproductions({
     gcTime: run.target ? undefined : 0,
   });
   const attach = useMutation({
-    mutationFn: (selected: File) => attachFindingReproduction(run.id, findingKey, selected),
+    mutationFn: ({ selected, patch }: { selected: File; patch?: File }) =>
+      attachFindingReproduction(run.id, findingKey, selected, patch),
     onSuccess: async () => {
       setFile(undefined);
+      setPatchFile(undefined);
       if (fileInput.current) fileInput.current.value = "";
+      if (patchInput.current) patchInput.current.value = "";
       await queryClient.invalidateQueries({ queryKey });
     },
   });
@@ -132,16 +167,17 @@ function Reproductions({
 
   return (
     <section aria-label="Finding reproductions" className="mt-2 space-y-2 text-sm">
-      {run.target && (
+      {canAttach && (
         <>
           <p className="text-xs text-muted-foreground">
-            Attach a receipt from the Studio reproduce command for this saved review run.
+            Attach a check receipt for this saved review. For a fix check, include the Git patch you
+            tested. People with access to the review can open these files.
           </p>
           <form
             className="flex flex-wrap items-center gap-2"
             onSubmit={(event) => {
               event.preventDefault();
-              if (file && !attach.isPending) attach.mutate(file);
+              if (file && !attach.isPending) attach.mutate({ selected: file, patch: patchFile });
             }}
           >
             <input
@@ -156,6 +192,20 @@ function Reproductions({
                 attach.reset();
               }}
             />
+            <label className="grid gap-1 text-xs">
+              <span>Proposed patch for fix checks</span>
+              <input
+                ref={patchInput}
+                className="max-w-full text-xs"
+                type="file"
+                accept=".patch,.diff,text/plain"
+                disabled={attach.isPending}
+                onChange={(event) => {
+                  setPatchFile(event.target.files?.[0]);
+                  attach.reset();
+                }}
+              />
+            </label>
             <Button type="submit" size="sm" variant="outline" disabled={!file || attach.isPending}>
               {attach.isPending ? "Attaching…" : "Attach receipt"}
             </Button>
@@ -174,9 +224,10 @@ function Reproductions({
           <article key={digest} className="space-y-2 rounded-md border border-border p-2">
             <div className="flex flex-wrap items-center justify-between gap-1">
               <span className="text-xs font-medium">
-                Uploaded receipt · {new Date(receipt.observed_at).toLocaleString()}
+                {"patch" in receipt ? "Uploaded fix check" : "Uploaded receipt"} ·{" "}
+                {new Date(receipt.observed_at).toLocaleString()}
               </span>
-              {run.target && receipt.command && (
+              {run.target && receipt.command && "base" in receipt && (
                 <Button
                   size="sm"
                   variant="ghost"
@@ -190,18 +241,24 @@ function Reproductions({
             <p className="break-all font-mono text-xs" title="Sandbox image ID">
               {receipt.image_id}
             </p>
-            {run.target && receipt.command?.some(hasTerminalControls) && (
+            {receipt.command?.some(hasTerminalControls) && (
               <p className="text-xs text-muted-foreground">
                 This command contains terminal control characters. Re-enter it manually.
               </p>
             )}
-            {run.target && receipt.command && (
+            {receipt.command && (
               <p className="whitespace-pre-wrap break-all font-mono text-xs">
                 {receipt.command.map(shellQuote).join(" ")}
               </p>
             )}
-            <ReproductionOutcome label="Base" side={receipt.base} />
-            <ReproductionOutcome label="Head" side={receipt.head} />
+            {"patch" in receipt ? (
+              <FixCheckDetails receipt={receipt} />
+            ) : (
+              <>
+                <ReproductionOutcome label="Base" side={receipt.base} />
+                <ReproductionOutcome label="Head" side={receipt.head} />
+              </>
+            )}
           </article>
         ))}
       {copyStatus && <p role="status">{copyStatus}</p>}

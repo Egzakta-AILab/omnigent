@@ -193,6 +193,7 @@ class ReviewDiscussionView(FrozenModel):
     questions: list[ReviewQuestion] = Field(default_factory=list)
     agent_answers: list[SharedReviewAnswer] = Field(default_factory=list)
     can_comment: bool
+    can_attach_evidence: bool = False
     can_ask: bool = False
     can_use_review_workspace: bool = False
     review_workspace_host_id: str | None = None

@@ -1,5 +1,6 @@
 """Runner dispatch through authenticated routes and real ownership/sharing stores."""
 
+import hashlib
 import json
 from uuid import uuid4
 
@@ -1089,8 +1090,10 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
         assert shared.status_code == 200, shared.text
         view = shared.json()
         assert view["collaborators"] is None and view["can_comment"] is True
+        assert view["can_attach_evidence"] is False
         assert view["review_workspace_host_id"] is None
         owner_view = (await auth_client.get(discussion_path)).json()
+        assert owner_view["can_attach_evidence"] is True
         assert owner_view["review_workspace_host_id"] == host_id
         assert (view["base_sha"], view["head_sha"], view["patch"]) == (
             base_sha,
@@ -1108,6 +1111,35 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
         assert (
             await auth_client.post(reproduction_path, json=receipt, headers=foreign_headers)
         ).status_code == 404
+        proposal = "diff --git a/hello b/hello\n--- a/hello\n+++ b/hello\n"
+        proposal += "@@ -1 +1 @@\n-after\n+fixed\n"
+        fix = {
+            **{key: value for key, value in receipt.items() if key not in {"base", "head"}},
+            "schema_version": "omnigent.studio.fix-verification.v1",
+            "proposed_patch_sha256": hashlib.sha256(proposal.encode()).hexdigest(),
+            "included_paths": ["hello"],
+            "before": receipt["head"],
+            "after": {**side, "commit": "f" * 40},
+            "outcome": "fail_to_pass",
+            "patch": proposal,
+        }
+        for forged in (
+            {**fix, "patch": proposal.replace("fixed", "changed")},
+            {**fix, "outcome": "pass_to_pass"},
+        ):
+            assert (await auth_client.post(reproduction_path, json=forged)).status_code == 422
+        wrong_revision = {**fix, "source": {**fix["source"], "patch_sha256": "0" * 64}}
+        assert (await auth_client.post(reproduction_path, json=wrong_revision)).status_code == 409
+        fix_attachment = await auth_client.post(reproduction_path, json=fix)
+        assert fix_attachment.status_code == 200, fix_attachment.text
+        assert fix_attachment.json()["receipt"] == fix
+        assert (
+            await auth_client.post(reproduction_path, json=fix)
+        ).json() == fix_attachment.json()
+        shared_checks = (await auth_client.get(reproduction_path, headers=foreign_headers)).json()
+        shared_fix = next(item["receipt"] for item in shared_checks if "patch" in item["receipt"])
+        assert shared_fix["patch"] == proposal and shared_fix["outcome"] == "fail_to_pass"
+        assert {"command", "source"}.isdisjoint(shared_fix)
         message = {
             "id": uuid4().hex,
             "anchor": {"kind": "finding", "finding_key": finding_key},

@@ -112,7 +112,7 @@ from omnigent.studio.reviews.report import (
 from omnigent.studio.reviews.reproduction import (
     MAX_REPRODUCTION_BYTES,
     AttachedReproduction,
-    ReproductionReceipt,
+    ReviewCheckUpload,
     SharedAttachedReproduction,
 )
 from omnigent.studio.reviews.service import (
@@ -1374,6 +1374,7 @@ def create_studio_reviews_router(
             questions=questions,
             agent_answers=answers,
             can_comment=access.can_comment,
+            can_attach_evidence=access.actor == access.owner,
             can_ask=access.can_comment and create_reviewer is not None and send_review is not None,
             can_use_review_workspace=access.actor == access.owner,
             review_workspace_host_id=target.host_id if access.actor == access.owner else None,
@@ -1796,7 +1797,12 @@ def create_studio_reviews_router(
                 "required": True,
                 "content": {
                     "application/json": {
-                        "schema": {"$ref": "#/components/schemas/ReproductionReceipt"}
+                        "schema": {
+                            "anyOf": [
+                                {"$ref": "#/components/schemas/ReproductionReceipt"},
+                                {"$ref": "#/components/schemas/FixCheckEvidence"},
+                            ]
+                        }
                     }
                 },
             },
@@ -1807,10 +1813,14 @@ def create_studio_reviews_router(
     ) -> AttachedReproduction:
         run, owner = await require_saved_finding(request, run_id, finding_key)
         response.headers["Cache-Control"] = "no-store"
-        receipt = await _bounded_json(request, ReproductionReceipt, limit=MAX_REPRODUCTION_BYTES)
+        upload = await _bounded_json(request, ReviewCheckUpload, limit=MAX_REPRODUCTION_BYTES)
         try:
             return await asyncio.to_thread(
-                review_store.attach_reproduction, run.id, finding_key, receipt, owner_user_id=owner
+                review_store.attach_reproduction,
+                run.id,
+                finding_key,
+                upload.root,
+                owner_user_id=owner,
             )
         except ReviewNotFoundError as exc:
             raise HTTPException(404, str(exc)) from exc
