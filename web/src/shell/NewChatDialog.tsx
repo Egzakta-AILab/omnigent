@@ -24,7 +24,9 @@ import {
   useRef,
   useState,
 } from "react";
-import { useNavigate, useReplaceSearchParams, useSearchParams } from "@/lib/routing";
+import { Link, useLocation, useNavigate, useReplaceSearchParams, useSearchParams } from "@/lib/routing";
+import { useViewerId } from "@/hooks/useViewerId";
+import { readCreatorAuthoringDraft } from "@/lib/creatorAuthoringDraft";
 import { MAIN_CANVAS_ID } from "@/canvas/canvasLayout";
 import { CANVAS_QUERY_PARAM, canvasLocation } from "@/canvas/canvasNavigation";
 import { MobileHeaderControlPortal } from "./MobileHeaderControlsSlot";
@@ -2314,6 +2316,22 @@ function NewChatWorkspaceControls({
 }
 
 export function NewChatLandingScreen() {
+  const location = useLocation();
+  const id: unknown = location.state?.creatorAuthoringId;
+  return typeof id === "string" ? <CreatorAuthoringLanding id={id} /> : <NewChatLanding />;
+}
+
+function CreatorAuthoringLanding({ id }: { id: string }) {
+  const viewerId = useViewerId();
+  const creatorDraft = readCreatorAuthoringDraft(viewerId, id);
+  return <NewChatLanding key={creatorDraft?.id} creatorDraft={creatorDraft} />;
+}
+
+function NewChatLanding({
+  creatorDraft,
+}: {
+  creatorDraft?: ReturnType<typeof readCreatorAuthoringDraft>;
+}) {
   const [params] = useSearchParams();
   const navigate = useNavigate();
   const siblingSourceId = params.get("sibling");
@@ -2355,15 +2373,18 @@ export function NewChatLandingScreen() {
     <NewChatLandingContent
       key={siblingSourceId ?? "standalone"}
       siblingSourceId={siblingSourceId}
+      creatorDraft={creatorDraft}
       siblingSource={source.data}
     />
   );
 }
 
 function NewChatLandingContent({
+  creatorDraft,
   siblingSourceId,
   siblingSource,
 }: {
+  creatorDraft?: ReturnType<typeof readCreatorAuthoringDraft>;
   siblingSourceId: string | null;
   siblingSource?: Awaited<ReturnType<typeof getSessionSlim>>;
 }) {
@@ -2591,11 +2612,12 @@ function NewChatLandingContent({
   // visit (or a plain one) must not beat THIS visit's project defaults —
   // strip them so the prefill machine (fill-empty-only) can seed. Read once
   // per mount; only the lazy state initializers below consume it.
+  const parkedDraft = creatorDraft ? null : landingDraft;
   const restoredDraft: LandingDraft | null =
-    landingDraft === null || landingDraft.project === projectParam
-      ? landingDraft
+    parkedDraft === null || parkedDraft.project === projectParam
+      ? parkedDraft
       : {
-          ...landingDraft,
+          ...parkedDraft,
           pickedAgentId: null,
           pickedHarness: null,
           selectedHostId: null,
@@ -2639,6 +2661,7 @@ function NewChatLandingContent({
   // tags that text's tokens pointed at.
   const restoresDraftText = handoff === null && !linkedPrompt?.trim() && !restoresKeptLinkedPrompt;
   const [message, setMessage] = useState<string>(() => {
+    if (creatorDraft) return creatorDraft.prompt;
     if (handoff !== null) return handoff.text;
     if (linkedPrompt?.trim()) return linkedPrompt;
     if (restoresKeptLinkedPrompt) return keptLinkedPrompt?.text ?? "";
@@ -3152,13 +3175,14 @@ function NewChatLandingContent({
     onScreenRef.current = true;
     return () => {
       onScreenRef.current = false;
+      if (creatorDraft) return;
       if (!submittedRef.current) {
         writeLandingDraft(draftState, draftRef.current);
       } else if (submittedDraftRevisionRef.current === draftState.revision) {
         writeLandingDraft(draftState, null);
       }
     };
-  }, [draftState]);
+  }, [creatorDraft, draftState]);
 
   const { recent, addRecent } = useRecentWorkspaces(selectedHostId);
   const { addRecentHarness } = useRecentHarnesses();
@@ -6172,7 +6196,7 @@ function NewChatLandingContent({
         setMentionedItems(returnedDraft.mentions.files);
         setMentionedSessions(returnedDraft.mentions.sessions);
       }
-    } else {
+    } else if (!creatorDraft) {
       writeLandingDraft(draftState, returnedDraft);
     }
   }
@@ -6878,7 +6902,7 @@ function NewChatLandingContent({
         forgetKeptLinkedPrompt(siblingSourceId, submittedLinkedPrompt);
         submittedKeptPromptIds.delete(submittedLinkedPrompt.id);
       }
-      if (submittedDraftRevisionRef.current === draftState.revision) {
+      if (!creatorDraft && submittedDraftRevisionRef.current === draftState.revision) {
         writeLandingDraft(draftState, null);
       }
 
@@ -7544,6 +7568,17 @@ function NewChatLandingContent({
           )}
           data-testid="new-chat-landing-composer-surface"
         >
+          {creatorDraft && (
+            <div className="mb-3 space-y-1 rounded-md border px-3 py-2 text-sm">
+              <p className="font-medium">Creator authoring draft</p>
+              <p className="text-muted-foreground">
+                Review the prompt and choose an agent and an isolated workspace before sending.
+              </p>
+              <Link className="underline" to={creatorDraft.returnTo}>
+                Back to Creator Mode
+              </Link>
+            </div>
+          )}
           {!isMobileViewport && workspaceControls}
           <form
             onSubmit={(e) => {
