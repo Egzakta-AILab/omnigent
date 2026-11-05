@@ -24,6 +24,7 @@ import {
   type ReviewQuestion,
   type SharedReviewAnswer,
 } from "./api";
+import type { ReviewProofTarget } from "./creatorReviewBridge";
 
 export interface QuestionAttempt {
   intent: string;
@@ -206,6 +207,7 @@ function AskForm({
   action,
   attempt,
   refresh,
+  suggestedProof,
 }: {
   discussion: ReviewDiscussion;
   anchor: DiscussionAnchor;
@@ -213,9 +215,13 @@ function AskForm({
   action: QuestionAction;
   attempt: RefObject<QuestionAttempt | undefined>;
   refresh: () => Promise<void>;
+  suggestedProof?: ReviewProofTarget;
 }) {
   const [selection, setSelection] = useState("");
-  const [proofDigest, setProofDigest] = useState("");
+  const [proofSelection, setProofSelection] = useState<{
+    suggestion: ReviewProofTarget | undefined;
+    digest: string;
+  }>();
   const findingKey = anchor.kind === "finding" ? anchor.finding_key : "";
   const proofs = useQuery({
     queryKey: findingReproductionsKey(viewerId, discussion.id, findingKey),
@@ -223,6 +229,14 @@ function AskForm({
     enabled: !!findingKey,
     retry: false,
   });
+  const requestedDigest =
+    proofSelection && proofSelection.suggestion === suggestedProof
+      ? proofSelection.digest
+      : suggestedProof?.receiptDigest;
+  const proofDigest =
+    proofs.isSuccess && proofs.data.some(({ digest }) => digest === requestedDigest)
+      ? requestedDigest
+      : "";
   const isProposal = action !== "question";
   const [body, setBody] = useState(
     action === "propose_check"
@@ -268,6 +282,7 @@ function AskForm({
   const ready =
     (reviewerKey || nativeAgent) &&
     !!body.trim() &&
+    (!requestedDigest || !!proofDigest) &&
     validModel &&
     validEffort &&
     (reviewWorkspace || (!!hostId && !!workspace.trim()));
@@ -311,17 +326,24 @@ function AskForm({
             ? "The agent drafts a patch from the captured diff in a private session using its native permissions. Review the patch before running a fix check."
             : "The agent receives the captured diff in a private session on the selected host, using its native permissions. Read its answer before sharing it."}
       </p>
-      {!!proofs.data?.length && (
+      {(!!proofs.data?.length || !!requestedDigest) && (
         <label className="grid gap-1">
           <span>Include check receipt</span>
           <select
             className="w-full rounded-md border bg-background p-1"
-            value={proofDigest}
+            value={requestedDigest || ""}
             disabled={ask.isPending}
-            onChange={(event) => setProofDigest(event.target.value)}
+            onChange={(event) =>
+              setProofSelection({ suggestion: suggestedProof, digest: event.target.value })
+            }
           >
             <option value="">None</option>
-            {proofs.data.map(({ digest, receipt }) => (
+            {requestedDigest && !proofDigest && (
+              <option value={requestedDigest} disabled>
+                {proofs.isPending ? "Loading receipt…" : "Receipt unavailable"}
+              </option>
+            )}
+            {(proofs.isSuccess ? proofs.data : []).map(({ digest, receipt }) => (
               <option key={digest} value={digest}>
                 {"base" in receipt ? "Reproduction" : "Fix comparison"} ·{" "}
                 {new Date(receipt.observed_at).toLocaleString()} · {digest.slice(0, 8)}
@@ -495,6 +517,7 @@ export function DiscussionQuestions({
   viewerId,
   attempt,
   refresh,
+  suggestedProof,
 }: {
   discussion: ReviewDiscussion;
   anchor: DiscussionAnchor;
@@ -503,8 +526,20 @@ export function DiscussionQuestions({
   viewerId: string | null;
   attempt: RefObject<QuestionAttempt | undefined>;
   refresh: () => Promise<void>;
+  suggestedProof?: ReviewProofTarget;
 }) {
-  const [open, setOpen] = useState<QuestionAction | null>(null);
+  const [composer, setComposer] = useState<{
+    suggestion: ReviewProofTarget | undefined;
+    action: QuestionAction | null;
+  }>();
+  const open =
+    composer && composer.suggestion === suggestedProof
+      ? composer.action
+      : suggestedProof
+        ? "question"
+        : null;
+  const setOpen = (action: QuestionAction | null) =>
+    setComposer({ suggestion: suggestedProof, action });
   return (
     <div className="space-y-2">
       {answers.map((item) => (
@@ -575,6 +610,7 @@ export function DiscussionQuestions({
               viewerId={viewerId}
               attempt={attempt}
               refresh={refresh}
+              suggestedProof={open === "question" ? suggestedProof : undefined}
             />
           )}
         </>

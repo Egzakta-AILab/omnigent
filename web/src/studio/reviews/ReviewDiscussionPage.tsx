@@ -18,6 +18,8 @@ import { InlineDrafts, type DraftAttempt } from "./InlineDrafts";
 import { InlinePublication } from "./InlinePublication";
 import { DiscussionQuestions, type QuestionAttempt } from "./DiscussionQuestions";
 import { ReviewDiff } from "./ReviewDiff";
+import { CreatorReviewPanels } from "./CreatorReviewPanels";
+import type { ReviewProofTarget } from "./creatorReviewBridge";
 
 function anchorKey(anchor: DiscussionAnchor) {
   return JSON.stringify(
@@ -155,6 +157,8 @@ function DiscussionContent({
   );
   const [body, setBody] = useState("");
   const [copyStatus, setCopyStatus] = useState("");
+  const [focusedProof, setFocusedProof] = useState<ReviewProofTarget>();
+  const [suggestedProof, setSuggestedProof] = useState<ReviewProofTarget>();
   const attempt = useRef<{ fingerprint: string; id: string } | undefined>(undefined);
   const questionAttempt = useRef<QuestionAttempt | undefined>(undefined);
   const draftAttempt = useRef<DraftAttempt | undefined>(undefined);
@@ -200,9 +204,22 @@ function DiscussionContent({
   );
   function select(next: DiscussionAnchor | null) {
     if (send.isPending) return;
+    setFocusedProof(undefined);
+    setSuggestedProof(undefined);
     setAnchor(next);
     setBody("");
     send.reset();
+  }
+
+  function showPanelProof(target: ReviewProofTarget, attach: boolean) {
+    if (send.isPending) return false;
+    if (target.findingKey !== selectedFinding?.key) {
+      if (body.trim()) return false;
+      select({ kind: "finding", finding_key: target.findingKey });
+    }
+    if (attach) setSuggestedProof(target);
+    else setFocusedProof(target);
+    return true;
   }
 
   return (
@@ -255,6 +272,7 @@ function DiscussionContent({
           </div>
         </header>
         <Sharing discussion={discussion} refresh={refresh} />
+        <CreatorReviewPanels runId={discussion.id} onProof={showPanelProof} />
         {discussion.can_publish_inline && publicationDrafts.length > 0 && (
           <InlinePublication runId={discussion.id} drafts={publicationDrafts} refresh={refresh} />
         )}
@@ -334,6 +352,7 @@ function DiscussionContent({
                       viewerId={viewerId}
                       canAttach={discussion.can_attach_evidence}
                       canReReview={discussion.can_attach_evidence && !discussion.candidate}
+                      focusProof={focusedProof}
                     />
                   </>
                 )}
@@ -377,6 +396,7 @@ function DiscussionContent({
                   viewerId={viewerId}
                   attempt={questionAttempt}
                   refresh={refresh}
+                  suggestedProof={suggestedProof}
                 />
                 {discussion.can_comment && (
                   <form

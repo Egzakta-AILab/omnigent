@@ -71,6 +71,8 @@ links findings to their captured changes.
   collaborator to confirm selected drafts on the captured revision.
 - `webhook-inline-drafts`: An opted-in receiver prepares drafts from
   citation-checked critical and high findings after all selected reviewers report.
+- `creator-review-panel`: An operator-installed pilot panel opens a check
+  receipt or preselects it in **Ask an agent** on the saved review.
 
 ## How to get to it (user POV)
 
@@ -88,6 +90,8 @@ links findings to their captured changes.
 - `webhook-inline-drafts`: Enable **prepare_inline_drafts** on the review
   route. After the bot run finishes, open its shared review and inspect
   **Publish inline drafts** as a publisher.
+- `creator-review-panel`: Enable the [review panel pilot](../docs/extending/extensions.md#creator-mode-review-panel-pilot)
+  and open the installed panel by name in the review discussion.
 
 A session with one PR opens its details directly. With multiple PRs, select a
 request from the list first; **All pull requests** returns to that list.
@@ -174,6 +178,10 @@ and replay does not send another comment.
 For the automatic-draft path, the same server test checks waiting, a changed
 head, citation filtering, replay and discard. The webhook test checks the
 receiver's persisted retry state across restarts.
+
+`tests/browser_ui/test_creator_review_panel.py` loads a fixture bundle in the
+built app and checks proof navigation, question prefill, and rejection of a
+request outside the panel's grants.
 
 Render recovery has component coverage in
 `web/src/components/RenderErrorBoundary.test.tsx` and

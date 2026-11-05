@@ -20,6 +20,7 @@ from omnigent.extensions.registry import (
     plugin_state,
     validate_manifest,
 )
+from omnigent.extensions.review_panel import ReviewPanelContribution
 
 __all__ = [
     "ENTRY_POINT_GROUP",
@@ -33,6 +34,7 @@ __all__ = [
     "ExtensionValidationError",
     "PageContribution",
     "PrimaryNavigationContribution",
+    "ReviewPanelContribution",
     "check_extension_package",
     "extension_manifest",
     "extension_manifests",

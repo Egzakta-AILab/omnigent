@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import Mapping
 from typing import Literal
 
 from fastapi import APIRouter, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from omnigent.errors import ErrorCode, OmnigentError
-from omnigent.extensions import ExtensionManifest, ExtensionPluginState
+from omnigent.extensions import ExtensionManifest, ExtensionPluginState, ReviewPanelContribution
 from omnigent.extensions.assets import ASSET_SCRIPT, ASSET_STYLES, ResolvedBundle
 from omnigent.server.auth import AuthProvider, effective_admin
 from omnigent.server.routes._auth_helpers import require_user
@@ -61,6 +62,9 @@ class ExtensionResponse(BaseModel):
     pages: list[ExtensionPageResponse]
     primary_navigation: list[ExtensionPrimaryNavigationResponse]
     browser: ExtensionBrowserBundleResponse
+    review_panel: ReviewPanelContribution | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class ExtensionListResponse(BaseModel):
@@ -134,6 +138,11 @@ def _serialize_manifest(
         permissions=sorted(permission.value for permission in manifest.permissions),
         pages=pages,
         primary_navigation=navigation,
+        review_panel=(
+            manifest.review_panel
+            if bundle is not None and os.environ.get("OMNIGENT_STUDIO_CREATOR_PILOT") == "1"
+            else None
+        ),
         browser=ExtensionBrowserBundleResponse(
             declared=manifest.entrypoints.browser is not None,
             has_styles=manifest.entrypoints.browser_css is not None,
