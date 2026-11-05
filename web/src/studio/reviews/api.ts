@@ -3,11 +3,57 @@ import { apiErrorFromResponse } from "@/lib/sessionsApi";
 
 export type ReviewHarness = "codex-native" | "claude-native";
 
+export interface ReviewProfileDefaults {
+  harness?: ReviewHarness | null;
+  model?: string | null;
+  reasoning_effort?: string | null;
+}
+
 export interface ReviewerProfile {
   id: string;
   label: string;
   description?: string | null;
   digest: string;
+  defaults?: ReviewProfileDefaults | null;
+}
+
+export interface ReviewProfileDraft {
+  id: string;
+  label: string;
+  description: string;
+  instructions: string;
+  archived: boolean;
+  defaults?: ReviewProfileDefaults | null;
+}
+
+export interface ReviewProfileEditorEntry extends ReviewProfileDraft {
+  source: string;
+  managed: boolean;
+}
+
+interface ReviewProfileEditorCatalog {
+  revision: string;
+  profiles: ReviewProfileEditorEntry[];
+}
+
+export const REVIEW_PROFILE_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+const REVISION = /^[0-9a-f]{64}$/;
+export const REVIEW_HARNESS_LABELS: Record<ReviewHarness, string> = {
+  "codex-native": "Codex",
+  "claude-native": "Claude Code",
+};
+
+function hasValidDefaults(defaults: ReviewProfileDefaults | null | undefined): boolean {
+  return (
+    defaults == null ||
+    (typeof defaults === "object" &&
+      !Array.isArray(defaults) &&
+      (defaults.harness == null ||
+        defaults.harness === "codex-native" ||
+        defaults.harness === "claude-native") &&
+      (defaults.model == null || typeof defaults.model === "string") &&
+      (defaults.reasoning_effort == null || typeof defaults.reasoning_effort === "string"))
+  );
 }
 
 export interface ReviewPass {
@@ -145,13 +191,57 @@ export async function listReviewerProfiles(sessionId: string, signal: AbortSigna
         !profile.label.trim() ||
         (profile.description != null && typeof profile.description !== "string") ||
         typeof profile.digest !== "string" ||
-        !/^[0-9a-f]{64}$/.test(profile.digest),
+        !REVISION.test(profile.digest) ||
+        !hasValidDefaults(profile.defaults),
     ) ||
     new Set(body.profiles.map((profile) => profile.id)).size !== body.profiles.length
   ) {
     throw new Error("Invalid reviewer profile catalog");
   }
   return body.profiles;
+}
+
+async function profileEditorRequest(endpoint: string, init: RequestInit) {
+  const result = await reviewRequest<ReviewProfileEditorCatalog | null>(endpoint, init);
+  if (
+    typeof result?.revision !== "string" ||
+    !result.revision ||
+    result.revision.length > 256 ||
+    !Array.isArray(result.profiles) ||
+    result.profiles.some(
+      (profile) =>
+        !profile ||
+        typeof profile.id !== "string" ||
+        !REVIEW_PROFILE_ID.test(profile.id) ||
+        typeof profile.label !== "string" ||
+        typeof profile.description !== "string" ||
+        typeof profile.instructions !== "string" ||
+        typeof profile.source !== "string" ||
+        typeof profile.managed !== "boolean" ||
+        typeof profile.archived !== "boolean" ||
+        !hasValidDefaults(profile.defaults),
+    ) ||
+    new Set(result.profiles.map((profile) => profile.id)).size !== result.profiles.length
+  ) {
+    throw new Error("Invalid reviewer profile editor response");
+  }
+  return result;
+}
+
+export function getReviewProfileEditor(endpoint: string, signal: AbortSignal) {
+  return profileEditorRequest(endpoint, { signal });
+}
+
+export function saveReviewProfileEditor(
+  endpoint: string,
+  revision: string,
+  profile: ReviewProfileDraft,
+) {
+  return profileEditorRequest(endpoint, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ revision, profile }),
+  });
 }
 
 export async function captureReview(sessionId: string, input: CaptureReview, key: string) {

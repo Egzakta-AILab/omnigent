@@ -3613,11 +3613,13 @@ def register_resources_routes(
     async def get_workspace_repositories(
         request: Request,
         session_id: str,
-        repository: str | None = Query(
-            default=None, min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$"
-        ),
+        repository: str | None = Query(default=None, min_length=1, max_length=512),
     ) -> dict[str, Any]:
         """Read declared workspace members or look up one member's branch PR."""
+        from omnigent.workspace_repositories import is_workspace_repository_path
+
+        if repository is not None and not is_workspace_repository_path(repository):
+            raise HTTPException(422, "Choose a workspace-relative repository path")
         if repository is None:
             conv = await _authorize_browse_read(session_id, request)
         else:

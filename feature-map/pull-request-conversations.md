@@ -9,9 +9,10 @@ links findings to their captured changes.
 
 - `request-selection`: A single PR opens its details directly; multiple PRs open
   a list with navigation back from details.
-- `workspace-repositories`: In a session rooted at a workspace with a version 1
-  `repos.yaml`, choose a declared nested checkout, find its open GitHub branch
-  PR, and link it to the session. The agent keeps the workspace working directory.
+- `workspace-repositories`: Choose a declared or Active nested checkout, find
+  its open GitHub branch PR, and link it to the session. Owners can open
+  **Manage repositories** here or in Project settings, set a scan depth, and
+  save checkout assignments. The agent keeps the workspace working directory.
 - `commit-history`: Comments interleave commit and force-push entries by time,
   with short commit links and exact timestamps on hover. Missing history is
   marked incomplete; the Comments badge counts only comments.
@@ -63,8 +64,11 @@ request from the list first; **All pull requests** returns to that list.
 Choose Comments on any of these surfaces to see commit history.
 Choose **Review** to open private native reviews on the fork as session owner.
 Open **Workspace repositories** in Pull Requests to choose a checkout declared
-in the workspace manifest. **Find branch PR** looks up that checkout's branch.
+in the workspace manifest or saved as Active. **Find branch PR** looks up that
+checkout's branch.
 **Link this PR** makes the found PR available in the current session.
+Choose **Manage profiles** in Review to create or edit workspace guidance. The
+same editor is available in Project settings for a saved host and directory.
 
 With a pointer, hovering the composer's PR link previews each PR's status. The
 icon beside each title opens that PR in a new browser tab without opening the
@@ -112,8 +116,9 @@ pagination, old-side placement, revision, permission and failure matrices.
 drives **Review** from the rail, both composer layouts and Canvas. It scripts
 GitHub, host catalogs and review responses to check model and reasoning
 selection, a retry after a lost start response, report repair, and navigation
-to a captured line. The rail case selects a nested checkout, links its branch
-PR, and starts a review with a workspace profile from the enclosing workspace.
+to a captured line. The rail case scans and promotes a nested checkout, links
+its branch PR, and creates and uses a workspace profile from the enclosing
+workspace.
 The other cases choose a native skill. The rail also checks that an earlier
 report stays separate from the updated diff.
 Use the [local review walkthrough](../docs/studio/README.md#run-a-review-locally)

@@ -6270,6 +6270,161 @@
         "title": "ReviewProfile",
         "type": "object"
       },
+      "ReviewProfileDraft": {
+        "additionalProperties": false,
+        "properties": {
+          "archived": {
+            "title": "Archived",
+            "type": "boolean"
+          },
+          "defaults": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReviewRoleDefaults"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "description": {
+            "default": "",
+            "maxLength": 512,
+            "title": "Description",
+            "type": "string"
+          },
+          "id": {
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+            "title": "Id",
+            "type": "string"
+          },
+          "instructions": {
+            "maxLength": 8192,
+            "minLength": 1,
+            "title": "Instructions",
+            "type": "string"
+          },
+          "label": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Label",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "instructions",
+          "archived"
+        ],
+        "title": "ReviewProfileDraft",
+        "type": "object"
+      },
+      "ReviewProfileEditor": {
+        "additionalProperties": false,
+        "properties": {
+          "profiles": {
+            "items": {
+              "$ref": "#/components/schemas/ReviewProfileEditorEntry"
+            },
+            "maxItems": 64,
+            "title": "Profiles",
+            "type": "array"
+          },
+          "revision": {
+            "pattern": "^(?:[0-9a-f]{64}:)?(?:[0-9a-f]{64}|missing)$",
+            "title": "Revision",
+            "type": "string"
+          }
+        },
+        "required": [
+          "revision",
+          "profiles"
+        ],
+        "title": "ReviewProfileEditor",
+        "type": "object"
+      },
+      "ReviewProfileEditorEntry": {
+        "additionalProperties": false,
+        "properties": {
+          "archived": {
+            "title": "Archived",
+            "type": "boolean"
+          },
+          "defaults": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReviewRoleDefaults"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "description": {
+            "default": "",
+            "maxLength": 512,
+            "title": "Description",
+            "type": "string"
+          },
+          "id": {
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+            "title": "Id",
+            "type": "string"
+          },
+          "instructions": {
+            "maxLength": 8192,
+            "minLength": 1,
+            "title": "Instructions",
+            "type": "string"
+          },
+          "label": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Label",
+            "type": "string"
+          },
+          "managed": {
+            "title": "Managed",
+            "type": "boolean"
+          },
+          "source": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "instructions",
+          "archived",
+          "source",
+          "managed"
+        ],
+        "title": "ReviewProfileEditorEntry",
+        "type": "object"
+      },
+      "ReviewProfileEditorWrite": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "$ref": "#/components/schemas/ReviewProfileDraft"
+          },
+          "revision": {
+            "pattern": "^(?:[0-9a-f]{64}:)?(?:[0-9a-f]{64}|missing)$",
+            "title": "Revision",
+            "type": "string"
+          }
+        },
+        "required": [
+          "revision",
+          "profile"
+        ],
+        "title": "ReviewProfileEditorWrite",
+        "type": "object"
+      },
       "ReviewReport": {
         "additionalProperties": false,
         "description": "View of the report as observed in the reviewer's durable transcript.",
@@ -6322,6 +6477,16 @@
       "ReviewRole": {
         "additionalProperties": false,
         "properties": {
+          "defaults": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReviewRoleDefaults"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "description": {
             "default": "",
             "maxLength": 512,
@@ -6351,6 +6516,54 @@
           "digest"
         ],
         "title": "ReviewRole",
+        "type": "object"
+      },
+      "ReviewRoleDefaults": {
+        "additionalProperties": false,
+        "properties": {
+          "harness": {
+            "anyOf": [
+              {
+                "enum": [
+                  "codex-native",
+                  "claude-native"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Harness"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reasoning Effort"
+          }
+        },
+        "title": "ReviewRoleDefaults",
         "type": "object"
       },
       "ReviewRolesResponse": {
@@ -7013,6 +7226,11 @@
           "studio_reviews": {
             "default": false,
             "title": "Studio Reviews",
+            "type": "boolean"
+          },
+          "studio_workspace_settings": {
+            "default": false,
+            "title": "Studio Workspace Settings",
             "type": "boolean"
           },
           "workspace_repositories": {
@@ -11736,6 +11954,77 @@
           "type"
         ],
         "title": "ValidationError",
+        "type": "object"
+      },
+      "_RepositoryAssignment": {
+        "additionalProperties": false,
+        "properties": {
+          "origin": {
+            "anyOf": [
+              {
+                "maxLength": 512,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Origin"
+          },
+          "path": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Path",
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "active",
+              "reference",
+              "excluded"
+            ],
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "role"
+        ],
+        "title": "_RepositoryAssignment",
+        "type": "object"
+      },
+      "_RepositorySettingsWrite": {
+        "additionalProperties": false,
+        "properties": {
+          "depth": {
+            "format": "int64",
+            "maximum": 5.0,
+            "minimum": 0.0,
+            "title": "Depth",
+            "type": "integer"
+          },
+          "repositories": {
+            "items": {
+              "$ref": "#/components/schemas/_RepositoryAssignment"
+            },
+            "maxItems": 64,
+            "title": "Repositories",
+            "type": "array"
+          },
+          "revision": {
+            "maxLength": 160,
+            "minLength": 1,
+            "title": "Revision",
+            "type": "string"
+          }
+        },
+        "required": [
+          "revision",
+          "depth",
+          "repositories"
+        ],
+        "title": "_RepositorySettingsWrite",
         "type": "object"
       }
     },
@@ -20881,6 +21170,264 @@
         "summary": "Get Usage",
         "tags": [
           "usage"
+        ]
+      }
+    },
+    "/v1/{scope}/{record_id}/studio/repositories": {
+      "get": {
+        "operationId": "get_repository_settings_v1__scope___record_id__studio_repositories_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "scope",
+            "required": true,
+            "schema": {
+              "enum": [
+                "sessions",
+                "projects"
+              ],
+              "title": "Scope",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "record_id",
+            "required": true,
+            "schema": {
+              "title": "Record Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "depth",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maximum": 5,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Depth"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Repository Settings V1  Scope   Record Id  Studio Repositories Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Repository Settings",
+        "tags": [
+          "studio_workspace"
+        ]
+      },
+      "put": {
+        "operationId": "save_repository_settings_v1__scope___record_id__studio_repositories_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "scope",
+            "required": true,
+            "schema": {
+              "enum": [
+                "sessions",
+                "projects"
+              ],
+              "title": "Scope",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "record_id",
+            "required": true,
+            "schema": {
+              "title": "Record Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/_RepositorySettingsWrite"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Save Repository Settings V1  Scope   Record Id  Studio Repositories Put",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Save Repository Settings",
+        "tags": [
+          "studio_workspace"
+        ]
+      }
+    },
+    "/v1/{scope}/{record_id}/studio/review-profiles/editor": {
+      "get": {
+        "operationId": "get_profile_editor_v1__scope___record_id__studio_review_profiles_editor_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "scope",
+            "required": true,
+            "schema": {
+              "enum": [
+                "sessions",
+                "projects"
+              ],
+              "title": "Scope",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "record_id",
+            "required": true,
+            "schema": {
+              "title": "Record Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewProfileEditor"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Profile Editor",
+        "tags": [
+          "studio_workspace"
+        ]
+      },
+      "put": {
+        "operationId": "save_profile_editor_v1__scope___record_id__studio_review_profiles_editor_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "scope",
+            "required": true,
+            "schema": {
+              "enum": [
+                "sessions",
+                "projects"
+              ],
+              "title": "Scope",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "record_id",
+            "required": true,
+            "schema": {
+              "title": "Record Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReviewProfileEditorWrite"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewProfileEditor"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Save Profile Editor",
+        "tags": [
+          "studio_workspace"
         ]
       }
     }
