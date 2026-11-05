@@ -4,14 +4,30 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    ValidationInfo,
+    field_validator,
+)
 
+from omnigent.models.model_override import validate_model_override
+from omnigent.util.reasoning_effort import EFFORT_VALUES, validate_effort
 from omnigent.util.uuid import normalize_uuid
 
 BoundedText = Annotated[str, StringConstraints(min_length=1, max_length=256)]
 Sha = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")]
 ReviewRoleId = Annotated[str, StringConstraints(pattern=r"^[a-z0-9][a-z0-9_-]{0,63}$")]
 ReviewRoleDigest = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+ReviewProfileEditorRevision = Annotated[
+    str, StringConstraints(pattern=r"^(?:[0-9a-f]{64}:)?(?:[0-9a-f]{64}|missing)$")
+]
+ReviewHarness = Literal["codex-native", "claude-native"]
+ReviewRoleLabel = Annotated[str, StringConstraints(min_length=1, max_length=128)]
+ReviewRoleDescription = Annotated[str, StringConstraints(max_length=512)]
+MAX_REVIEW_INSTRUCTION_BYTES = 8 * 1024
 ReviewAction = Literal[
     "review.capture", "review.start", "review.continue", "review.cancel", "review.publish"
 ]
@@ -36,17 +52,84 @@ class FrozenModel(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
 
+class ReviewRoleDefaults(FrozenModel):
+    harness: ReviewHarness | None = None
+    model: BoundedText | None = None
+    reasoning_effort: BoundedText | None = None
+
+    @field_validator("model")
+    @classmethod
+    def normalize_model(cls, model: str | None) -> str | None:
+        return validate_model_override(model) if model is not None else None
+
+    @field_validator("reasoning_effort")
+    @classmethod
+    def normalize_effort(cls, effort: str | None) -> str | None:
+        return (
+            validate_effort(effort, "review profile", EFFORT_VALUES)
+            if effort is not None
+            else None
+        )
+
+
 class ReviewRole(FrozenModel):
     id: ReviewRoleId
-    label: Annotated[str, StringConstraints(min_length=1, max_length=128)]
-    description: Annotated[str, StringConstraints(max_length=512)] = ""
+    label: ReviewRoleLabel
+    description: ReviewRoleDescription = ""
     digest: ReviewRoleDigest
+    defaults: ReviewRoleDefaults | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+
+
+class ReviewProfileDraft(FrozenModel):
+    id: ReviewRoleId
+    label: ReviewRoleLabel
+    description: ReviewRoleDescription = ""
+    instructions: Annotated[str, StringConstraints(min_length=1, max_length=8192)]
+    archived: bool = Field(strict=True)
+    defaults: ReviewRoleDefaults | None = None
+
+    @field_validator("label", "description")
+    @classmethod
+    def normalize_metadata(cls, value: str, info: ValidationInfo) -> str:
+        value = value.strip()
+        if (value and not value.isprintable()) or (info.field_name == "label" and not value):
+            raise ValueError("Use a single line of text")
+        return value
+
+    @field_validator("instructions")
+    @classmethod
+    def normalize_instructions(cls, value: str) -> str:
+        value = value.strip()
+        if (
+            not value
+            or "\x00" in value
+            or len(value.encode("utf-8")) > MAX_REVIEW_INSTRUCTION_BYTES
+        ):
+            raise ValueError("Enter review instructions up to 8 KiB")
+        return value
+
+
+class ReviewProfileEditorEntry(ReviewProfileDraft):
+    source: Annotated[str, StringConstraints(min_length=1, max_length=512)]
+    managed: bool
+
+
+class ReviewProfileEditor(FrozenModel):
+    revision: ReviewProfileEditorRevision
+    profiles: list[ReviewProfileEditorEntry] = Field(max_length=64)
+
+
+class ReviewProfileEditorWrite(FrozenModel):
+    revision: ReviewProfileEditorRevision
+    profile: ReviewProfileDraft
 
 
 class ReviewProfile(FrozenModel):
     agent_id: str
     agent_version: BoundedText
-    harness: Literal["codex-native", "claude-native"]
+    harness: ReviewHarness
     skill: BoundedText | None = None
     model: BoundedText | None = None
     reasoning_effort: BoundedText | None = None

@@ -96,6 +96,41 @@ def test_project_settings_worktree_toggle_persists(
     )
 
 
+def test_project_settings_opens_workspace_managers(
+    page: Page, seeded_session: tuple[str, str]
+) -> None:
+    """Both nested dialogs use the saved project target and return to settings."""
+    base_url, session_id = seeded_session
+    project = f"Workspace {uuid.uuid4().hex[:6]}"
+    project_id = _create_project(base_url, project)
+    workspace = "/work/acme/core-and-references"
+    _set_project_config(base_url, project_id, {"host_id": "a" * 32, "workspace": workspace})
+    studio = f"**/v1/projects/{project_id}/studio"
+    page.route(
+        f"{studio}/repositories",
+        lambda route: route.fulfill(
+            json={"revision": "initial", "depth": 2, "repositories": [], "truncated": False}
+        ),
+    )
+    page.route(
+        f"{studio}/review-profiles/editor",
+        lambda route: route.fulfill(json={"revision": "initial", "profiles": []}),
+    )
+    page.goto(f"{base_url}/c/{session_id}")
+    _open_project_settings(page, project)
+    settings = page.get_by_role("dialog", name="Project settings", exact=True)
+    settings.get_by_role("button", name="Repositories", exact=True).click()
+    repositories = page.get_by_role("dialog", name="Workspace repositories", exact=True)
+    expect(repositories.get_by_text(workspace, exact=True)).to_be_visible()
+    expect(repositories.get_by_role("button", name="Scan repositories")).to_be_enabled()
+    repositories.get_by_role("button", name="Close", exact=True).click()
+    settings.get_by_role("button", name="Reviewer profiles", exact=True).click()
+    profiles = page.get_by_role("dialog", name="Reviewer profiles", exact=True)
+    expect(profiles.get_by_role("button", name="New profile")).to_be_enabled()
+    profiles.get_by_role("button", name="Close", exact=True).click()
+    expect(settings.get_by_test_id("project-settings-save")).to_be_enabled()
+
+
 def test_project_settings_clears_worktree_toggle(
     page: Page,
     seeded_session: tuple[str, str],

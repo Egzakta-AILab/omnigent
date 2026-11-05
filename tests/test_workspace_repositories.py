@@ -1,4 +1,4 @@
-"""The workspace inventory and PR lookup stay scoped to declared Git checkouts."""
+"""Discovery and PR lookup stay scoped to classified workspace checkouts."""
 
 from __future__ import annotations
 
@@ -9,9 +9,14 @@ from typing import Any
 
 import pytest
 
+from omnigent import workspace_repositories
 from omnigent.runner import github_resource
 from omnigent.workspace_fs import WorkspaceReaderError
-from omnigent.workspace_repositories import read_workspace_repositories
+from omnigent.workspace_repositories import (
+    read_repository_settings,
+    read_workspace_repositories,
+    write_repository_settings,
+)
 
 
 def _git(root: Path, *args: str) -> None:
@@ -80,6 +85,16 @@ def test_no_manifest_does_not_scan_workspace(tmp_path: Path):
     _checkout(tmp_path, "KVARK")
 
     assert read_workspace_repositories(tmp_path) == {"manifest": None, "repositories": []}
+
+
+def test_unrelated_manifest_does_not_block_discovery(tmp_path: Path):
+    _checkout(tmp_path, "app")
+    (tmp_path / "repos.yaml").write_text("repositories: [app]\n", encoding="utf-8")
+
+    result = read_repository_settings(tmp_path, scan_depth=1)
+    assert [(repo["path"], repo["role"]) for repo in result["repositories"]] == [
+        ("app", "reference")
+    ]
 
 
 @pytest.mark.parametrize(
@@ -228,3 +243,227 @@ def test_enterprise_host_lookup_does_not_use_public_github_token(
     monkeypatch.setattr(github_resource, "_gh", gh)
 
     assert read_workspace_repositories(tmp_path, "KVARK")["state"] == "no_pr"
+
+
+def test_recursive_scan_inside_a_git_root_is_read_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(github_resource, "_gh", _unexpected_gh)
+    _git(tmp_path, "init")
+    app = _checkout(tmp_path, "app")
+    _checkout(app, "plugins")
+    references = tmp_path / "references"
+    references.mkdir()
+    _checkout(references, "upstream", "https://user:secret@gitlab.com/team/upstream.git")
+    generated = tmp_path / "node_modules"
+    generated.mkdir()
+    _checkout(generated, "dependency")
+    (tmp_path / "alias").symlink_to(app, target_is_directory=True)
+    (tmp_path / "invalid" / ".git").mkdir(parents=True)
+
+    assert read_repository_settings(tmp_path)["repositories"] == []
+    assert [row["path"] for row in read_repository_settings(tmp_path, 0)["repositories"]] == ["."]
+    assert [row["path"] for row in read_repository_settings(tmp_path, 1)["repositories"]] == [
+        ".",
+        "app",
+    ]
+    scan = read_repository_settings(tmp_path, 2)
+    rows = {row["path"]: row for row in scan["repositories"]}
+    assert set(rows) == {".", "app", "app/plugins", "references/upstream"}
+    assert {row["role"] for row in rows.values()} == {"reference"}
+    assert rows["references/upstream"]["origin"] == "gitlab.com/team/upstream"
+    assert rows["app/plugins"]["branch"] == "local-feature"
+    assert not scan["truncated"]
+    assert read_workspace_repositories(tmp_path)["repositories"] == []
+    assert not (tmp_path / ".omnigent-repositories.json").exists()
+
+
+def test_scan_recognizes_linked_worktree(tmp_path: Path):
+    app = _checkout(tmp_path, "app")
+    _git(
+        app,
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.test",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "Initial commit",
+    )
+    branch = tmp_path / "worktree"
+    _git(app, "worktree", "add", "-b", "review-branch", str(branch))
+    assert (branch / ".git").is_file()
+    rows = {row["path"]: row for row in read_repository_settings(tmp_path, 1)["repositories"]}
+    assert rows["worktree"]["branch"] == "review-branch"
+    assert rows["worktree"]["checkout"] == "ready"
+
+
+def test_save_classifies_nested_checkouts_without_overriding_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _git(tmp_path, "init")
+    _checkout(tmp_path, "KVARK", "https://github.com/Team/KVARK.git")
+    _manifest(tmp_path, "  KVARK: {url: https://github.com/Team/KVARK.git}\n")
+    projects = tmp_path / "projects"
+    projects.mkdir()
+    backend = _checkout(projects, "backend", "https://github.com/Team/backend.git")
+    _checkout(projects, "example")
+    scan = read_repository_settings(tmp_path, 2)
+
+    saved = write_repository_settings(
+        tmp_path,
+        {
+            "revision": scan["revision"],
+            "depth": 3,
+            "repositories": [
+                {"path": ".", "role": "active", "origin": None},
+                {
+                    "path": "projects/backend",
+                    "role": "active",
+                    "origin": "github.com/Team/backend",
+                },
+                {"path": "projects/example", "role": "reference"},
+            ],
+        },
+    )
+    assert saved["revision"] != scan["revision"]
+    assert saved["depth"] == 3
+    assert {row["path"]: (row["role"], row["declared"]) for row in saved["repositories"]} == {
+        "KVARK": ("active", True),
+        ".": ("active", False),
+        "projects/backend": ("active", False),
+        "projects/example": ("reference", False),
+    }
+    with pytest.raises(WorkspaceReaderError) as stale:
+        write_repository_settings(
+            tmp_path, {"revision": scan["revision"], "depth": 2, "repositories": []}
+        )
+    assert stale.value.status == 409
+    with pytest.raises(WorkspaceReaderError) as declared:
+        write_repository_settings(
+            tmp_path,
+            {
+                "revision": saved["revision"],
+                "depth": 3,
+                "repositories": [{"path": "kvark", "role": "excluded"}],
+            },
+        )
+    assert declared.value.status == 409
+
+    catalog = read_workspace_repositories(tmp_path)
+    assert catalog["configured"]
+    assert [row["path"] for row in catalog["repositories"]] == ["KVARK", ".", "projects/backend"]
+    with pytest.raises(WorkspaceReaderError) as reference:
+        read_workspace_repositories(tmp_path, "projects/example")
+    assert reference.value.status == 404
+
+    def lookup(cwd: str, remote: Any, branch: str, **_options: Any) -> tuple[str, None]:
+        assert cwd == str(backend)
+        assert remote.repository == "Team/backend"
+        assert branch == "local-feature"
+        return "no_pr", None
+
+    monkeypatch.setattr(github_resource, "read_workspace_branch_pr", lookup)
+    assert read_workspace_repositories(tmp_path, "projects/backend")["state"] == "no_pr"
+
+
+def test_promotion_verifies_origin_and_existing_active_assignment_keeps_pin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(github_resource, "read_workspace_branch_pr", _unexpected_gh)
+    app = _checkout(tmp_path, "app", "https://github.com/Team/app.git")
+    scan = read_repository_settings(tmp_path, 1)
+    _git(app, "remote", "set-url", "origin", "https://github.com/Other/app.git")
+    settings = {
+        "revision": scan["revision"],
+        "depth": 1,
+        "repositories": [{"path": "app", "role": "active", "origin": "github.com/Team/app"}],
+    }
+    with pytest.raises(WorkspaceReaderError) as changed:
+        write_repository_settings(tmp_path, settings)
+    assert changed.value.status == 409
+    _git(app, "remote", "set-url", "origin", "https://github.com/Team/app.git")
+    saved = write_repository_settings(tmp_path, settings)
+    _git(app, "remote", "set-url", "origin", "https://github.com/Other/app.git")
+    settings["revision"] = saved["revision"]
+    settings["repositories"][0]["origin"] = "github.com/Other/app"
+    saved = write_repository_settings(tmp_path, settings)
+
+    assert saved["repositories"][0]["expected_origin"] == "github.com/Team/app"
+    result = read_workspace_repositories(tmp_path, "app")
+    assert result["reason"] == "origin_mismatch"
+    assert result["expected_remote"] == "github.com/Team/app"
+
+
+@pytest.mark.parametrize(
+    "path", ["../app", "/tmp/app", "a//b", ".git/other", "alias/child", "a\\b"]
+)
+def test_invalid_explicit_assignment_cannot_escape_workspace(tmp_path: Path, path: str):
+    _checkout(tmp_path, "app")
+    (tmp_path / "alias").symlink_to(tmp_path / "app", target_is_directory=True)
+    with pytest.raises(WorkspaceReaderError) as invalid:
+        write_repository_settings(
+            tmp_path,
+            {
+                "revision": read_repository_settings(tmp_path)["revision"],
+                "depth": 2,
+                "repositories": [{"path": path, "role": "active"}],
+            },
+        )
+    assert invalid.value.status == 400
+
+
+def test_scan_reports_truncation_at_directory_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _git(tmp_path, "init")
+    (tmp_path / "directory").mkdir()
+    monkeypatch.setattr(workspace_repositories, "_MAX_ENTRIES", 0)
+    scan = read_repository_settings(tmp_path, 2)
+    assert scan["truncated"]
+    assert [row["path"] for row in scan["repositories"]] == ["."]
+
+
+def test_scan_keeps_saved_assignments_when_combined_inventory_hits_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _checkout(tmp_path, "first")
+    _checkout(tmp_path, "second")
+    _checkout(tmp_path, "later")
+    monkeypatch.setattr(workspace_repositories, "_MAX_REPOSITORIES", 2)
+    write_repository_settings(
+        tmp_path,
+        {
+            "revision": "missing",
+            "depth": 1,
+            "repositories": [{"path": "later", "role": "excluded"}],
+        },
+    )
+
+    scan = read_repository_settings(tmp_path, 1)
+
+    assert scan["truncated"]
+    assert len(scan["repositories"]) == 2
+    assert scan["repositories"][0]["path"] == "later"
+    assert scan["repositories"][0]["role"] == "excluded"
+
+
+def test_excluding_a_checkout_keeps_discovery_inside_it(tmp_path: Path):
+    _git(tmp_path, "init")
+    _checkout(tmp_path, "app")
+    write_repository_settings(
+        tmp_path,
+        {
+            "revision": "missing",
+            "depth": 1,
+            "repositories": [{"path": ".", "role": "excluded"}],
+        },
+    )
+
+    scan = read_repository_settings(tmp_path, 1)
+
+    assert {row["path"]: row["role"] for row in scan["repositories"]} == {
+        ".": "excluded",
+        "app": "reference",
+    }

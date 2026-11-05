@@ -45,6 +45,8 @@ import {
   readProjectLaunchDefaults,
 } from "@/lib/projectLaunchPreferences";
 import { shouldGuardDialogDismiss } from "@/lib/dialogDismissGuard";
+import { RepositorySettingsDialog } from "@/studio/RepositorySettingsDialog";
+import { ProfileEditorDialog } from "@/studio/reviews/ProfileEditorDialog";
 import { AgentHarnessPicker } from "./NewChatDialog";
 import { WorkspacePickerDialog } from "./WorkspacePickerDialog";
 
@@ -381,6 +383,18 @@ export function ProjectSettingsDialog({
   // The host the agent picker's readiness badges check against (its config
   // hints show whether a harness is set up there). Null when no concrete host.
   const warningHost = onlineHosts.find((h) => h.host_id === browsableHostId) ?? null;
+  const [workspaceManager, setWorkspaceManager] = useState<"repositories" | "profiles" | null>(
+    null,
+  );
+  const canManageWorkspace = Boolean(
+    projectId &&
+    stored?.host_id &&
+    stored.host_id !== SANDBOX_HOST_CHOICE &&
+    stored.workspace &&
+    stored.host_id === hostId &&
+    stored.workspace === workspace,
+  );
+  const studio = `/v1/projects/${encodeURIComponent(projectId ?? "")}/studio`;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -503,6 +517,38 @@ export function ProjectSettingsDialog({
               />
             )}
           </Field>
+
+          {info !== "loading" && info.studio_workspace_settings && (
+            <Field
+              label="Workspace setup"
+              hint={
+                canManageWorkspace
+                  ? "Configure this workspace on its host"
+                  : "Save a host and working directory first"
+              }
+            >
+              <div className="flex flex-wrap justify-end gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  disabled={!canManageWorkspace}
+                  onClick={() => setWorkspaceManager("repositories")}
+                >
+                  Repositories
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  disabled={!canManageWorkspace}
+                  onClick={() => setWorkspaceManager("profiles")}
+                >
+                  Reviewer profiles
+                </Button>
+              </div>
+            </Field>
+          )}
 
           <Field
             label="Random worktree"
@@ -698,6 +744,27 @@ export function ProjectSettingsDialog({
             </Button>
           </DialogFooter>
         </form>
+        {canManageWorkspace && (
+          <>
+            <RepositorySettingsDialog
+              open={open && workspaceManager === "repositories"}
+              onOpenChange={(visible) => {
+                if (!visible) setWorkspaceManager(null);
+              }}
+              endpoint={`${studio}/repositories`}
+              workspace={stored?.workspace}
+            />
+            <ProfileEditorDialog
+              open={open && workspaceManager === "profiles"}
+              onOpenChange={(visible) => {
+                if (!visible) setWorkspaceManager(null);
+              }}
+              endpoint={`${studio}/review-profiles/editor`}
+              hostId={stored?.host_id}
+              workspace={stored?.workspace}
+            />
+          </>
+        )}
       </DialogContent>
     </Dialog>
   );

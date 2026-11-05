@@ -1342,6 +1342,85 @@ def test_studio_review_from_pr_panel(
     older_reads = 0
     attached = not rail
     branch_reads: list[str] = []
+    promoted = False
+    profile_saved = False
+    nested_path = "worktrees/services"
+    reference_path = "references/upstream"
+    role_instructions = "Review **API boundaries** in the captured PR."
+
+    def profile_editor(route: Route) -> None:
+        nonlocal profile_saved
+        profile = {
+            "id": role["id"],
+            "label": role["label"],
+            "description": role["description"],
+            "instructions": role_instructions,
+            "archived": False,
+        }
+        if route.request.method == "PUT":
+            payload = route.request.post_data_json
+            assert payload["revision"] == "initial"
+            assert payload["profile"] == profile
+            profile_saved = True
+        else:
+            assert route.request.method == "GET"
+        route.fulfill(
+            json={
+                "revision": "saved" if profile_saved else "initial",
+                "profiles": [
+                    {**profile, "managed": True, "source": ".omnigent-review-profiles.json"}
+                ]
+                if profile_saved
+                else [],
+            }
+        )
+
+    def repository_settings(route: Route) -> None:
+        nonlocal promoted
+        if route.request.method == "PUT":
+            assert route.request.post_data_json == {
+                "revision": "initial",
+                "depth": 2,
+                "repositories": [
+                    {"path": nested_path, "role": "active", "origin": remote},
+                    {
+                        "path": reference_path,
+                        "role": "reference",
+                        "origin": "github.com/acme/upstream",
+                    },
+                ],
+            }
+            promoted = True
+        else:
+            assert route.request.method == "GET"
+        scanned = "depth=2" in route.request.url
+        route.fulfill(
+            json={
+                "revision": "saved" if promoted else "initial",
+                "depth": 2,
+                "truncated": False,
+                "repositories": [
+                    {
+                        "path": nested_path,
+                        "branch": branch,
+                        "origin": remote,
+                        "role": "active" if promoted else "reference",
+                        "declared": False,
+                        "checkout": "ready",
+                    },
+                    {
+                        "path": reference_path,
+                        "branch": "main",
+                        "origin": "github.com/acme/upstream",
+                        "role": "reference",
+                        "declared": False,
+                        "checkout": "ready",
+                    },
+                ]
+                if scanned or promoted
+                else [],
+            }
+        )
 
     def workspace_repositories(route: Route) -> None:
         assert route.request.method == "GET"
@@ -1350,7 +1429,7 @@ def test_studio_review_from_pr_panel(
             branch_reads.extend(selected)
             route.fulfill(
                 json={
-                    "repository": "Services",
+                    "repository": nested_path,
                     "branch": branch,
                     "remote": remote,
                     "state": "found",
@@ -1378,6 +1457,20 @@ def test_studio_review_from_pr_panel(
                         "depends_on": [],
                         "checkout": "ready",
                     },
+                    *(
+                        [
+                            {
+                                "name": nested_path,
+                                "path": nested_path,
+                                "status": "active",
+                                "description": "",
+                                "depends_on": [],
+                                "checkout": "ready",
+                            }
+                        ]
+                        if promoted
+                        else []
+                    ),
                 ],
             }
         )
@@ -1463,6 +1556,8 @@ def test_studio_review_from_pr_panel(
             re.compile(r"/resources/workspace-repositories(?:\?|$)"), workspace_repositories
         )
         page.route("**/resources/github/prs", attach)
+        page.route(re.compile(r"/studio/repositories(?:\?|$)"), repository_settings)
+        page.route("**/studio/review-profiles/editor", profile_editor)
     page.route(
         re.compile(r"/resources/github/changes"),
         lambda r: r.fulfill(json={**_CHANGES, **revision}),
@@ -1480,6 +1575,7 @@ def test_studio_review_from_pr_panel(
                 "session_pull_requests": True,
                 "studio_reviews": True,
                 "workspace_repositories": rail,
+                "studio_workspace_settings": rail,
             }
         ),
     )
@@ -1524,7 +1620,7 @@ def test_studio_review_from_pr_panel(
     )
     page.route(
         "**/studio/review-profiles",
-        lambda r: r.fulfill(json={"profiles": [role] if rail else []}),
+        lambda r: r.fulfill(json={"profiles": [role] if rail and profile_saved else []}),
     )
     page.route(re.compile(r"/studio/reviews(?:\?|$)"), list_or_capture)
     page.route(f"**/studio/reviews/{review_id}", lambda r: r.fulfill(json=review))
@@ -1554,12 +1650,26 @@ def test_studio_review_from_pr_panel(
         page.screenshot(path=str(tmp_path / "workspace-repositories.png"))
         picker.select_option("Services")
         expect(panel.get_by_text("Supporting services", exact=True)).to_be_visible()
+        panel.get_by_role("button", name="Manage repositories").click()
+        settings = page.get_by_role("dialog", name="Workspace repositories")
+        settings.get_by_role("button", name="Scan repositories").click()
+        nested = settings.get_by_role("combobox", name=f"Role for {nested_path}")
+        expect(nested).to_have_value("reference")
+        assert not promoted
+        nested.select_option("active")
+        page.screenshot(path=str(tmp_path / "workspace-repository-discovery.png"))
+        settings.get_by_role("button", name="Save repositories").click()
+        expect(settings.get_by_text("Repository settings saved.")).to_be_visible()
+        settings.get_by_role("button", name="Close", exact=True).click()
+        expect(picker.get_by_role("option", name=nested_path)).to_have_count(1)
+        expect(picker.get_by_role("option", name=reference_path)).to_have_count(0)
+        picker.select_option(nested_path)
         assert branch_reads == []
         find_button.click()
         expect(panel.get_by_text(pr_title, exact=False)).to_be_visible()
         expect(panel.get_by_text(branch, exact=True)).to_be_visible()
         expect(panel.get_by_text(remote, exact=True)).to_be_visible()
-        assert branch_reads == ["Services"]
+        assert branch_reads == [nested_path]
         assert not attached
         page.screenshot(path=str(tmp_path / "workspace-repositories-branch-pr.png"))
         panel.get_by_role("button", name="Link this PR", exact=True).click()
@@ -1575,6 +1685,20 @@ def test_studio_review_from_pr_panel(
     panel.get_by_role("combobox", name="Reviewer", exact=True).click()
     page.get_by_role("option", name="Codex", exact=True).click()
     if rail:
+        panel.get_by_role("button", name="Manage profiles").click()
+        editor = page.get_by_role("dialog", name="Reviewer profiles")
+        editor.get_by_role("button", name="New profile").click()
+        editor.get_by_role("textbox", name="Name", exact=True).fill(role["label"])
+        editor.get_by_role("textbox", name="Profile ID").fill(role["id"])
+        editor.get_by_role("textbox", name="Description").fill(role["description"])
+        editor.get_by_role("textbox", name="Instructions").fill(role_instructions)
+        editor.get_by_role("button", name="Preview").click()
+        expect(editor.get_by_text("API boundaries", exact=True)).to_be_visible()
+        assert not profile_saved
+        page.screenshot(path=str(tmp_path / "workspace-profile-editor.png"))
+        editor.get_by_role("button", name="Save profile").click()
+        expect(editor.get_by_text("Profile saved", exact=True)).to_be_visible()
+        editor.get_by_role("button", name="Close", exact=True).click()
         panel.get_by_role("combobox", name="Reviewer profile", exact=True).click()
         page.get_by_role("option", name="Backend QA", exact=True).click()
         expect(panel.get_by_text(role["description"], exact=True)).to_be_visible()
@@ -1667,7 +1791,7 @@ def test_studio_review_from_pr_panel(
     assert len(set(start_keys)) == 1
     if rail:
         assert attached
-        assert branch_reads == ["Services"]
+        assert branch_reads == [nested_path]
 
 
 # Two additions match "added": the first on line 2, the second on line 4.

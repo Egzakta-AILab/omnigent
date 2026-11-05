@@ -2,10 +2,14 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { useCanEdit } from "@/hooks/usePermissions";
+import { useSession } from "@/hooks/useSession";
 import { useViewerId } from "@/hooks/useViewerId";
+import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { authenticatedFetch } from "@/lib/identity";
 import { parseHttpUrl } from "@/lib/openLinkInApp";
+import { LEVEL_OWNER } from "@/lib/permissionsApi";
 import { apiErrorFromResponse } from "@/lib/sessionsApi";
+import { RepositorySettingsDialog } from "./RepositorySettingsDialog";
 
 interface WorkspaceRepository {
   name: string;
@@ -18,6 +22,7 @@ interface WorkspaceRepository {
 
 interface RepositoryCatalog {
   manifest: "repos.yaml" | null;
+  configured?: boolean;
   repositories: WorkspaceRepository[];
 }
 
@@ -154,7 +159,15 @@ export function WorkspaceRepositories({
 }: PullRequestActions & { conversationId: string }) {
   const viewer = useViewerId();
   const canEdit = useCanEdit(conversationId);
-  const endpoint = `/v1/sessions/${encodeURIComponent(conversationId)}/resources/workspace-repositories`;
+  const { session } = useSession(conversationId);
+  const info = useServerInfo();
+  const canManage =
+    info !== "loading" &&
+    info.studio_workspace_settings &&
+    !!session?.workspace &&
+    (info.single_user || session.permissionLevel === LEVEL_OWNER);
+  const base = `/v1/sessions/${encodeURIComponent(conversationId)}`;
+  const endpoint = `${base}/resources/workspace-repositories`;
   const catalog = useQuery({
     queryKey: ["workspace-repositories", conversationId, viewer],
     queryFn: ({ signal }) => workspaceRequest<RepositoryCatalog>(endpoint, signal),
@@ -162,9 +175,14 @@ export function WorkspaceRepositories({
     retry: false,
   });
   const [selected, setSelected] = useState<string>();
-  if (viewer === null || catalog.isError || catalog.data?.manifest !== "repos.yaml") return null;
+  const [managing, setManaging] = useState(false);
+  if (
+    viewer === null ||
+    (!canManage && catalog.data?.manifest !== "repos.yaml" && !catalog.data?.configured)
+  )
+    return null;
 
-  const repositories = catalog.data.repositories;
+  const repositories = catalog.isError ? [] : (catalog.data?.repositories ?? []);
   const repository =
     repositories.find((entry) => entry.name === selected) ??
     repositories.find((entry) => entry.checkout === "ready") ??
@@ -176,9 +194,29 @@ export function WorkspaceRepositories({
         Workspace repositories
       </summary>
       <div className="space-y-2 px-3 pb-3 text-ui">
-        <p className="text-muted-foreground">
-          From <code>repos.yaml</code> in this session’s workspace.
-        </p>
+        {catalog.data?.manifest && (
+          <p className="text-muted-foreground">
+            Includes checkouts from <code>repos.yaml</code>.
+          </p>
+        )}
+        {canManage && (
+          <>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={actions.hostOffline}
+              onClick={() => setManaging(true)}
+            >
+              Manage repositories
+            </Button>
+            <RepositorySettingsDialog
+              open={managing}
+              onOpenChange={setManaging}
+              endpoint={`${base}/studio/repositories`}
+              workspace={session?.workspace ?? undefined}
+            />
+          </>
+        )}
         {repository ? (
           <>
             <select
@@ -222,7 +260,11 @@ export function WorkspaceRepositories({
             )}
           </>
         ) : (
-          <p className="text-muted-foreground">No repositories are configured.</p>
+          <p className="text-muted-foreground">
+            {catalog.isError
+              ? "Couldn’t load workspace repositories."
+              : "No active repositories are configured."}
+          </p>
         )}
       </div>
     </details>

@@ -243,10 +243,21 @@ See the [review API and state model](review-records.md) for retry behavior.
 
 ### Share reviewer profiles with a workspace
 
-Place `review-profiles.yaml` in the working directory on each execution host.
+Open **Manage profiles** in the Review tab, or open **Reviewer profiles** in
+Project settings after saving the host and working directory. Create a profile
+with Markdown instructions, preview it, and save it. Optional harness, model and
+reasoning defaults prefill the Review form and can be overridden for each run.
+Archive a profile to hide it from new reviews, or restore it from the editor.
+
+The editor saves managed profiles to `.omnigent-review-profiles.json` at the
+workspace root. Keep this file in the team-controlled workspace for Git review
+and use it on each execution host. Saving checks the version you opened.
+
+To link existing guidance, place `review-profiles.yaml` in the working directory.
 Each entry points to a trusted Markdown file inside that workspace. Keep the
 profile files in the team-controlled meta-repo so a nested PR checkout cannot
-change the instructions used to review it.
+change the instructions used to review it. Linked profiles show their source in
+the editor. Use **Duplicate** to create a managed copy.
 
 ```yaml
 version: 1
@@ -297,11 +308,25 @@ In the project settings for your Egzakta sessions, select your Mac and set
 Leave **Random worktree** off so new sessions open the root that contains your
 nested clones.
 
-Omnigent reads the root's existing `repos.yaml` to show declared checkouts in
+For any workspace, open **Project settings → Repositories**, or open
+**Manage repositories** from the PR panel. The managers run on the connected
+macOS or Linux host. Choose a scan depth from 0 to 5 and click **Scan
+repositories**. Depth 0 checks the root, depth 1 includes its direct children,
+and depth 2 includes one additional level. You can also add a checkout by its
+path relative to the root.
+
+Scanned checkouts start as **Reference**. Promote the repos you want to use as
+PR targets to **Active**. Use **Excluded** to hide an entry from the PR picker,
+or **Remove** to forget its assignment. **Save repositories** writes the depth
+and assignments to `.omnigent-repositories.json` in the workspace. The scan is
+local and reports when it reaches a limit. Repository roles control the harness
+picker. The agent's filesystem access follows its native permissions.
+
+Omnigent also reads a compatible `repos.yaml` to show declared checkouts in
 **Workspace → Pull Requests → Workspace repositories**. For example, choose
 `KVARK` for platform work and see its declared dependency on `Services`. Switch
 to `Services` when you need its own branch PR. GitHub lookup checks that the
-checkout's `origin` matches the manifest's host, organization and repository.
+checkout's `origin` matches the declared or saved host, organization and repository.
 Egzakta checkouts use `github.com/Egzakta-AILab`. **Find branch PR** looks for an
 open PR from the exact local branch name. Use **Link a PR** with the full URL
 for fork branches, closed PRs or another known PR.

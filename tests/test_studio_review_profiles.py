@@ -2,7 +2,11 @@ from pathlib import Path
 
 import pytest
 
-from omnigent.studio.reviews.profiles import read_review_profiles
+from omnigent.studio.reviews.profiles import (
+    read_review_profile_editor,
+    read_review_profiles,
+    write_review_profile_editor,
+)
 from omnigent.workspace_fs import WorkspaceReaderError
 
 
@@ -102,3 +106,92 @@ def test_manifest_rejects_ambiguous_or_unsupported_configuration(
     with pytest.raises(WorkspaceReaderError) as failure:
         read_review_profiles(tmp_path)
     assert failure.value.status == 400
+
+
+def test_managed_profile_round_trip_and_conflict(tmp_path: Path) -> None:
+    _manifest(tmp_path, "security.md")
+    linked_file = tmp_path / "security.md"
+    linked_text = "Review access checks."
+    linked_file.write_text(linked_text)
+    initial = read_review_profile_editor(tmp_path)
+    linked = initial["profiles"][0]
+    assert linked["source"] == "security.md"
+    assert linked["managed"] is False
+
+    draft = {
+        "id": "security-custom",
+        "label": "Security custom",
+        "description": linked["description"],
+        "instructions": linked["instructions"],
+        "archived": False,
+        "defaults": {"harness": "codex-native", "model": "model-test", "reasoning_effort": "high"},
+    }
+    with pytest.raises(WorkspaceReaderError) as linked_edit:
+        write_review_profile_editor(
+            tmp_path, {"revision": initial["revision"], "profile": {**draft, "id": "security"}}
+        )
+    assert linked_edit.value.status == 409
+    assert read_review_profile_editor(tmp_path) == initial
+
+    created = write_review_profile_editor(
+        tmp_path, {"revision": initial["revision"], "profile": draft}
+    )
+    assert created["revision"] != initial["revision"]
+    assert created["profiles"][1]["managed"] is True
+    assert read_review_profile_editor(tmp_path) == created
+
+    role = read_review_profiles(tmp_path, "security-custom")
+    assert role["defaults"] == draft["defaults"]
+    assert role["instructions"] == linked_text
+    assert "instructions" not in read_review_profiles(tmp_path)["profiles"][1]
+
+    with pytest.raises(WorkspaceReaderError) as stale:
+        write_review_profile_editor(
+            tmp_path, {"revision": initial["revision"], "profile": {**draft, "label": "Stale"}}
+        )
+    assert stale.value.status == 409
+    assert read_review_profile_editor(tmp_path) == created
+
+    updated = write_review_profile_editor(
+        tmp_path,
+        {
+            "revision": created["revision"],
+            "profile": {**draft, "defaults": {**draft["defaults"], "reasoning_effort": "low"}},
+        },
+    )
+    assert read_review_profiles(tmp_path, "security-custom")["digest"] != role["digest"]
+
+    archived = write_review_profile_editor(
+        tmp_path, {"revision": updated["revision"], "profile": {**draft, "archived": True}}
+    )
+    assert archived["profiles"][1]["archived"] is True
+    assert [entry["id"] for entry in read_review_profiles(tmp_path)["profiles"]] == ["security"]
+    with pytest.raises(WorkspaceReaderError) as missing:
+        read_review_profiles(tmp_path, "security-custom")
+    assert missing.value.status == 404
+
+    write_review_profile_editor(tmp_path, {"revision": archived["revision"], "profile": draft})
+    assert read_review_profiles(tmp_path, "security-custom")["digest"] == role["digest"]
+    assert linked_file.read_text() == linked_text
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        {"label": "Invalid\nlabel"},
+        {"instructions": " "},
+        {"instructions": "😀" * 2049},
+        {"defaults": {"model": "--flag"}},
+        {"defaults": {"reasoning_effort": "extreme"}},
+        {"managed": True},
+    ],
+)
+def test_invalid_managed_profile_never_writes(tmp_path: Path, invalid: dict) -> None:
+    catalog = read_review_profile_editor(tmp_path)
+    draft = {"id": "profile", "label": "Profile", "instructions": "Review", "archived": False}
+    with pytest.raises(WorkspaceReaderError) as failure:
+        write_review_profile_editor(
+            tmp_path, {"revision": catalog["revision"], "profile": {**draft, **invalid}}
+        )
+    assert failure.value.status == 400
+    assert read_review_profile_editor(tmp_path) == catalog

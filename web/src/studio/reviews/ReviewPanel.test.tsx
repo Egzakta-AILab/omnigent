@@ -61,8 +61,13 @@ afterEach(() => {
   vi.resetAllMocks();
 });
 
-it("refreshes a changed profile and drops model overrides when the harness changes", async () => {
-  const profile = { id: "security", label: "Security", digest: "a".repeat(64) };
+it("prefills profile defaults and drops model overrides when the harness changes", async () => {
+  const profile = {
+    id: "security",
+    label: "Security",
+    digest: "a".repeat(64),
+    defaults: { harness: "codex-native", model: "codex-review-model", reasoning_effort: "high" },
+  };
   const captures: unknown[] = [];
   vi.mocked(authenticatedFetch).mockImplementation(async (input, init) => {
     const path = String(input).split("?")[0];
@@ -101,11 +106,13 @@ it("refreshes a changed profile and drops model overrides when the harness chang
     await user.click(await screen.findByRole("option", { name: option }));
   };
   const run = screen.getByRole("button", { name: "Run review" });
-  await choose("Reviewer", "Codex");
   await choose("Reviewer profile", "Security");
   expect(screen.queryByRole("combobox", { name: "Review skill" })).not.toBeInTheDocument();
-  await choose("Model", "Codex review model");
-  await choose("Reasoning effort", "High");
+  expect(screen.getByRole("combobox", { name: "Reviewer" })).toHaveTextContent("Codex");
+  await waitFor(() =>
+    expect(screen.getByRole("combobox", { name: "Model" })).toHaveTextContent("Codex review model"),
+  );
+  expect(screen.getByRole("combobox", { name: "Reasoning effort" })).toHaveTextContent("High");
   await user.click(run);
   expect(await screen.findByRole("alert")).toHaveTextContent("Profile changed");
   expect(captures[0]).toMatchObject({
@@ -118,9 +125,12 @@ it("refreshes a changed profile and drops model overrides when the harness chang
   expect(captures[0]).not.toHaveProperty("skill");
 
   profile.digest = "b".repeat(64);
+  profile.defaults.model = "retired-model";
   await user.click(screen.getByRole("button", { name: "Reload profiles" }));
   await waitFor(() => expect(run).toBeDisabled());
   await choose("Reviewer profile", "Security");
+  expect(screen.getByText(/Model retired-model is unavailable/)).toBeInTheDocument();
+  expect(run).toBeDisabled();
   await choose("Reviewer", "Claude Code");
   expect(screen.getByRole("combobox", { name: "Model" })).toHaveTextContent("Default");
   expect(screen.getByRole("combobox", { name: "Reasoning effort" })).toHaveTextContent("Default");

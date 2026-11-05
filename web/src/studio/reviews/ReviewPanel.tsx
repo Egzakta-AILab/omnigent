@@ -26,6 +26,7 @@ import { useHostModelOptions } from "@/hooks/useHosts";
 import { sessionQueryOptions, useSession } from "@/hooks/useSession";
 import { useSkills } from "@/hooks/useSkills";
 import { useIdentityReady, useViewerId } from "@/hooks/useViewerId";
+import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { nativeCodingAgentForAgentName } from "@/lib/nativeCodingAgents";
 import { canonicalNativeHarness } from "@/lib/nativeHarnessModes";
 import { randomUUID } from "@/lib/randomUUID";
@@ -38,6 +39,7 @@ import {
   listReviewerProfiles,
   listReviews,
   matchesReviewRevision,
+  REVIEW_HARNESS_LABELS,
   startReview,
   type CaptureReview,
   type ReviewFinding,
@@ -47,16 +49,13 @@ import {
   type ReviewerProfile,
   type ReviewSource,
 } from "./api";
+import { ProfileEditorDialog } from "./ProfileEditorDialog";
 
 const POLL_MS = 3_000;
 const START_CONFIRMATION_MS = 120_000;
 const FULL_SHA = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 const SKILL_NAME = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
 const CUSTOM_SKILL = "__custom_skill__";
-const HARNESS_LABELS: Record<ReviewHarness, string> = {
-  "codex-native": "Codex",
-  "claude-native": "Claude Code",
-};
 
 export function useStudioReviewHistory(conversationId: string, enabled: boolean) {
   const identityReady = useIdentityReady();
@@ -105,7 +104,7 @@ function reviewSource(review: ReviewPass, finding: ReviewFinding): ReviewSource 
 
 function reviewSettingsLabel(review: ReviewPass): string {
   const { role, skill, harness, model, reasoning_effort } = review.profile;
-  return [role?.label, skill, HARNESS_LABELS[harness], model, reasoning_effort]
+  return [role?.label, skill, REVIEW_HARNESS_LABELS[harness], model, reasoning_effort]
     .filter(Boolean)
     .join(" · ");
 }
@@ -326,6 +325,8 @@ export function ReviewPanel({
   onOpenSource: (source: ReviewSource) => void;
 }) {
   const queryClient = useQueryClient();
+  const serverInfo = useServerInfo();
+  const [editingProfiles, setEditingProfiles] = useState(false);
   const [agentId, setAgentId] = useState("");
   const [skill, setSkill] = useState("");
   const [profileChoice, setProfileChoice] = useState<{
@@ -345,6 +346,13 @@ export function ReviewPanel({
   const { session } = useSession(active ? conversationId : null);
   const hostId = session?.hostId;
   const workspace = session?.workspace;
+  const canEditProfiles =
+    active &&
+    history.authorized &&
+    !!hostId &&
+    !!workspace &&
+    serverInfo !== "loading" &&
+    serverInfo.studio_workspace_settings;
   const agents = useAvailableAgents({ enabled: active });
   const reviewers = (agents.data ?? []).flatMap((agent) => {
     const harness = canonicalNativeHarness(agent.harness ?? "");
@@ -370,7 +378,10 @@ export function ReviewPanel({
     (profile) => profile.id === selectedProfile?.id && profile.digest === selectedProfile.digest,
   );
   const useCustomSkill = selectedProfile === null;
-  const modelScope = JSON.stringify([history.viewerId, conversationId, hostId, reviewer?.id]);
+  function modelScopeFor(reviewerId: string | undefined) {
+    return JSON.stringify([history.viewerId, conversationId, hostId, reviewerId]);
+  }
+  const modelScope = modelScopeFor(reviewer?.id);
   const modelCatalog = useHostModelOptions(
     hostId ?? null,
     reviewer?.harness ?? "",
@@ -468,6 +479,32 @@ export function ReviewPanel({
     retry: false,
   });
 
+  function applyProfileDefaults(profile: ReviewerProfile | undefined, reviewerId: string) {
+    setModelChoice({
+      scope: modelScopeFor(reviewerId),
+      model: profile?.defaults?.model ?? "",
+      effort: profile?.defaults?.reasoning_effort ?? "",
+    });
+  }
+
+  function chooseProfile(id: string) {
+    const profile = profiles.find((entry) => entry.id === id);
+    const suggestedHarness = profile?.defaults?.harness;
+    const nextReviewer = suggestedHarness
+      ? reviewers.find((candidate) => candidate.harness === suggestedHarness)
+      : reviewer;
+    if (suggestedHarness) {
+      setAgentId(nextReviewer?.id ?? "");
+      setSkill("");
+    }
+    if (profile?.defaults || selectedProfile?.defaults) {
+      if (nextReviewer) applyProfileDefaults(profile, nextReviewer.id);
+      else setModelChoice(null);
+    }
+    setProfileChoice(profile ? { scope: profileScope, profile } : null);
+    action.reset();
+  }
+
   function runReview() {
     if (
       launchInFlight.current ||
@@ -519,7 +556,19 @@ export function ReviewPanel({
     <div className="space-y-4 p-3">
       <section aria-label="Run a review" className="space-y-3">
         <div className="space-y-1">
-          <h3 className="font-medium">Private review</h3>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h3 className="font-medium">Private review</h3>
+            {canEditProfiles && (
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() => setEditingProfiles(true)}
+              >
+                Manage profiles
+              </Button>
+            )}
+          </div>
           <p className="text-muted-foreground">
             Run a workspace profile or a custom skill in a separate session. The reviewer uses its
             normal permissions in this workspace.
@@ -544,7 +593,9 @@ export function ReviewPanel({
             onChange={(id) => {
               setAgentId(id);
               setSkill("");
-              setModelChoice(null);
+              if (!reviewer && role?.defaults && !role.defaults.harness)
+                applyProfileDefaults(role, id);
+              else setModelChoice(null);
               action.reset();
             }}
             options={reviewers.map((agent) => ({ value: agent.id, label: agent.display_name }))}
@@ -572,18 +623,20 @@ export function ReviewPanel({
               ]}
               disabled={pending}
               placeholder="Choose model again"
-              description={modelCatalog.isPending && hostId ? "Loading models…" : undefined}
+              description={
+                modelCatalog.isPending && hostId
+                  ? "Loading models…"
+                  : !validModel
+                    ? `Model ${model} is unavailable on this host. Choose a model or Default.`
+                    : undefined
+              }
             />
           )}
           {(profiles.length > 0 || selectedProfile) && (
             <ReviewSelect
               label="Reviewer profile"
               value={useCustomSkill ? CUSTOM_SKILL : (role?.id ?? "")}
-              onChange={(id) => {
-                const profile = profiles.find((entry) => entry.id === id);
-                setProfileChoice(profile ? { scope: profileScope, profile } : null);
-                action.reset();
-              }}
+              onChange={chooseProfile}
               options={[
                 { value: CUSTOM_SKILL, label: "Custom skill" },
                 ...profiles.map((profile) => ({ value: profile.id, label: profile.label })),
@@ -608,6 +661,11 @@ export function ReviewPanel({
               options={[{ value: EFFORT_SELECT_NONE, label: "Default" }, ...efforts]}
               disabled={pending}
               placeholder="Choose effort again"
+              description={
+                !validEffort && validModel
+                  ? `Effort ${effort} is unavailable for this model. Choose an effort or Default.`
+                  : undefined
+              }
             />
           )}
           {useCustomSkill && (
@@ -628,6 +686,14 @@ export function ReviewPanel({
             />
           )}
         </div>
+        {!reviewer &&
+          role?.defaults?.harness &&
+          !reviewers.some((agent) => agent.harness === role.defaults?.harness) && (
+            <p className="text-xs text-muted-foreground">
+              {REVIEW_HARNESS_LABELS[role.defaults.harness]} is unavailable. Choose a reviewer for
+              this run.
+            </p>
+          )}
         {reviewer && modelCatalog.isError && (
           <div className="flex flex-wrap items-center gap-2 text-muted-foreground">
             <p>Couldn’t load the host’s models.</p>
@@ -684,6 +750,15 @@ export function ReviewPanel({
           </p>
         )}
       </section>
+      {canEditProfiles && (
+        <ProfileEditorDialog
+          open={editingProfiles}
+          onOpenChange={setEditingProfiles}
+          endpoint={`/v1/sessions/${encodeURIComponent(conversationId)}/studio/review-profiles/editor`}
+          hostId={hostId}
+          workspace={workspace}
+        />
+      )}
       <section aria-label="Review history" className="space-y-3 border-t border-border pt-3">
         <h3 className="font-medium">Review history</h3>
         {history.query.isError && (

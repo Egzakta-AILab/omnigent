@@ -257,6 +257,18 @@ if TYPE_CHECKING:
 
 # Workspaces whose fs reader (and change registry) stay warm between requests.
 _FS_READER_CACHE_SIZE = 8
+_STUDIO_WORKSPACE_OPS = frozenset({"studio_review_profile_editor", "studio_repository_settings"})
+
+
+def _studio_workspace_path_error(op: str, path: str) -> str | None:
+    if op not in _STUDIO_WORKSPACE_OPS:
+        return None
+    if os.name == "nt":
+        return "Workspace settings require a macOS or Linux host."
+    if not os.path.isabs(path):
+        return "Choose an absolute workspace path on the host."
+    return None
+
 
 
 # Older servers omit a create's timeout_s and wait 150 s for its reply; finish inside that.
@@ -4031,6 +4043,14 @@ class HostProcess:
                 error=f"workspace path expansion failed: {exc}",
             )
         params = frame.params or {}
+        if error := _studio_workspace_path_error(frame.op, expanded):
+            return HostFsResultFrame(
+                request_id=frame.request_id,
+                status="error",
+                error_status=400,
+                error_code="invalid_workspace",
+                error=error,
+            )
         # An absolute file target: root the reader at its parent and read the file by name.
         if frame.op == "list_or_read" and not params.get("path") and os.path.isfile(expanded):
             params = {**params, "path": os.path.basename(expanded)}
@@ -4057,6 +4077,19 @@ class HostProcess:
                 from omnigent.studio.reviews.profiles import read_review_profiles
 
                 payload = read_review_profiles(Path(expanded), params.get("profile_id"))
+            elif frame.op == "studio_review_profile_editor":
+                from omnigent.studio.reviews.profiles import read_review_profile_editor
+
+                payload = read_review_profile_editor(Path(expanded))
+            elif frame.op == "studio_repository_settings":
+                from omnigent.workspace_repositories import read_repository_settings
+
+                depth = params.get("depth")
+                if depth is not None and type(depth) is not int:
+                    raise WorkspaceReaderError(
+                        400, "invalid_depth", "Choose an integer scan depth."
+                    )
+                payload = read_repository_settings(Path(expanded), depth)
             else:
                 reader = self._workspace_reader(expanded)
                 with pr_resource.server_tracking(
@@ -4665,6 +4698,14 @@ class HostProcess:
                 error_code="invalid_workspace",
                 error=f"workspace path expansion failed: {exc}",
             )
+        if error := _studio_workspace_path_error(frame.op, expanded):
+            return HostFsResultFrame(
+                request_id=frame.request_id,
+                status="error",
+                error_status=400,
+                error_code="invalid_workspace",
+                error=error,
+            )
         if not os.path.isdir(expanded):
             return HostFsResultFrame(
                 request_id=frame.request_id,
@@ -4675,12 +4716,21 @@ class HostProcess:
             )
         params = {**(frame.params or {}), "session_id": frame.session_id}
         from omnigent.runner import pr_resource
+        from omnigent.workspace_fs import WorkspaceReaderError
 
         try:
             with pr_resource.server_tracking(
                 params.get("server_tracked"), params.get("default_pr_url")
             ):
                 payload = self._dispatch_fs_write_op(expanded, frame.op, params)
+        except WorkspaceReaderError as exc:
+            return HostFsResultFrame(
+                request_id=frame.request_id,
+                status="error",
+                error_status=exc.status,
+                error_code=exc.code,
+                error=exc.message,
+            )
         except ValueError as exc:
             return HostFsResultFrame(
                 request_id=frame.request_id,
@@ -4715,6 +4765,24 @@ class HostProcess:
 
         from omnigent.runner import pr_resource
 
+        if op == "studio_review_profile_editor":
+            from omnigent.studio.reviews.profiles import write_review_profile_editor
+
+            return write_review_profile_editor(
+                Path(workspace),
+                {key: params[key] for key in ("revision", "profile") if key in params},
+            )
+        if op == "studio_repository_settings":
+            from omnigent.workspace_repositories import write_repository_settings
+
+            return write_repository_settings(
+                Path(workspace),
+                {
+                    key: params[key]
+                    for key in ("revision", "depth", "repositories")
+                    if key in params
+                },
+            )
         if op == "github_set_preference":
             return pr_resource.set_pr_preference(
                 workspace,

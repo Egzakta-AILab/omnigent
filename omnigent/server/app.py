@@ -165,6 +165,7 @@ from omnigent.server.routes.sessions import (
     set_server_runner_router,
 )
 from omnigent.server.routes.sharing import create_sharing_router
+from omnigent.server.routes.studio_workspace import create_studio_workspace_router
 from omnigent.server.routes.terminal_attach import create_terminal_attach_router
 from omnigent.server.routes.usage import create_usage_router
 from omnigent.server.routes.user_settings import create_user_settings_router
@@ -412,6 +413,7 @@ class ServerInfoResponse(BaseModel):
     comment_anchor_metadata: bool = True
     studio_reviews: bool = False
     workspace_repositories: bool = False
+    studio_workspace_settings: bool = False
     # Absent on older servers, which clients treat as the default extensions.
     filesystem_attachments: FilesystemAttachmentsInfo | None = None
     # Scheduled tasks accept ``project_id``; older servers reject it.
@@ -4154,6 +4156,7 @@ def create_app(
                 "admin_view": admin_view_supported,
                 "studio_reviews": studio_review_store is not None,
                 "workspace_repositories": True,
+                "studio_workspace_settings": True,
                 "filesystem_attachments": {
                     "extensions": sorted(filesystem_attachment_policy.extensions),
                     "all_types": filesystem_attachment_policy.all_types,
@@ -4581,6 +4584,13 @@ def create_app(
             prefix="/v1",
             tags=["settings"],
         )
+    app.include_router(
+        create_studio_workspace_router(
+            conversation_store, project_store, auth_provider, permission_store
+        ),
+        prefix="/v1",
+        tags=["studio_workspace"],
+    )
 
     if preference_store is not None:
         app.include_router(
