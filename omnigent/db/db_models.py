@@ -1710,6 +1710,11 @@ class SqlStudioInlineDraft(OmnigentBase):
     body: Mapped[str] = mapped_column(CompressedText, nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     discarded: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    publication_state: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="draft"
+    )
+    publication_digest: Mapped[bytes | None] = mapped_column(_CKSUM32, nullable=True)
+    provider_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
     updated_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
