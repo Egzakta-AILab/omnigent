@@ -308,6 +308,10 @@ In the project settings for your Egzakta sessions, select your Mac and set
 Leave **Random worktree** off so new sessions open the root that contains your
 nested clones.
 
+From **New session in project**, use **Open project workspace** to browse the
+saved directory before sending. A review launched from a project session
+appears as a separate private session in that project.
+
 For any workspace, open **Project settings → Repositories**, or open
 **Manage repositories** from the PR panel. The managers run on the connected
 macOS or Linux host. Choose a scan depth from 0 to 5 and click **Scan

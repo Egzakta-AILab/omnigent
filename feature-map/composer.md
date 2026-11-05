@@ -80,6 +80,10 @@ apply only to that side chat. See the [side-chat settings recipe](sessions.md).
   (`restrict_to_agent_names`, see `native-harnesses.md`) does not offer, which
   New Chat reports as unavailable until the user picks an offered agent while
   project settings keeps storing it.
+- `project-workspace-browser`: A new-session composer opened in a project
+  can browse the saved host and working directory before its first send.
+  **Open project workspace** lists folders and files without changing launch
+  settings. The browser closes back to the same composer and draft.
 - `config-cycle-hotkeys`: Ctrl+Alt+M cycles models and Ctrl+Alt+E cycles effort
   in both composers (Ctrl on every platform). The relevant menu briefly opens
   with the selected choice highlighted, preserving draft and input focus. In an
@@ -342,6 +346,11 @@ apply only to that side chat. See the [side-chat settings recipe](sessions.md).
 - Open a project's actions menu in the sidebar → **Project settings**, pick
   Claude Code, Codex, or Pi as the agent, then set **Model** and **Effort**.
   Click **New session in project** and check the pill shows both.
+- Save a concrete host and working directory in **Project settings**. Open a
+  new session in the project, choose **Open project workspace**, then close
+  the browser and send. The browser regression uses the saved directory and
+  checks that browsing neither creates a session nor changes the launch payload.
+  See `tests/e2e_ui/start_session/test_project_config_prefill.py::test_composer_prefills_from_project_config`.
 - Attach files or type `/` before the first send.
 - For a managed sandbox, submit a prompt and close the browser once the session
   URL appears, while provisioning is still in progress. Reopen that URL after

@@ -149,7 +149,8 @@ outdated thread and confirm the suggestion uses its labeled original context.
 - Browser stubs prove UI behavior; runner/host tests prove provider transport.
   They do not constitute a live GitHub write test.
 - Review results are private agent assessments. The reviewer uses the selected
-  workspace and its normal native permissions. A captured start key identifies
+  workspace and its normal native permissions. It appears as a separate session
+  in the source's project. A captured start key identifies
   a single launch attempt, including when confirmation is lost.
 - GitHub exposes commit times, not regular push times. Commit rows use commit
   time; force-push rows use the event time. The latest 100 activity entries are

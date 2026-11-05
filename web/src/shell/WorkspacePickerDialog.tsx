@@ -10,7 +10,7 @@ import { WorkspacePicker, isNavigablePath } from "./WorkspacePicker";
 export interface WorkspacePickerDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onConfirm: (path: string) => void;
+  onConfirm?: (path: string) => void;
   onCancel?: () => void;
   hostId: string | null;
   initialPath?: string;
@@ -39,7 +39,7 @@ export function WorkspacePickerDialog({
   }
 
   function handleConfirm(path: string) {
-    onConfirm(path);
+    onConfirm?.(path);
     onOpenChange(false);
   }
 
@@ -59,7 +59,8 @@ export function WorkspacePickerDialog({
           initialPath={initialPath && isNavigablePath(initialPath) ? initialPath : undefined}
           workspacePath={workspacePath}
           occupancyForPath={occupancyForPath}
-          onSelect={handleConfirm}
+          readOnly={onConfirm === undefined}
+          onSelect={onConfirm === undefined ? undefined : handleConfirm}
           onClose={() => handleOpenChange(false)}
         />
       </DialogContent>

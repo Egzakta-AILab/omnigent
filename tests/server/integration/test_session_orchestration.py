@@ -11,6 +11,7 @@ from omnigent.server.auth import LEVEL_EDIT, LEVEL_READ
 from omnigent.server.feature_flags import FeatureFlags
 from omnigent.stores.conversation_store import (
     CREATED_BY_SESSION_LABEL_KEY,
+    PROJECT_LABEL_KEY,
     SCHEDULED_TASK_ORIGIN_LABEL_KEY,
     SIDE_CHAT_SOURCE_LABEL_KEY,
 )
@@ -575,9 +576,9 @@ async def test_same_host_still_requires_host_ownership(auth_client, auth_app, pe
     assert permissions.list_for_user("alice") == before_grants
 
 
-@pytest.mark.parametrize("agent_version_changed", [False, True])
+@pytest.mark.parametrize("scenario", ["unfiled", "moved", "foreign", "legacy", "stale-agent"])
 async def test_studio_reviewer_uses_private_session_and_original_runner(
-    auth_app, peers, db_uri, monkeypatch, agent_version_changed
+    auth_client, auth_app, peers, db_uri, monkeypatch, scenario
 ):
     from unittest.mock import AsyncMock
 
@@ -595,6 +596,7 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
     from omnigent.server.schemas import SessionEventInput
     from omnigent.server.sharing_settings import DefaultPublicSessions
     from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
+    from omnigent.stores.project_store.sqlalchemy_store import SqlAlchemyProjectStore
     from omnigent.studio.reviews.models import ReviewPass, ReviewProfile, ReviewTarget
     from tests.server.integration.test_sessions_permissions import _register_online_host
 
@@ -613,7 +615,18 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
     assert reviewer is not None
     conversations = SqlAlchemyConversationStore(db_uri)
     permissions = SqlAlchemyPermissionStore(db_uri)
+    projects = SqlAlchemyProjectStore(db_uri)
     permissions.grant(RESERVED_USER_PUBLIC, source["id"], LEVEL_READ)
+    expected_project_id = None
+    expected_project_name = None
+    if scenario in {"moved", "foreign", "stale-agent"}:
+        project = projects.create(
+            uuid4().hex, "Original", "bob" if scenario == "foreign" else "alice"
+        )
+        assert conversations.set_conversation_project(source["id"], project.id)
+    if scenario == "legacy":
+        expected_project_name = "Legacy"
+        conversations.set_labels(source["id"], {PROJECT_LABEL_KEY: expected_project_name})
     host_id = uuid4().hex
     _register_online_host(auth_app, host_id, "alice")
     workspace = "/review-workspace"
@@ -649,7 +662,7 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
         ),
         profile=ReviewProfile(
             agent_id=reviewer.id,
-            agent_version=str(reviewer.version + int(agent_version_changed)),
+            agent_version=str(reviewer.version + int(scenario == "stale-agent")),
             harness="codex-native",
             skill="review",
             model="review-model",
@@ -662,6 +675,20 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
         updated_at=1,
         version=1,
     )
+    if scenario == "moved":
+        project = projects.create(
+            uuid4().hex,
+            "Current",
+            "alice",
+            config={
+                "agent_id": source["agent_id"],
+                "workspace": "/project-default",
+                "git": {"base": "main"},
+            },
+        )
+        assert conversations.set_conversation_project(source["id"], project.id)
+        expected_project_id = project.id
+        expected_project_name = project.name
     request = Request(
         {"type": "http", "app": auth_app, "headers": [(b"x-forwarded-email", b"alice")]}
     )
@@ -674,10 +701,11 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
         agent_cache=_globals._agent_cache,
         auth_provider=auth_provider,
         permission_store=permissions,
+        project_store=projects,
         register_review_create=create_callbacks.append,
     )
     create_reviewer = create_callbacks[0]
-    if agent_version_changed:
+    if scenario == "stale-agent":
         with pytest.raises(OmnigentError) as stale:
             await create_reviewer(request, "alice", review, review.id)
         assert stale.value.code == ErrorCode.CONFLICT
@@ -685,24 +713,44 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
         assert not launches
         return
 
+    announcements = []
+    announce_session = routes_core._announce_session_added
+
+    def observe_announcement(user_id, session_id):
+        announced = conversations.get_conversation(session_id)
+        assert announced is not None
+        announcements.append((user_id, session_id, announced.project_id))
+        announce_session(user_id, session_id)
+
+    monkeypatch.setattr(routes_core, "_announce_session_added", observe_announcement)
     created = await create_reviewer(request, "alice", review, review.id)
     assert created.id == review.id
     assert created.harness == review.profile.harness
     assert created.runner_id is not None
+    assert created.project_id == expected_project_id
     conv = conversations.get_conversation(review.id)
     assert conv is not None
     assert (conv.host_id, conv.workspace, conv.parent_conversation_id, conv.project_id) == (
         host_id,
         workspace,
         None,
-        None,
+        expected_project_id,
     )
+    assert CREATED_BY_SESSION_LABEL_KEY not in conv.labels
+    assert conv.git_branch is None
     assert conv.model_override == review.profile.model
     assert conv.reasoning_effort == review.profile.reasoning_effort
     owner = permissions.get("alice", conv.id)
     assert owner is not None and owner.level == LEVEL_OWNER
     assert permissions.get(RESERVED_USER_PUBLIC, conv.id) is None
     assert [frame.session_id for frame in launches] == [conv.id]
+    assert announcements == [("alice", conv.id, expected_project_id)]
+    if expected_project_name is not None:
+        project_sessions = await auth_client.get(
+            "/v1/sessions", params={"project": expected_project_name, "visibility": "mine"}
+        )
+        assert project_sessions.status_code == 200, project_sessions.text
+        assert {row["id"] for row in project_sessions.json()["data"]} == {source["id"], conv.id}
 
     send_callbacks: list[routes_events.ReviewSend] = []
     routes_events.register_events_routes(

@@ -40,6 +40,7 @@ import type * as SandboxProfilesModule from "@/lib/sandboxProfilesApi";
 import { fetchSandboxProfiles } from "@/lib/sandboxProfilesApi";
 import type { Host } from "@/hooks/useHosts";
 import { useHostModelOptions, useHosts } from "@/hooks/useHosts";
+import { useHostFilesystem } from "@/hooks/useHostFilesystem";
 import type { AvailableAgent } from "@/hooks/useAvailableAgents";
 import { useAvailableAgents } from "@/hooks/useAvailableAgents";
 import type { ProjectConfig } from "@/lib/projectsApi";
@@ -99,7 +100,7 @@ vi.mock("@/hooks/useAvailableAgents", () => ({
   prefetchAvailableAgentDetails: vi.fn(),
 }));
 vi.mock("@/hooks/useHostFilesystem", () => ({
-  useHostFilesystem: () => ({ data: undefined }),
+  useHostFilesystem: vi.fn(() => ({ data: undefined })),
   useCreateHostDirectory: () => ({ mutateAsync: vi.fn(), isPending: false }),
 }));
 vi.mock("@/hooks/useHostWorktrees", async (importOriginal) => ({
@@ -360,6 +361,38 @@ afterEach(() => {
 });
 
 describe("NewChatLandingScreen project prefill", () => {
+  it("browses the saved project workspace independently of the session draft's launch target", async () => {
+    const config = { host_id: "host_1", workspace: REPO, agent_id: "ag_hello" };
+    setProjectConfig(config);
+    vi.mocked(useHosts).mockReturnValue({
+      data: [host(), host({ host_id: "host_2", name: "second-laptop" })],
+    } as ReturnType<typeof useHosts>);
+    writeProjectLaunchDefaults(
+      "proj_alpha",
+      { hostId: "host_2", workspace: RECENT_WORKSPACE },
+      config,
+    );
+    renderLanding();
+
+    await waitFor(() =>
+      expect(screen.getByTestId("new-chat-landing-workspace-chip")).toHaveAccessibleName(
+        `Working directory: ${RECENT_WORKSPACE}`,
+      ),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Open project workspace" }));
+    expect(screen.getByRole("dialog", { name: "Project workspace" })).toBeInTheDocument();
+    expect(useHostFilesystem).toHaveBeenCalledWith("host_1", REPO);
+    expect(screen.queryByTestId("workspace-picker-new-folder")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("workspace-picker-select")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("workspace-picker-close"));
+
+    expect(await submitAndReadBody()).toMatchObject({
+      project_id: "proj_alpha",
+      host_id: "host_2",
+      workspace: RECENT_WORKSPACE,
+    });
+  });
+
   it("discards project A's parked draft slots so project B's remount seeds B's defaults", async () => {
     const BETA_REPO = "/Users/corey/projects/beta";
     // Distinct stored defaults per project: Alpha pins ag_other + its repo,

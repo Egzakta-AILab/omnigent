@@ -2081,6 +2081,34 @@ export function resetLandingDraft(): void {
   writeLandingDraft(null);
 }
 
+function ProjectWorkspaceBrowser({ hostId, workspace }: { hostId: string; workspace: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        className="mb-3 shrink-0"
+        onClick={() => setOpen(true)}
+        aria-haspopup="dialog"
+      >
+        <FolderOpenIcon aria-hidden />
+        Open project workspace
+      </Button>
+      <WorkspacePickerDialog
+        open={open}
+        onOpenChange={setOpen}
+        hostId={hostId}
+        initialPath={workspace}
+        workspacePath={workspace}
+        title="Project workspace"
+        description="Browse the project’s saved working directory without changing this session’s settings."
+      />
+    </>
+  );
+}
+
 export function NewChatLandingScreen() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -2136,6 +2164,9 @@ export function NewChatLandingScreen() {
   );
   const { data: storedProjectConfig, isLoading: projectConfigLoading } =
     useProjectConfig(configProjectId);
+  const projectWorkspaceHostId = storedProjectConfig?.host_id;
+  const projectWorkspace =
+    typeof storedProjectConfig?.workspace === "string" ? storedProjectConfig.workspace.trim() : "";
   // The project's last start wins until its stored defaults are saved after it;
   // a Project settings save clears it, so re-read it then.
   const [launchClears, setLaunchClears] = useState(0);
@@ -6401,6 +6432,20 @@ export function NewChatLandingScreen() {
             </h1>
           ) : null}
         </div>
+        {selectedProject === projectParam &&
+          configProjectId !== null &&
+          !projectConfigLoading &&
+          typeof projectWorkspaceHostId === "string" &&
+          projectWorkspaceHostId !== "" &&
+          projectWorkspaceHostId !== SANDBOX_HOST_CHOICE &&
+          projectWorkspace &&
+          isNavigablePath(projectWorkspace) && (
+            <ProjectWorkspaceBrowser
+              key={JSON.stringify([configProjectId, projectWorkspaceHostId, projectWorkspace])}
+              hostId={projectWorkspaceHostId}
+              workspace={projectWorkspace}
+            />
+          )}
         {/* Drop cue, spanning the landing surface. */}
         {isDragActive && landingSurface ? <FileDropOverlay container={landingSurface} /> : null}
         <fieldset
