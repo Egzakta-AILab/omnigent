@@ -1776,6 +1776,35 @@ class SqlScheduledTask(OmnigentBase):
     )
 
 
+class SqlStudioReviewRun(OmnigentBase):
+    """Captured project revision and idempotent reviewer roster."""
+
+    __tablename__ = "studio_review_runs"
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, default=current_workspace_id
+    )
+    id: Mapped[str] = mapped_column(Uuid16, primary_key=True)
+    owner_scope: Mapped[bytes] = mapped_column(_CKSUM32, nullable=False)
+    project_id: Mapped[str] = mapped_column(Uuid16, nullable=False)
+    pr_key: Mapped[bytes] = mapped_column(_CKSUM32, nullable=False)
+    request_key: Mapped[bytes] = mapped_column(_CKSUM32, nullable=False)
+    request_hash: Mapped[bytes] = mapped_column(_CKSUM32, nullable=False)
+    target_json: Mapped[str] = mapped_column(CompressedText, nullable=False)
+    created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "owner_scope", "request_key", name="uq_review_run_key"),
+        Index(
+            "ix_review_run_project_pr",
+            "workspace_id",
+            "owner_scope",
+            "project_id",
+            "pr_key",
+            "created_at",
+            "id",
+        ),
+    )
+
+
 class SqlStudioReviewPass(OmnigentBase):
     """Owner-private frozen PR context; execution remains owned by sessions."""
 
@@ -1786,6 +1815,9 @@ class SqlStudioReviewPass(OmnigentBase):
     id: Mapped[str] = mapped_column(Uuid16, primary_key=True)
     owner_scope: Mapped[bytes] = mapped_column(_CKSUM32, nullable=False)
     owner_user_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    run_id: Mapped[str | None] = mapped_column(Uuid16, nullable=True)
+    launch_error: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    report_json: Mapped[str | None] = mapped_column(CompressedText, nullable=True)
     source_session_id: Mapped[str | None] = mapped_column(Uuid16, nullable=True)
     source_project_id: Mapped[str | None] = mapped_column(Uuid16, nullable=True)
     target_json: Mapped[str] = mapped_column(CompressedText, nullable=False)
@@ -1797,6 +1829,7 @@ class SqlStudioReviewPass(OmnigentBase):
     updated_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
     version: Mapped[int] = mapped_column(BigInteger, nullable=False)
     __table_args__ = (
+        Index("ix_review_pass_run", "workspace_id", "run_id", "created_at", "id"),
         CheckConstraint("state IN (1, 2, 3, 4, 5, 6)", name="ck_studio_review_pass_state"),
         CheckConstraint(
             "dispatch_status IN (1, 2, 3, 4, 5, 6, 7)",
