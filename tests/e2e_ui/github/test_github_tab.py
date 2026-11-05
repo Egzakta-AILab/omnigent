@@ -1152,6 +1152,269 @@ def test_reply_to_inline_review_conversation(
     page.screenshot(path=str(tmp_path / f"inline-{entry}-range-posted.png"))
 
 
+@pytest.mark.parametrize("entry", ["rail", "composer-desktop", "composer-mobile", "canvas"])
+def test_studio_review_from_pr_panel(
+    page: Page, seeded_session: tuple[str, str], tmp_path: Path, entry: str
+) -> None:
+    """Exercise the UI with scripted review and provider responses."""
+    base_url, session_id = seeded_session
+    pr_url = "https://github.com/acme/app/pull/4242"
+    host_id, agent_id, review_id, reviewer_id = ("a" * 32, "b" * 32, "c" * 32, "d" * 32)
+    base_sha, head_sha = "1" * 40, "2" * 40
+    revision = {"base_sha": base_sha, "head_sha": head_sha}
+    workspace = "/work/acme/app"
+    association = {
+        "url": pr_url,
+        "host": "github.com",
+        "provider": "github",
+        "repository": "acme/app",
+        "number": _PR_NUMBER,
+        "relationship": "created",
+    }
+    info = {
+        **_INFO,
+        "provider": "github",
+        "tracking_available": True,
+        "selected_pr_url": pr_url,
+        "prs": [association],
+        "pr": {
+            **_INFO["pr"],
+            **revision,
+            "url": pr_url,
+            "head_repository_url": "https://github.com/contributor/app",
+        },
+    }
+    review = {
+        "id": review_id,
+        "target": {**revision, "pr_url": pr_url, "host_id": host_id, "workspace": workspace},
+        "profile": {"agent_id": agent_id, "harness": "codex-native", "skill": "team-review"},
+        "state": "prepared",
+        "dispatch_status": "not_requested",
+        "reviewer_session_id": None,
+        "created_at": 1793836800000,
+        "updated_at": 1793836800000,
+    }
+    older_review = {
+        **review,
+        "id": "e" * 32,
+        "target": {**review["target"], "pr_url": "https://github.com/acme/app/pull/4241"},
+    }
+    report = {
+        "state": "incomplete",
+        "summary": None,
+        "message_id": None,
+        "findings": [],
+    }
+    captured = False
+    capture_keys: list[str] = []
+    start_keys: list[str] = []
+    older_reads = 0
+
+    def list_or_capture(route: Route) -> None:
+        nonlocal captured, older_reads
+        if route.request.method == "GET":
+            if "after_id=" in route.request.url:
+                older_reads += 1
+                if older_reads == 1:
+                    route.fulfill(
+                        status=503, json={"detail": "Review history temporarily unavailable"}
+                    )
+                elif older_reads == 2:
+                    route.fulfill(
+                        json={
+                            "object": "list",
+                            "data": [{**older_review, "id": "f" * 32}],
+                            "next_cursor": "f" * 32,
+                        }
+                    )
+                else:
+                    route.fulfill(status=404, json={"detail": "Session not found"})
+                return
+            records = [review] if captured else []
+            cursor = None
+            if entry == "rail":
+                records.append(older_review)
+                cursor = "e" * 32
+            route.fulfill(json={"object": "list", "data": records, "next_cursor": cursor})
+            return
+        assert route.request.method == "POST"
+        assert route.request.post_data_json == {
+            "pr_url": pr_url,
+            "expected_base_sha": base_sha,
+            "expected_head_sha": head_sha,
+            "agent_id": agent_id,
+            "harness": "codex-native",
+            "skill": "team-review",
+        }
+        capture_keys.append(route.request.headers["idempotency-key"])
+        captured = True
+        route.fulfill(json={"review": review}, status=201)
+
+    def start(route: Route) -> None:
+        start_keys.append(route.request.headers["idempotency-key"])
+        if entry == "rail" and len(start_keys) == 1:
+            route.fulfill(json={"detail": "Start response unavailable"}, status=503)
+            return
+        review.update(state="running", dispatch_status="running", reviewer_session_id=reviewer_id)
+        route.fulfill(json=review)
+
+    def session_metadata(route: Route) -> None:
+        response = route.fetch()
+        route.fulfill(
+            response=response, json={**response.json(), "host_id": host_id, "workspace": workspace}
+        )
+
+    stub_session_pull_requests(page, lambda: [association], lambda _url: None)
+    page.route(re.compile(r"/resources/github(?:\?|$)"), lambda r: r.fulfill(json=info))
+    page.route(
+        re.compile(r"/resources/github/changes"),
+        lambda r: r.fulfill(json={**_CHANGES, **revision}),
+    )
+    page.route(
+        re.compile(r"/resources/github/diff(?:\?|$)"),
+        lambda r: r.fulfill(json={**_PR_DIFF, **revision}),
+    )
+    page.route(
+        "**/v1/info",
+        lambda r: r.fulfill(
+            json={
+                "single_user": True,
+                "features": {"canvas": entry == "canvas"},
+                "session_pull_requests": True,
+                "studio_reviews": True,
+            }
+        ),
+    )
+    page.route(re.compile(rf"/v1/sessions/{session_id}(?:\?|$)"), session_metadata)
+    page.route(
+        "**/v1/agents",
+        lambda r: r.fulfill(
+            json={
+                "data": [
+                    {
+                        "id": agent_id,
+                        "name": "codex-native-ui",
+                        "harness": "codex-native",
+                        "builtin": True,
+                    }
+                ]
+            }
+        ),
+    )
+    page.route(
+        "**/v1/skills?*",
+        lambda r: r.fulfill(
+            json={
+                "skills": [{"name": "team-review", "description": "Review a patch"}],
+                "warnings": [],
+            }
+        ),
+    )
+    page.route(re.compile(r"/studio/reviews(?:\?|$)"), list_or_capture)
+    page.route(f"**/studio/reviews/{review_id}", lambda r: r.fulfill(json=review))
+    page.route(f"**/studio/reviews/{review_id}/start", start)
+    page.route(f"**/studio/reviews/{review_id}/report", lambda r: r.fulfill(json=report))
+
+    mobile = entry == "composer-mobile"
+    page.emulate_media(color_scheme="dark" if mobile else "light")
+    page.set_viewport_size({"width": 390 if mobile else 1440, "height": 900})
+    page.goto(f"{base_url}/{'canvas/' if entry == 'canvas' else ''}c/{session_id}")
+    panel = (
+        page.get_by_test_id("github-panel-drawer")
+        if mobile
+        else page.get_by_role("complementary", name="Workspace")
+    )
+    if entry == "rail":
+        open_right_rail(page)
+        panel.get_by_role("tab", name="Pull Requests", exact=True).click()
+    else:
+        page.get_by_test_id("composer-pr-link").click()
+    tabs = panel.get_by_role("tablist", name="Pull request", exact=True)
+    tabs.get_by_role("tab", name="Review", exact=True).click()
+    panel.get_by_role("combobox", name="Reviewer", exact=True).click()
+    page.get_by_role("option", name="Codex", exact=True).click()
+    panel.get_by_role("combobox", name="Review skill", exact=True).click()
+    page.get_by_role("option", name="team-review", exact=True).click()
+    run_button = panel.get_by_role("button", name="Run review", exact=True)
+    if entry == "rail":
+        # Plain HTTP omits randomUUID. Mask it after app setup to exercise the action itself.
+        page.evaluate("() => Object.defineProperty(crypto, 'randomUUID', { value: undefined })")
+    run_button.click()
+    if entry == "rail":
+        expect(panel.get_by_role("alert")).to_have_text("Start response unavailable")
+        run_button.click()
+    expect(panel.get_by_text("Review requested", exact=True)).to_be_visible()
+    expect(
+        panel.get_by_text(re.compile("The reviewer has not produced a complete report"))
+    ).to_be_visible()
+    expect(panel.get_by_role("link", name="Open reviewer session")).to_have_attribute(
+        "href", f"/c/{reviewer_id}"
+    )
+    report.update(
+        state="ready",
+        summary="Reviewed the captured patch.",
+        message_id="report-1",
+        findings=[
+            {
+                "title": "Keep the input validation",
+                "detail": "The new branch accepts invalid values.",
+                "severity": "high",
+                "path": "src/app/main.py",
+                "side": "head",
+                "line": 2,
+            }
+        ],
+    )
+    panel.get_by_role("button", name="Refresh report", exact=True).click()
+    expect(panel.get_by_role("heading", name="Keep the input validation")).to_be_visible()
+    expect(panel.get_by_role("link", name="Open source")).to_have_attribute(
+        "href", f"https://github.com/contributor/app/blob/{head_sha}/src/app/main.py#L2"
+    )
+    page.screenshot(path=str(tmp_path / f"studio-review-{entry}-findings.png"))
+    if entry == "rail":
+        panel.get_by_role("button", name="Load older reviews", exact=True).click()
+        expect(panel.get_by_text("Couldn’t load review history.", exact=True)).to_be_visible()
+        expect(panel.get_by_role("heading", name="Keep the input validation")).to_be_visible()
+        panel.get_by_role("button", name="Retry history", exact=True).click()
+        expect(panel.get_by_text("Couldn’t load review history.", exact=True)).to_have_count(0)
+        panel.get_by_role("button", name="Full screen", exact=True).click()
+        tabs.get_by_role("tab", name="Changes", exact=True).click()
+        panel.get_by_role("button", name="Find in changes", exact=True).click()
+        panel.get_by_role("textbox", name="Find in changes", exact=True).fill("line2")
+        expect(panel.get_by_text("1 of 1", exact=True)).to_be_visible()
+        tabs.get_by_role("tab", name="Review", exact=True).click()
+    panel.get_by_role("button", name="Show in diff", exact=True).click()
+    expect(panel.get_by_text("Review finding · src/app/main.py:2", exact=True)).to_be_visible()
+    expect(panel.get_by_role("textbox", name="Find in changes", exact=True)).to_have_count(0)
+    page.wait_for_function(
+        """() => [...(CSS.highlights.get("pr-find-active") ?? [])].some((range) =>
+            range.startContainer.isConnected && range.toString() === "added line"
+            && range.startContainer.parentElement.closest("[data-line]")
+                ?.getAttribute("data-line") === "2")"""
+    )
+    if entry == "rail":
+        panel.get_by_role("button", name="Find in changes", exact=True).press("ControlOrMeta+f")
+        panel.get_by_role("textbox", name="Find in changes", exact=True).fill("line2")
+        page.wait_for_function(
+            """() => [...(CSS.highlights.get("pr-find-active") ?? [])].some((range) =>
+                range.startContainer.isConnected && range.toString() === "line2")"""
+        )
+        tabs.get_by_role("tab", name="Review", exact=True).click()
+        info["pr"]["head_sha"] = "3" * 40
+        panel.get_by_role("button", name="Refresh", exact=True).click()
+        expect(panel.get_by_text("Earlier revision", exact=True)).to_be_visible()
+        expect(panel.get_by_role("button", name="Show in diff", exact=True)).to_have_count(0)
+        panel.get_by_role("button", name="Load older reviews", exact=True).click()
+        expect(tabs.get_by_role("tab", name="Review", exact=True)).to_have_count(0)
+    assert len(capture_keys) == 1
+    assert re.fullmatch(
+        r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+        capture_keys[0],
+    )
+    assert len(start_keys) == (2 if entry == "rail" else 1)
+    assert len(set(start_keys)) == 1
+
+
 # Two additions match "added": the first on line 2, the second on line 4.
 _FIND_PATCH = (
     "diff --git a/src/app/main.py b/src/app/main.py\n"

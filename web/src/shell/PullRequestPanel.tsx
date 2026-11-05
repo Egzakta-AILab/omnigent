@@ -97,6 +97,8 @@ import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { gitProviderCopy, type GitProviderCopy } from "@/lib/gitProviders";
 import { parseHttpUrl } from "@/lib/openLinkInApp";
 import { absoluteTime, relativeTime } from "@/lib/relativeTime";
+import { ReviewPanel, useStudioReviewHistory } from "@/studio/reviews/ReviewPanel";
+import type { ReviewSource } from "@/studio/reviews/api";
 import {
   normalizePullRequestInfo,
   usePullRequestChangedFiles,
@@ -789,7 +791,7 @@ type Associations = Pick<
   PullRequestInfo,
   "prs" | "tracking_available" | "selected_pr_url" | "provider" | "provider_display"
 >;
-type PullRequestSubtab = "summary" | "comments" | "changes";
+type PullRequestSubtab = "summary" | "comments" | "changes" | "review";
 
 function PullRequestListRow({
   conversationId,
@@ -1513,6 +1515,8 @@ function PullRequestPanelDetails({
   const prDiff = usePullRequestDiff(conversationId, hasPr, prUrl, revision);
   const sandboxAsleep = useWorkspaceAsleep(conversationId);
   const canEdit = useCanEdit(conversationId);
+  const serverInfo = useServerInfo();
+  const [reviewSource, setReviewSource] = useState<ReviewSource | null>(null);
 
   // Summary (checks + PR body), Comments, and Changes (the stacked diff).
   // Summary is the landing tab — like GitHub's PR page opening on the
@@ -1532,6 +1536,15 @@ function PullRequestPanelDetails({
 
   // Mutation responses seed the query cache raw, so normalize before reading.
   const normalized = info.data && normalizePullRequestInfo(info.data);
+  const supportsStudio =
+    serverInfo !== "loading" &&
+    serverInfo.studio_reviews === true &&
+    hasPr &&
+    !!prUrl &&
+    normalized?.provider === "github";
+  const history = useStudioReviewHistory(conversationId, active && supportsStudio);
+  const showReview = supportsStudio && history.authorized;
+  const selectedTab = activeTab === "review" && !showReview ? "summary" : activeTab;
   const copy = gitProviderCopy(
     normalized?.provider ?? null,
     normalized?.auth.hint,
@@ -1715,8 +1728,11 @@ function PullRequestPanelDetails({
   return (
     <TooltipProvider delayDuration={0}>
       <Tabs
-        value={activeTab}
-        onValueChange={(v) => setActiveTab(v === "comments" || v === "changes" ? v : "summary")}
+        value={selectedTab}
+        onValueChange={(v) => {
+          setReviewSource(null);
+          setActiveTab(v === "comments" || v === "changes" || v === "review" ? v : "summary");
+        }}
         componentId="github.panel.tabs"
         className="flex h-full min-h-0 flex-col gap-0"
       >
@@ -1774,6 +1790,11 @@ function PullRequestPanelDetails({
             <TabsTrigger value="changes" className="flex-none border-0 px-3 leading-none">
               Changes
             </TabsTrigger>
+            {showReview && (
+              <TabsTrigger value="review" className="flex-none border-0 px-3 leading-none">
+                Review
+              </TabsTrigger>
+            )}
           </TabsList>
         </div>
 
@@ -1863,17 +1884,40 @@ function PullRequestPanelDetails({
           )}
         </TabsContent>
 
+        {showReview && prUrl && (
+          <TabsContent
+            value="review"
+            forceMount
+            className="min-h-0 flex-1 overflow-y-auto data-[state=inactive]:hidden"
+          >
+            <ReviewPanel
+              key={`${history.viewerId}:${conversationId}:${prUrl}`}
+              conversationId={conversationId}
+              active={active && selectedTab === "review"}
+              revision={{ prUrl, baseSha: baseSha ?? "", headSha: headSha ?? "" }}
+              headRepoUrl={pr.head_repository_url}
+              history={history}
+              onOpenSource={(source) => {
+                setReviewSource(source);
+                setActiveTab("changes");
+              }}
+            />
+          </TabsContent>
+        )}
+
         <PullRequestChangesTab
           conversationId={conversationId}
           data={data}
           pr={pr}
           prUrl={prUrl}
           canEdit={canEdit}
-          selected={activeTab === "changes"}
+          selected={selectedTab === "changes"}
           changes={changes}
           prDiff={prDiff}
           reviews={reviews}
           identity={identity}
+          reviewSource={showReview ? reviewSource : null}
+          onClearReviewSource={() => setReviewSource(null)}
         />
       </Tabs>
     </TooltipProvider>

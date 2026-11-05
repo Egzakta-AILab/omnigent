@@ -2,7 +2,8 @@
 
 Read, reply to and start GitHub review conversations beside the code in a pull
 request's Changes subtab. Top-level comments, commits and force pushes appear
-together in Comments.
+together in Comments. The fork's Review subtab runs private native reviews and
+links findings to their captured changes.
 
 ## Sub-features
 
@@ -40,6 +41,11 @@ together in Comments.
   an in-flight read. Conversation navigation shares the diff toolbar.
 - `render-recovery`: A panel render failure shows **Try again** while chat,
   Workspace tabs and mobile Close remain usable.
+- `private-native-review`: Choose a built-in Codex or Claude reviewer and an
+  available host skill. Start a private reviewer session, inspect its report,
+  and reveal a finding in the captured diff. Incomplete results link back to
+  the reviewer for repair. An earlier revision keeps its findings separate
+  from the current diff.
 
 ## How to get to it (user POV)
 
@@ -52,6 +58,7 @@ together in Comments.
 A session with one PR opens its details directly. With multiple PRs, select a
 request from the list first; **All pull requests** returns to that list.
 Choose Comments on any of these surfaces to see commit history.
+Choose **Review** to open private native reviews on the fork as session owner.
 
 With a pointer, hovering the composer's PR link previews each PR's status. The
 icon beside each title opens that PR in a new browser tab without opening the
@@ -95,6 +102,14 @@ covers the separate Comments composer and interleaved commit/force-push history
 through all four entry points. Component and runner tests carry the
 pagination, old-side placement, revision, permission and failure matrices.
 
+`tests/e2e_ui/github/test_github_tab.py::test_studio_review_from_pr_panel`
+drives **Review** from the rail, both composer layouts and Canvas. It scripts
+GitHub and review responses to check the skill picker, a retry after a lost
+start response, report repair, and navigation to a captured line. The rail
+case also checks that an earlier report stays separate from the updated diff.
+Use the [local review walkthrough](../docs/studio/README.md#run-a-review-locally)
+for the native skill, transcript and saved-report checks.
+
 Render recovery has component coverage in
 `web/src/components/RenderErrorBoundary.test.tsx` and
 `web/src/shell/AppShell.pullRequestTabVisibility.test.tsx`. Manually inject a
@@ -119,6 +134,9 @@ outdated thread and confirm the suggestion uses its labeled original context.
 
 - Browser stubs prove UI behavior; runner/host tests prove provider transport.
   They do not constitute a live GitHub write test.
+- Review results are private agent assessments. The reviewer uses the selected
+  workspace and its normal native permissions. A captured start key identifies
+  a single launch attempt, including when confirmation is lost.
 - GitHub exposes commit times, not regular push times. Commit rows use commit
   time; force-push rows use the event time. The latest 100 activity entries are
   loaded; an incomplete-history link opens the full GitHub timeline.

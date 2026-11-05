@@ -6,9 +6,9 @@ Omnigent owns sessions, hosts and the application interface.
 
 The [implementation plan](https://chatgpt.com/space/page_0dc939b0cb9c8191bfa031c3dadb65f1)
 defines the delivery order. [baseline.json](baseline.json) records the source
-revision at the start of this work. Setup verification and the private review
-record API are implemented. Review controls and Creator Mode follow them.
-Development and acceptance currently run locally; the fork is not deployed.
+revision at the start of this work. This checkout includes setup verification,
+private review records and native reviews in the PR panel. Development and
+acceptance use a local instance.
 
 ## Local checkout
 
@@ -164,15 +164,26 @@ Full environment lifecycle management and the component map follow these two
 releases. The initial execution-target binding is limited to what review
 provenance needs.
 
-## Review record API
+## Run a review locally
 
-A2 captures a review's PR revisions, execution host, workspace and reviewer
-profile. It persists these records in Omnigent's operational database. Capturing
-a record does not start an agent or verify that its selected skill is installed.
-The [API guide](review-records.md) gives a request example, retry rules and the
-remaining execution boundary.
+1. Start the local instance, connect your host and open a session you own in
+   a workspace where you already run Codex or Claude Code.
+2. Attach a GitHub PR and open **Pull Requests → Review**. Choose the built-in
+   reviewer and a review skill from the host's catalog, then select **Run review**.
+3. Inspect the summary and findings. Open a finding's line in **Changes** to
+   compare the claim with the diff. Refresh the page and reopen **Review** to
+   check that the saved run and its linked reviewer session return.
+4. If the report is incomplete, open the reviewer session and ask it to repair
+   the structured report in the same conversation. Return to **Review** and
+   refresh the report.
 
-Run the deterministic acceptance checks from this checkout:
+The reviewer runs in the captured workspace with the selected agent's normal
+permissions. It receives the PR diff at the captured base and head revisions.
+The first version accepts GitHub text diffs up to 48 KiB. A moved revision
+requires a fresh capture. Reports contain agent findings. Check evidence is A4.
+See the [review API and state model](review-records.md) for retry behavior.
+
+Run the deterministic A2 record checks from this checkout:
 
 ```sh
 uv run --no-sync python scripts/verify_studio.py contracts
@@ -180,5 +191,18 @@ uv run --no-sync python scripts/verify_studio.py contracts
 
 The command retains its test log, JUnit report and JSON receipt under
 `.omnigent/studio/evidence/`. It exercises local SQLite and controlled transport
-responses. It does not contact GitHub or model providers. Server deployment,
-PostgreSQL/MySQL execution and the complete PR workflow remain unqualified.
+responses. A3 coverage also includes the native launch and report contract tests
+and a browser journey through the shared PR panel.
+
+For a machine-readable check of a review you already ran, use its review ID
+and the exact server and PR URLs:
+
+```sh
+uv run --no-sync python scripts/verify_studio.py review \
+  --mode local --server http://127.0.0.1:6767 --review-id YOUR_REVIEW_ID \
+  --harness codex-native --pr https://github.com/YOUR_ORG/YOUR_REPO/pull/17 \
+  --output .omnigent/studio/review-receipt.json
+```
+
+Use `--harness claude-native` for Claude Code. The command checks the saved
+revision, reviewer session and structured report through the instance API.

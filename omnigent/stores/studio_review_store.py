@@ -562,6 +562,7 @@ class StudioReviewStore:
         *,
         owner_user_id: str | None,
         expected_version: int,
+        reviewer_session_id: str | None = None,
     ) -> ReviewOperation:
         """Persist dispatching before a caller performs its one external attempt."""
         return self._transition(
@@ -571,6 +572,7 @@ class StudioReviewStore:
             expected_version=expected_version,
             allowed=("pending",),
             state="dispatching",
+            reviewer_session_id=reviewer_session_id,
         )
 
     def mark_unknown(

@@ -82,7 +82,10 @@ const state = vi.hoisted(() => ({
   serveable: undefined as boolean | undefined,
 }));
 
-vi.mock("@/hooks/useViewerId", () => ({ useViewerId: () => "alice" }));
+vi.mock("@/hooks/useViewerId", () => ({
+  useViewerId: () => "alice",
+  useIdentityReady: () => true,
+}));
 
 vi.mock("@/hooks/usePullRequests", async (importOriginal) => {
   const original = await importOriginal<typeof UsePullRequestsModule>();

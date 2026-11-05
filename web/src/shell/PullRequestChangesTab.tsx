@@ -40,6 +40,7 @@ import { hasCommandModifier } from "@/lib/hotkeys";
 import { PULL_REQUEST_DIFF_THEME, type ReviewThread } from "@/lib/pullRequestReviewThreads";
 import { useViewedFiles, type PullRequestIdentity } from "@/lib/pullRequestViewed";
 import { cn } from "@/lib/utils";
+import type { ReviewSource } from "@/studio/reviews/api";
 import {
   DiffStat,
   IconButton,
@@ -411,6 +412,38 @@ function openUnavailableReason(
 
 const NO_HIDDEN_PATHS: ReadonlySet<string> = new Set();
 
+function findingLine(
+  diff: FileDiffMetadata,
+  source: ReviewSource,
+  layout: "unified" | "split",
+): FindHighlight | null {
+  const base = source.side === "base";
+  for (const hunk of diff.hunks) {
+    for (const part of hunk.hunkContent) {
+      const count = part.type === "context" ? part.lines : base ? part.deletions : part.additions;
+      const first = base
+        ? hunk.deletionStart + part.deletionLineIndex - hunk.deletionLineIndex
+        : hunk.additionStart + part.additionLineIndex - hunk.additionLineIndex;
+      const offset = source.line - first;
+      if (offset < 0 || offset >= count) continue;
+      // Unified diffs number shared context using the head side.
+      const deletion = base && (part.type !== "context" || layout === "split");
+      const index = deletion ? part.deletionLineIndex : part.additionLineIndex;
+      const text = (deletion ? diff.deletionLines : diff.additionLines)[index + offset];
+      if (text === undefined) return null;
+      return {
+        side: deletion ? "deletions" : "additions",
+        line: deletion
+          ? source.line
+          : hunk.additionStart + part.additionLineIndex - hunk.additionLineIndex + offset,
+        start: 0,
+        end: text.replace(/\r?\n$/, "").length,
+      };
+    }
+  }
+  return null;
+}
+
 /**
  * The Changes tab content. Mounted beside the other tabs' content (it renders its
  * own TabsContent) so collapse and scroll-spy state survive tab switches.
@@ -426,6 +459,8 @@ export function PullRequestChangesTab({
   prDiff,
   reviews,
   identity,
+  reviewSource,
+  onClearReviewSource,
 }: {
   conversationId: string;
   data: NormalizedPullRequestInfo;
@@ -440,6 +475,8 @@ export function PullRequestChangesTab({
   reviews: ReturnType<typeof usePullRequestReviewThreads>;
   /** The PR's server identity, for the viewed-file key; null when unknown. */
   identity: PullRequestIdentity | null;
+  reviewSource?: ReviewSource | null;
+  onClearReviewSource?: () => void;
 }) {
   const baseRef = data.base_ref ?? undefined;
   const headSha = pr.head_sha;
@@ -632,6 +669,65 @@ export function PullRequestChangesTab({
     return { filesByPath: map, parseError: undefined };
   }, [prDiff.data]);
 
+  const focusedFinding = useMemo(() => {
+    if (
+      !selected ||
+      !reviewSource ||
+      reviewSource.prUrl !== prUrl ||
+      reviewSource.headSha !== headSha ||
+      reviewSource.baseSha !== baseSha ||
+      reviewSource.headSha !== renderedHeadSha ||
+      reviewSource.baseSha !== renderedBaseSha ||
+      reviewSource.headSha !== prDiff.data?.head_sha ||
+      reviewSource.baseSha !== prDiff.data?.base_sha ||
+      parseError ||
+      changes.isError ||
+      prDiff.isError ||
+      prDiff.data?.unavailable_reason
+    )
+      return null;
+    const file = files.find(
+      (entry) =>
+        reviewSource.path ===
+        (reviewSource.side === "base"
+          ? (filesByPath.get(entry.path)?.prevName ?? entry.previous_path ?? entry.path)
+          : entry.path),
+    );
+    const diff = file && filesByPath.get(file.path);
+    const line = diff && findingLine(diff, reviewSource, diffStyle);
+    return file && line ? { path: file.path, line } : null;
+  }, [
+    selected,
+    reviewSource,
+    prUrl,
+    headSha,
+    baseSha,
+    renderedHeadSha,
+    renderedBaseSha,
+    prDiff.data,
+    parseError,
+    changes.isError,
+    prDiff.isError,
+    files,
+    filesByPath,
+    diffStyle,
+  ]);
+  const focusedFindingPath = focusedFinding?.path;
+  const handledFinding = useRef<ReviewSource | null>(null);
+  useEffect(() => {
+    if (!focusedFindingPath || handledFinding.current === reviewSource) return;
+    const file = files.find((entry) => entry.path === focusedFindingPath);
+    if (!file) return;
+    handledFinding.current = reviewSource ?? null;
+    if (filterChangedPaths([file], view.pathFilter).length === 0) view.setPathFilter("");
+    if (view.hideViewed && viewedFiles.viewed.has(file.path)) view.setHideViewed(false);
+    if (view.find.open) {
+      setFindTarget(null);
+      view.setFind({ open: false });
+    }
+    reveal(file.path);
+  }, [focusedFindingPath, reviewSource, files, view, viewedFiles.viewed, reveal]);
+
   // Expand-context loader: fetch a file's full old/new content on demand when
   // the reader expands unchanged regions.
   const loadDiffFiles = useCallback(
@@ -787,7 +883,7 @@ export function PullRequestChangesTab({
     shownMatch.current =
       findTarget && activeMatch ? { target: findTarget, shown: activeMatch } : null;
   });
-  const activeFilePath = activeMatch?.target.path ?? null;
+  const activeFilePath = focusedFinding ? null : (activeMatch?.target.path ?? null);
   // A line match is painted by its section; split out the primitives so a refresh that
   // keeps the same match doesn't re-centre the row.
   const lineMatch = activeMatch?.target.kind === "line" ? activeMatch : null;
@@ -836,6 +932,10 @@ export function PullRequestChangesTab({
     setFindTarget(null);
     view.setFind(patch);
   };
+  const openFind = () => {
+    onClearReviewSource?.();
+    view.setFind({ open: true });
+  };
   const closeFind = () => {
     setFindTarget(null);
     view.setFind({ open: false });
@@ -859,7 +959,7 @@ export function PullRequestChangesTab({
       return;
     }
     event.preventDefault();
-    if (!find.open) view.setFind({ open: true });
+    if (!find.open) openFind();
     else findInputRef.current?.select();
     findInputRef.current?.focus();
   };
@@ -991,6 +1091,18 @@ export function PullRequestChangesTab({
   // A controls row, then the sidebar (jump-to-file) + one scroll of all files' diffs.
   return (
     <TabsContent value="changes" className="flex min-h-0 flex-1 flex-col" onKeyDown={onTabKeyDown}>
+      {selected && reviewSource && reviewSource.prUrl === prUrl && (
+        <p
+          role="status"
+          className="shrink-0 border-b px-3 py-1 text-ui text-muted-foreground [overflow-wrap:anywhere]"
+        >
+          {focusedFinding
+            ? `Review finding · ${reviewSource.path}:${reviewSource.line}`
+            : changes.isFetching || prDiff.isFetching
+              ? "Locating the review finding…"
+              : "The review finding’s captured line is unavailable in this diff."}
+        </p>
+      )}
       {data.capabilities.review_threads &&
         (reviews.page?.has_more ||
           reviews.historyStale ||
@@ -1074,7 +1186,7 @@ export function PullRequestChangesTab({
               invalid={search.invalid}
               hiddenCount={hiddenSearch.matches.length}
               hiddenTruncated={hiddenSearch.truncated}
-              onOpen={() => view.setFind({ open: true })}
+              onOpen={openFind}
               onClose={closeFind}
               onQueryChange={(next) => changeFind({ query: next })}
               onToggleOption={(option) =>
@@ -1206,9 +1318,21 @@ export function PullRequestChangesTab({
                 registerRef={registerRef}
                 collapsed={collapsedPaths.has(file.path)}
                 forceExpanded={revealedPaths.has(file.path)}
-                forceMount={pendingReveal?.path === file.path || activeFilePath === file.path}
-                bypassLargeDiffGate={!!highlight && activeFilePath === file.path}
-                highlight={activeFilePath === file.path ? highlight : null}
+                forceMount={
+                  pendingReveal?.path === file.path ||
+                  activeFilePath === file.path ||
+                  focusedFindingPath === file.path
+                }
+                bypassLargeDiffGate={
+                  (!!highlight && activeFilePath === file.path) || focusedFindingPath === file.path
+                }
+                highlight={
+                  activeFilePath === file.path
+                    ? highlight
+                    : focusedFinding?.path === file.path
+                      ? focusedFinding.line
+                      : null
+                }
                 onToggleCollapsed={() => toggleOne(file.path)}
                 headerActions={
                   <>

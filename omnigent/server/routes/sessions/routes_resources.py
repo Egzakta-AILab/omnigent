@@ -125,6 +125,8 @@ from omnigent.stores.session_pull_request_store import (
 
 if TYPE_CHECKING:
     from omnigent.inner.native_attachments import FilesystemAttachmentPolicy
+    from omnigent.server.routes.sessions.routes_core import ReviewCreate
+    from omnigent.server.routes.sessions.routes_events import ReviewSend
     from omnigent.stores.studio_review_store import StudioReviewStore
     from omnigent.studio.reviews.models import ReviewTarget
 
@@ -264,6 +266,8 @@ def register_resources_routes(
     register_initial_file_upload: Callable[..., None] | None = None,
     pull_request_refresher: server_prs.PullRequestRefresher | None = None,
     studio_review_store: StudioReviewStore | None = None,
+    create_reviewer: ReviewCreate | None = None,
+    send_review: ReviewSend | None = None,
 ) -> None:
     """Register the resources routes on router."""
     pull_request_store = server_prs.open_store(conversation_store)
@@ -3355,6 +3359,7 @@ def register_resources_routes(
     if studio_review_store is not None:
         from omnigent.server.routes.studio_reviews import create_studio_reviews_router
         from omnigent.studio.reviews.capture import capture_review_target
+        from omnigent.studio.reviews.launch import verified_patch
 
         async def _capture_studio_review_context(
             request: Request, session_id: str, pr_url: str | None
@@ -3385,12 +3390,41 @@ def register_resources_routes(
                 read_info=read_info,
             )
 
+        async def _read_studio_review_patch(request: Request, target: ReviewTarget) -> str:
+            session_id = target.source_session_id
+            source = await _validate_session(session_id, request, LEVEL_OWNER)
+            if (source.host_id, source.workspace) != (target.host_id, target.workspace):
+                raise HTTPException(409, "The review execution target changed")
+            params = {
+                "pr_url": target.pr_url,
+                "base_sha": target.base_sha,
+                "head_sha": target.head_sha,
+            }
+            try:
+                payload = await _fs_get_with_host_fallback(
+                    session_id,
+                    source,
+                    op="github_pr_diff",
+                    host_params={**params, "server_tracked": True},
+                    runner_params={**params, "server_tracked": "true"},
+                    runner_path=f"/v1/sessions/{session_id}/resources/github/diff",
+                )
+            except HTTPException as exc:
+                raise HTTPException(503, "The captured PR diff could not be loaded") from exc
+            try:
+                return verified_patch(payload, target)
+            except ValueError as exc:
+                raise HTTPException(409, str(exc)) from None
+
         router.include_router(
             create_studio_reviews_router(
                 studio_review_store,
                 conversation_store,
                 agent_store,
                 capture_context=_capture_studio_review_context,
+                read_patch=_read_studio_review_patch,
+                create_reviewer=create_reviewer,
+                send_review=send_review,
                 auth_provider=auth_provider,
                 permission_store=permission_store,
             )

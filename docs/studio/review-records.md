@@ -1,7 +1,7 @@
 # Private review records
 
-The capture API creates a durable review record before agent execution is
-implemented. Each record freezes the linked PR's base and head SHA, source
+The capture API creates a durable review record before agent execution. Each
+record freezes the linked PR's base and head SHA, source
 session, host, workspace, agent version, harness, skill name and optional model
 settings. Existing session, agent and resource services supply this context.
 
@@ -67,6 +67,7 @@ partially verified record.
 | `GET /v1/studio/reviews/{review_id}` | Durable snapshot and current state |
 | `GET /v1/studio/reviews/{review_id}/operations/{operation_id}` | One operation's status |
 | `GET /v1/studio/reviews/{review_id}/events?after_sequence=0` | Private ordered events, with `limit` and `next_cursor` pagination |
+| `GET /v1/studio/reviews/{review_id}/report` | Pending, incomplete or ready report from the bound reviewer session |
 
 Capture and source listing require source ownership. Review records, operations
 and events are independently scoped to their capture owner and workspace.
@@ -82,19 +83,47 @@ polls. Review events are not broadcast into the source
 session's shared event stream. The checked-in [OpenAPI contract](../../openapi.json)
 describes request and response fields.
 
-## Execution boundary
+## Start and read a native review
 
-The store includes atomic operation reservation, a single dispatch claim,
-version checks and explicit reconciliation. A start whose outcome is unknown
-cannot be retried by changing its key. These are internal groundwork for A3;
-there is no public start, cancel or publish endpoint yet.
+The PR panel performs these steps after **Run review**. For a direct API call,
+capture a record with the built-in Codex or Claude Code agent ID and a skill
+available on the owned host. Then send:
 
-A3 must recheck the captured target and revision, qualify the selected native
-harness and skill, and bind a separate reviewer session before dispatch. A2
-does not establish skill contents, integration permissions, current PR
-freshness, review findings, test proofs or GitHub publication.
+```http
+POST /v1/studio/reviews/REVIEW_ID/start
+Content-Type: application/json
+Idempotency-Key: kvark-pr-17-start-1
 
-To verify the visible behavior now, capture a linked PR, repeat the identical
-request, change its body while retaining the key, restart the local server and
-read the original ID. Expect 201, 200, 409 and the original snapshot. In an
-authenticated test instance, a different user should receive 404 for that ID.
+{}
+```
+
+Omnigent checks the current source binding, PR revision, agent version, host
+readiness and complete skill inventory. It reads the bounded text diff through
+the existing PR transport and claims one attempt before creating a private root
+session. The new session uses the captured workspace and normal native agent
+permissions. Its first input supplies the diff as review evidence. Codex uses
+its native skill mention. Claude Code receives an explicit request to load the
+skill with its native Skill tool.
+
+| `dispatch_status` | Meaning |
+| --- | --- |
+| `not_requested` | Captured and available to start |
+| `dispatching` | Start claimed, confirmation pending |
+| `running` | Native input acknowledgement received. Read the report separately |
+| `unknown` | Start or delivery confirmation was lost. Inspect the reviewer session if available |
+
+Retrying the same start key returns the existing attempt. Each capture allows
+one start claim even across reconnects. A reserved reviewer session ID can
+exist before its session is created. A different key cannot repeat an uncertain
+start. The caller can inspect the original session and decide what to do next.
+
+The report comes from the latest eligible assistant reply in that session. A
+ready result contains one `studio-review-v1` JSON block bound to the review ID
+and both captured SHAs. Claude Code also requires the same turn's matching
+Skill tool launch receipt. Malformed or interrupted output stays incomplete and
+can be repaired in the same conversation. Omnigent validates the report shape
+and relative file coordinates. The UI resolves a finding to a displayed diff
+line only when the selected PR revision and the loaded patch match the capture.
+Old-side lines use the patch's merge-base coordinates and open in **Changes**.
+The transcript is the durable source for the report. A ready report represents
+an agent assessment and carries no executed check receipt.

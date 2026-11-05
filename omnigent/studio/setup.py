@@ -65,7 +65,7 @@ def validate_server_url(server_url: str, mode: str) -> str:
     return server_url.rstrip("/")
 
 
-def _headers(server_url: str, host_id: str) -> dict[str, str]:
+def _headers(server_url: str, host_id: str | None) -> dict[str, str]:
     from omnigent.chat import _remote_headers
 
     return _remote_headers(server_url=server_url, host_id=host_id)
@@ -413,11 +413,46 @@ def main(argv: Sequence[str] | None = None) -> int:
     contracts = commands.add_parser("contracts", help="run deterministic local A2 contracts")
     contracts.add_argument("--output", type=Path, help="write a JSON receipt copy")
     contracts.add_argument("--json", action="store_true", help="print the JSON receipt")
+    review = commands.add_parser("review", help="verify a saved native review report")
+    review.add_argument("--mode", choices=("local", "server"), required=True)
+    review.add_argument("--server", required=True, help="explicit trusted instance URL")
+    review.add_argument("--review-id", required=True, help="ID of an existing review")
+    review.add_argument("--harness", choices=HARNESSES, required=True)
+    review.add_argument("--pr", required=True, help="expected GitHub pull request URL")
+    review.add_argument("--output", type=Path, help="write a JSON receipt")
+    review.add_argument("--json", action="store_true", help="print the JSON receipt")
     args = parser.parse_args(argv)
     if args.command == "contracts":
         from omnigent.studio.contracts import main as contracts_main
 
         return contracts_main(output=args.output, json_output=args.json)
+    if args.command == "review":
+        from omnigent.studio.verify_review import collect_review
+
+        try:
+            receipt = collect_review(
+                mode=args.mode,
+                server_url=args.server,
+                review_id=args.review_id,
+                harness=args.harness,
+                pr_url=args.pr,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+        serialized = json.dumps(receipt, indent=2) + "\n"
+        if args.output:
+            try:
+                args.output.parent.mkdir(parents=True, exist_ok=True)
+                args.output.write_text(serialized, encoding="utf-8")
+            except OSError:
+                parser.exit(2, "Could not write the review receipt.\n")
+        if args.json:
+            print(serialized, end="")
+        else:
+            print("Saved review ready" if receipt["review_ready"] else "Saved review unconfirmed")
+            for check in receipt["checks"]:
+                print(f"  {check['status']:7} {check['name']}: {check['reason']}")
+        return 0 if receipt["review_ready"] else 1
     harnesses = [
         h
         for selected in (args.harness or ["both"])

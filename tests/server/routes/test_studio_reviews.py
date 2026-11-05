@@ -215,10 +215,17 @@ async def test_shared_source_access_does_not_grant_review_access(
         f"/v1/studio/reviews/{review_id}",
         f"/v1/studio/reviews/{review_id}/operations/{operation_id}",
         f"/v1/studio/reviews/{review_id}/events",
+        f"/v1/studio/reviews/{review_id}/report",
     ):
         assert (
             await review_client.get(path, headers={"X-Forwarded-Email": BOB})
         ).status_code == 404
+    response = await review_client.post(
+        f"/v1/studio/reviews/{review_id}/start",
+        headers={"X-Forwarded-Email": BOB, "Idempotency-Key": "start"},
+        json={},
+    )
+    assert response.status_code == 404
     assert len(review_harness.captured) == 1
 
 
@@ -242,6 +249,13 @@ async def test_replay_rechecks_source_ownership(
         f"/v1/studio/reviews/{result['review']['id']}", headers={"X-Forwarded-Email": ALICE}
     )
     assert response.status_code == 200
+    assert (
+        await review_client.post(
+            f"/v1/studio/reviews/{result['review']['id']}/start",
+            headers={"X-Forwarded-Email": ALICE, "Idempotency-Key": "start"},
+            json={},
+        )
+    ).status_code == 404
 
 
 @pytest.mark.parametrize("field", ["base_sha", "head_sha"])

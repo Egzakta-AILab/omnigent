@@ -28,7 +28,7 @@ from fastapi.responses import Response
 from pydantic import ValidationError
 
 from omnigent.cli_invocation import cli_invocation
-from omnigent.db.utils import generate_agent_id, generate_task_id
+from omnigent.db.utils import builtin_agent_id, generate_agent_id, generate_task_id
 from omnigent.db.workspace_cache import WorkspaceScopedCache
 from omnigent.debug_logging import debug_event, runner_log_scope
 from omnigent.entities import (
@@ -427,6 +427,7 @@ from omnigent.stores.host_store import Host, HostStore, host_is_live
 from omnigent.stores.permission_store import PermissionStore
 from omnigent.stores.project_store import ProjectStore
 from omnigent.stores.sandbox_profile_store import PROFILE_LABEL_PREFIX, public_profile
+from omnigent.studio.reviews.models import ReviewProfile
 from omnigent.telemetry import emit as _tel_emit
 from omnigent.telemetry.anon import anon_user_id as _tel_anon_user_id
 from omnigent.telemetry.anon import current_anon_user_id as _tel_current_anon
@@ -11506,6 +11507,8 @@ async def _create_session_from_existing_agent(
     project_store: ProjectStore | None = None,
     created_by_session_id: str | None = None,
     created_by_project_id: str | None = None,
+    review_profile: ReviewProfile | None = None,
+    conversation_id: str | None = None,
 ) -> tuple[SessionResponse, Conversation]:
     """
     Create a session bound to an already-registered agent.
@@ -11538,6 +11541,8 @@ async def _create_session_from_existing_agent(
     :param created_by_session_id: Server-authorized source of an independent worker.
     :param created_by_project_id: That source's project. A worker whose request names
         no project is filed there, so it sits beside the session that started it.
+    :param review_profile: Captured native agent requirements for a studio reviewer.
+    :param conversation_id: Internal preassigned conversation id for reconciliation.
     :returns: The newly created session snapshot and its conversation row.
     :raises OmnigentError: 404 if no agent matches ``body.agent_id``;
         403/404 if ``parent_session_id`` or session-scoped ``agent_id``
@@ -11581,6 +11586,19 @@ async def _create_session_from_existing_agent(
         permission_store=permission_store,
         conversation_store=conversation_store,
     )
+    if review_profile is not None:
+        wrapper = native_coding_agent_for_agent_name(agent.name)
+        if (
+            wrapper is None
+            or wrapper.harness != review_profile.harness
+            or not agent.operator_authored
+            or agent.id != builtin_agent_id(agent.name)
+            or str(agent.version) != review_profile.agent_version
+        ):
+            raise OmnigentError(
+                "The captured reviewer agent is no longer available",
+                code=ErrorCode.CONFLICT,
+            )
 
     # Top-level Smart Routing: "auto" on a native wrapper agent means the client
     # picked Smart Routing with no bundle agent, and its ``agent_id`` is only a
@@ -11890,6 +11908,13 @@ async def _create_session_from_existing_agent(
             await asyncio.to_thread(
                 _validate_acp_spec_models, selection_spec, model_override, harness_override
             )
+    if review_profile is not None and (
+        selection_spec is None or _spec_harness(selection_spec) != review_profile.harness
+    ):
+        raise OmnigentError(
+            "The captured reviewer agent bundle does not match its harness",
+            code=ErrorCode.CONFLICT,
+        )
 
     # Inherit runner affinity from the parent session so the child
     # is assigned to the same runner (sub-agent co-location).
@@ -11937,6 +11962,11 @@ async def _create_session_from_existing_agent(
             agent=agent,
             agent_cache=agent_cache,
             request=request,
+        )
+    if review_profile is not None and canonical_workspace != body.workspace:
+        raise OmnigentError(
+            "The captured reviewer workspace changed",
+            code=ErrorCode.CONFLICT,
         )
 
     from omnigent.server.routes._session_harness_readiness import (
@@ -12192,6 +12222,7 @@ async def _create_session_from_existing_agent(
                 workspace=canonical_workspace,
                 git_branch=git_branch,
                 terminal_launch_args=validated_launch_args,
+                conversation_id=conversation_id,
                 project_id=project_id,
                 labels=initial_labels or None,
                 model_override=model_override,

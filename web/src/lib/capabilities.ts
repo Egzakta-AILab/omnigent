@@ -268,6 +268,8 @@ export interface ServerInfo {
    * and ``Conversation.pull_request``); absent on older servers (off).
    */
   session_pull_requests?: boolean;
+  /** Private pull request review capture and execution are available. */
+  studio_reviews?: boolean;
   /**
    * Which uploads Claude Code and Codex sessions receive as files. Null on
    * older servers, whose policy is the default extension list.
@@ -587,6 +589,7 @@ export async function resolveServerInfo(): Promise<ServerInfo> {
             ? data.session_event_types.filter((t): t is string => typeof t === "string")
             : [],
           session_pull_requests: data.session_pull_requests === true,
+          studio_reviews: data.studio_reviews === true,
           filesystem_attachments: parseFilesystemAttachments(data.filesystem_attachments),
           scheduled_task_projects: data.scheduled_task_projects === true,
           scheduled_task_inbox: data.scheduled_task_inbox === true,

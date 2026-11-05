@@ -335,6 +335,8 @@ from omnigent.util.session_lifecycle import (
     is_session_closed,
 )
 
+ReviewSend = Callable[[Request, str, SessionEventInput, str], Awaitable[dict[str, bool | str]]]
+
 # custom-lint: disable-next=workspace-scoped-cache -- lock; collision only serializes
 _retry_recovery_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
     weakref.WeakValueDictionary()
@@ -847,6 +849,7 @@ def register_events_routes(
     register_runner_ingest: Callable[[Callable[..., Awaitable[EventAckFrame]]], None]
     | None = None,
     register_startup_dispatch: Callable[[StartupDispatch], None] | None = None,
+    register_review_send: Callable[[ReviewSend], None] | None = None,
 ) -> None:
     """Register the events, stream, and delete routes on router."""
 
@@ -1083,6 +1086,8 @@ def register_events_routes(
         session_id: str,
         body: SessionEventInput,
         in_flight: contextlib.ExitStack | None = None,
+        *,
+        review_runner_id: str | None = None,
     ) -> dict[str, bool | str]:
         """
         Submit a session event (input message, tool output,
@@ -1166,6 +1171,8 @@ def register_events_routes(
         :param in_flight: When given, the session is marked as having a
             dispatch in flight once the caller is authorized, for the rest
             of the request.
+        :param review_runner_id: Bind a studio review's first delivery to this
+            runner, with no replacement launch on a missing tunnel.
         :returns: ``{"queued": True, "item_id": "..."}`` for
             item-typed events, where ``item_id`` is the persisted
             conversation item id also emitted by
@@ -1183,6 +1190,8 @@ def register_events_routes(
                 _EXTERNAL_ASSISTANT_MESSAGE_TYPE,
             ),
         )
+        if review_runner_id is not None and conv.runner_id != review_runner_id:
+            raise OmnigentError("Reviewer runner binding changed", code=ErrorCode.CONFLICT)
         start_fire_stage("input_validation", session_id=session_id)
         peer_message = body.type == "session_message"
         if peer_message:
@@ -1456,7 +1465,8 @@ def register_events_routes(
 
         startup = getattr(request.app.state, "startup_inputs", None)
         if (
-            not isinstance(request, (StartupInputContext, _RunnerEventContext))
+            review_runner_id is None
+            and not isinstance(request, (StartupInputContext, _RunnerEventContext))
             and startup is not None
             and (
                 (body.type == "message" and body.data.get("role") == "user")
@@ -2788,11 +2798,15 @@ def register_events_routes(
         # a replacement.
         _runner_needs_session_init = False
         # Item event (message, function_call_output, etc.).
-        if conv.host_id is not None and await _maybe_wake_stale_resumable_managed_sandbox(
-            session_id=session_id,
-            conv=conv,
-            app_state=request.app.state,
-            conversation_store=conversation_store,
+        if (
+            review_runner_id is None
+            and conv.host_id is not None
+            and await _maybe_wake_stale_resumable_managed_sandbox(
+                session_id=session_id,
+                conv=conv,
+                app_state=request.app.state,
+                conversation_store=conversation_store,
+            )
         ):
             # A resumable managed wake may have re-launched the runner and
             # updated liveness while this handler was holding an old row.
@@ -2804,7 +2818,23 @@ def register_events_routes(
                 raise _session_not_found()
             conv = conv_after_wake
             _runner_needs_session_init = True
-        runner_client = await _get_runner_client(session_id, runner_router)
+        if review_runner_id is None:
+            runner_client = await _get_runner_client(session_id, runner_router)
+        else:
+            runner_client = await _get_runner_client(session_id, runner_router, conversation=conv)
+            if runner_client is None:
+                runner_client = await _wait_for_runner_client(
+                    session_id,
+                    runner_router,
+                    getattr(request.app.state, "tunnel_registry", None),
+                    runner_id=review_runner_id,
+                    timeout_s=_HOST_RELAUNCH_RUNNER_CONNECT_TIMEOUT_S,
+                    runner_exit_reports=runner_exit_reports,
+                )
+            if runner_client is None:
+                raise OmnigentError(
+                    "The reviewer runner did not connect", code=ErrorCode.RUNNER_UNAVAILABLE
+                )
         # Managed-launch rendezvous: a ``host_type="managed"`` create
         # returns before the sandbox exists, so the first message (the
         # Web UI auto-sends the composer prompt right after navigate)
@@ -3362,6 +3392,8 @@ def register_events_routes(
         if refreshed_conv is None:
             raise _session_not_found()
         conv = refreshed_conv
+        if review_runner_id is not None and conv.runner_id != review_runner_id:
+            raise OmnigentError("Reviewer runner binding changed", code=ErrorCode.CONFLICT)
         # Recheck the bound runtime: forks and host restarts can change it
         # after upload, while retained history still needs these files.
         if body.type in ("message", _SLASH_COMMAND_TYPE) and _is_native_terminal_session(conv):
@@ -3559,6 +3591,29 @@ def register_events_routes(
 
     if register_startup_dispatch is not None:
         register_startup_dispatch(_post_event_impl)
+
+    async def _send_reviewer_input(
+        request: Request,
+        session_id: str,
+        body: SessionEventInput,
+        runner_id: str,
+    ) -> dict[str, bool | str]:
+        """Deliver the claimed review's first message to its original runner."""
+        if body.type != "message" or body.data.get("role") != "user":
+            raise OmnigentError(
+                "A review starts with a user message", code=ErrorCode.INVALID_INPUT
+            )
+        with contextlib.ExitStack() as in_flight:
+            return await _post_event_impl(
+                request,
+                session_id,
+                body,
+                in_flight=in_flight,
+                review_runner_id=runner_id,
+            )
+
+    if register_review_send is not None:
+        register_review_send(_send_reviewer_input)
 
     # ── GET /sessions/{session_id}/stream ────────────────────────
 

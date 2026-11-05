@@ -8,7 +8,7 @@ import dataclasses
 import json
 import secrets
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
@@ -212,6 +212,7 @@ from omnigent.server.schemas import (
     ReadStatePutRequest,
     ResetSessionModelOverrideRequest,
     ResetSessionModelOverrideResponse,
+    SessionCreateInput,
     SessionCreateRequest,
     SessionEventInput,
     SessionForkRequest,
@@ -243,6 +244,7 @@ from omnigent.stores.conversation_store import (
 from omnigent.stores.file_store import FileStore
 from omnigent.stores.permission_store import PermissionStore
 from omnigent.stores.project_store import ProjectStore
+from omnigent.studio.reviews.models import ReviewPass, ReviewProfile
 from omnigent.telemetry.surface import CLIENT_SURFACE_LABEL_KEY, resolve_client_surface
 from omnigent.util.cost_plan import (
     reserved_cost_control_keys,
@@ -256,6 +258,8 @@ from omnigent.util.session_lifecycle import (
     labels_with_closed_status,
 )
 from omnigent.version import VERSION
+
+ReviewCreate = Callable[[Request, str | None, ReviewPass, str], Awaitable[SessionResponse]]
 
 
 def _require_attachment_compatible_history(
@@ -432,6 +436,7 @@ def register_core_routes(
     project_store: ProjectStore | None = None,
     background_title_coordinator: BackgroundSessionTitleCoordinator | None = None,
     pull_request_refresher: server_prs.PullRequestRefresher | None = None,
+    register_review_create: Callable[[ReviewCreate], None] | None = None,
 ) -> None:
     """Register the core session routes on router."""
 
@@ -1079,6 +1084,17 @@ def register_core_routes(
                         "Sender host/workspace is invalid for independent creation",
                         code=ErrorCode.INVALID_INPUT,
                     ) from exc
+        return await _create_existing_session(request, user_id, body, source=source)
+
+    async def _create_existing_session(
+        request: Request,
+        user_id: str | None,
+        body: SessionCreateInput,
+        *,
+        source: Conversation | None = None,
+        review_profile: ReviewProfile | None = None,
+        reviewer_session_id: str | None = None,
+    ) -> SessionResponse:
         creation_metadata(parent_session_id=body.parent_session_id, host_type=body.host_type)
         resp, conv = await _create_session_from_existing_agent(
             conversation_store,
@@ -1096,6 +1112,8 @@ def register_core_routes(
             project_store=project_store,
             created_by_session_id=source.id if source is not None else None,
             created_by_project_id=source.project_id if source is not None else None,
+            review_profile=review_profile,
+            conversation_id=reviewer_session_id,
         )
         # Notify the runner about the new session so it can resolve
         # the spec and cache sub_agent_name before the first turn.
@@ -1241,11 +1259,21 @@ def register_core_routes(
                     _publish_terminal_pending(resp.id, False)
                 resp.runner_id = runner_id
                 resp.host_id = launch_host_id
+            if review_profile is not None and (launched is None or launched[1]):
+                raise OmnigentError(
+                    "The reviewer runner launch could not be confirmed",
+                    code=ErrorCode.RUNNER_UNAVAILABLE,
+                )
 
         # Default-public grant only once every launch step has been accepted, so a
         # rejected request never leaves a public session behind. Sub-agent
         # children follow their parent's grants instead.
-        if user_id is not None and body.parent_session_id is None and orchestration_source is None:
+        if (
+            user_id is not None
+            and body.parent_session_id is None
+            and source is None
+            and review_profile is None
+        ):
             await _grant_default_public(
                 request.app.state,
                 permission_store,
@@ -1256,6 +1284,36 @@ def register_core_routes(
             )
         add_audit_attrs(session_id=resp.id, agent=resp.agent_id)
         return resp
+
+    async def _create_reviewer_session(
+        request: Request,
+        user_id: str | None,
+        review: ReviewPass,
+        session_id: str,
+    ) -> SessionResponse:
+        """Create an independent reviewer with the captured host, workspace and profile."""
+        if user_id != review.owner_user_id or user_id != _require_user(request, auth_provider):
+            raise OmnigentError("Review is not owned by the caller", code=ErrorCode.FORBIDDEN)
+        if session_id == review.target.source_session_id:
+            raise OmnigentError("A reviewer requires its own session", code=ErrorCode.CONFLICT)
+        profile = review.profile
+        return await _create_existing_session(
+            request,
+            user_id,
+            SessionCreateRequest(
+                agent_id=profile.agent_id,
+                host_id=review.target.host_id,
+                workspace=review.target.workspace,
+                title=f"Review PR #{review.target.pr_number}",
+                model_override=profile.model,
+                reasoning_effort=profile.reasoning_effort,
+            ),
+            review_profile=profile,
+            reviewer_session_id=session_id,
+        )
+
+    if register_review_create is not None:
+        register_review_create(_create_reviewer_session)
 
     async def _create_bundled_session_from_multipart(
         request: Request,

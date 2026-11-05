@@ -5903,6 +5903,65 @@
         "title": "ReviewEventsResponse",
         "type": "object"
       },
+      "ReviewFinding": {
+        "additionalProperties": false,
+        "description": "An agent-reported concern anchored to one side of the captured diff.",
+        "properties": {
+          "detail": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Detail",
+            "type": "string"
+          },
+          "line": {
+            "exclusiveMinimum": 0.0,
+            "format": "int64",
+            "maximum": 2147483647.0,
+            "title": "Line",
+            "type": "integer"
+          },
+          "path": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "title": "Path",
+            "type": "string"
+          },
+          "severity": {
+            "enum": [
+              "critical",
+              "high",
+              "medium",
+              "low"
+            ],
+            "title": "Severity",
+            "type": "string"
+          },
+          "side": {
+            "enum": [
+              "base",
+              "head"
+            ],
+            "title": "Side",
+            "type": "string"
+          },
+          "title": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "title",
+          "detail",
+          "severity",
+          "path",
+          "side",
+          "line"
+        ],
+        "title": "ReviewFinding",
+        "type": "object"
+      },
       "ReviewListResponse": {
         "additionalProperties": false,
         "properties": {
@@ -6163,6 +6222,55 @@
           "skill"
         ],
         "title": "ReviewProfile",
+        "type": "object"
+      },
+      "ReviewReport": {
+        "additionalProperties": false,
+        "description": "View of the report as observed in the reviewer's durable transcript.",
+        "properties": {
+          "findings": {
+            "items": {
+              "$ref": "#/components/schemas/ReviewFinding"
+            },
+            "title": "Findings",
+            "type": "array"
+          },
+          "message_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message Id"
+          },
+          "state": {
+            "enum": [
+              "pending",
+              "incomplete",
+              "ready"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Summary"
+          }
+        },
+        "required": [
+          "state"
+        ],
+        "title": "ReviewReport",
         "type": "object"
       },
       "ReviewTarget": {
@@ -6803,6 +6911,11 @@
           },
           "smart_routing_sources": {
             "$ref": "#/components/schemas/SmartRoutingSourcesInfo"
+          },
+          "studio_reviews": {
+            "default": false,
+            "title": "Studio Reviews",
+            "type": "boolean"
           }
         },
         "required": [
@@ -10455,6 +10568,13 @@
           "oss"
         ],
         "title": "SmartRoutingSourcesInfo",
+        "type": "object"
+      },
+      "StartReviewRequest": {
+        "additionalProperties": false,
+        "description": "Start uses the captured target and profile, without overrides.",
+        "properties": {},
+        "title": "StartReviewRequest",
         "type": "object"
       },
       "StartupInputOptions": {
@@ -20486,6 +20606,112 @@
           }
         },
         "summary": "Get Operation",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/studio/reviews/{review_id}/report": {
+      "get": {
+        "operationId": "get_review_report_v1_studio_reviews__review_id__report_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "review_id",
+            "required": true,
+            "schema": {
+              "title": "Review Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewReport"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Review Report",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/studio/reviews/{review_id}/start": {
+      "post": {
+        "operationId": "start_review_v1_studio_reviews__review_id__start_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "review_id",
+            "required": true,
+            "schema": {
+              "title": "Review Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[!-~]+$",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartReviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewPass"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Start Review",
         "tags": [
           "sessions"
         ]

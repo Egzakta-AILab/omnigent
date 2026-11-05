@@ -4,20 +4,29 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from typing import Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
-from fastapi import APIRouter, Header, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ConfigDict
 
+from omnigent.db.utils import builtin_agent_id
 from omnigent.entities import Conversation
 from omnigent.errors import ErrorCode, OmnigentError
+from omnigent.harness_availability import reported_harness_availability
+from omnigent.native.native_coding_agents import native_coding_agent_for_agent_name
 from omnigent.server.auth import AuthProvider
 from omnigent.server.routes._auth_helpers import require_user
+from omnigent.server.routes._content_type import require_json_content_type
+from omnigent.server.routes._host_launch import resolve_host_owner
+from omnigent.server.routes._origin import require_trusted_origin
 from omnigent.server.routes._session_create_validation import (
     validate_session_agent,
     validate_session_model_metadata,
 )
+from omnigent.server.routes.skills import request_host_skills
+from omnigent.server.schemas import SessionEventInput
 from omnigent.server.session_orchestration import require_owned_session
+from omnigent.server.startup_inputs import initial_input_id
 from omnigent.stores import AgentStore, ConversationStore
 from omnigent.stores.permission_store import PermissionStore
 from omnigent.stores.studio_review_store import (
@@ -25,6 +34,7 @@ from omnigent.stores.studio_review_store import (
     ReviewNotFoundError,
     StudioReviewStore,
 )
+from omnigent.studio.reviews.launch import SKILL_NAME, review_prompt, run_review
 from omnigent.studio.reviews.models import (
     CaptureResult,
     ReviewEvent,
@@ -33,6 +43,7 @@ from omnigent.studio.reviews.models import (
     ReviewProfile,
     ReviewTarget,
 )
+from omnigent.studio.reviews.report import ReviewReport, read_review_report, report_instructions
 from omnigent.studio.reviews.service import (
     CaptureReviewRequest,
     CaptureUnavailableError,
@@ -41,7 +52,12 @@ from omnigent.studio.reviews.service import (
 from omnigent.util.session_lifecycle import is_session_closed
 from omnigent.util.uuid import uuid_to_bytes
 
+if TYPE_CHECKING:
+    from omnigent.server.routes.sessions.routes_core import ReviewCreate
+    from omnigent.server.routes.sessions.routes_events import ReviewSend
+
 CaptureContext = Callable[[Request, str, str | None], Awaitable[ReviewTarget]]
+ReadPatch = Callable[[Request, ReviewTarget], Awaitable[str]]
 IdempotencyKey = Annotated[
     str,
     Header(alias="Idempotency-Key", min_length=1, max_length=128, pattern=r"^[!-~]+$"),
@@ -62,6 +78,12 @@ class ReviewEventsResponse(BaseModel):
     next_cursor: int | None
 
 
+class StartReviewRequest(BaseModel):
+    """Start uses the captured target and profile, without overrides."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
 def _identifier(value: str) -> str:
     try:
         return uuid_to_bytes(value).hex()
@@ -75,6 +97,8 @@ async def _owned_source(
     conversation_store: ConversationStore,
     permission_store: PermissionStore | None,
     auth_provider: AuthProvider | None,
+    *,
+    private: bool = False,
 ) -> Conversation:
     if auth_provider is not None:
         if permission_store is None or user_id is None:
@@ -86,6 +110,7 @@ async def _owned_source(
                 user_id,
                 conversation_store,
                 permission_store,
+                private=private,
             )
         except OmnigentError as exc:
             if exc.code in (ErrorCode.FORBIDDEN, ErrorCode.NOT_FOUND):
@@ -101,18 +126,69 @@ async def _owned_source(
     return conversation
 
 
+async def _qualify_skill(request: Request, review: ReviewPass) -> None:
+    """Check the connected owner host and its complete native skill catalog."""
+    host_store = getattr(request.app.state, "host_store", None)
+    registry = getattr(request.app.state, "host_registry", None)
+    if host_store is None or registry is None:
+        raise HTTPException(503, "Connected review hosts are unavailable")
+    host = await asyncio.to_thread(
+        resolve_host_owner,
+        user_id=review.owner_user_id,
+        host_id=review.target.host_id,
+        host_store=host_store,
+    )
+    conn = registry.get(host.host_id)
+    available, reason = reported_harness_availability(
+        review.profile.harness, host.configured_harnesses
+    )
+    if conn is None:
+        raise HTTPException(503, "The captured review host is offline")
+    if available is not True:
+        raise HTTPException(409, f"Review harness is unavailable: {reason or 'readiness unknown'}")
+    if SKILL_NAME.fullmatch(review.profile.skill) is None:
+        raise HTTPException(422, "Choose a skill with a supported native invocation name")
+    try:
+        result = await request_host_skills(
+            host_registry=registry,
+            host_conn=conn,
+            harness=review.profile.harness,
+            path=review.target.workspace,
+            agent_id=review.profile.agent_id,
+            agent_version=review.profile.agent_version,
+        )
+    except HTTPException as exc:
+        raise HTTPException(503, "The review host could not discover its skills") from exc
+    if result.status != "ok" or result.warnings or result.agent_id != review.profile.agent_id:
+        raise HTTPException(503, "The review host did not return a complete skill inventory")
+    if not any(skill.get("name") == review.profile.skill for skill in result.skills):
+        raise HTTPException(409, "The captured skill is unavailable on the review host")
+
+
 def create_studio_reviews_router(
     review_store: StudioReviewStore,
     conversation_store: ConversationStore,
     agent_store: AgentStore,
     *,
     capture_context: CaptureContext,
+    read_patch: ReadPatch | None = None,
+    create_reviewer: ReviewCreate | None = None,
+    send_review: ReviewSend | None = None,
     auth_provider: AuthProvider | None = None,
     permission_store: PermissionStore | None = None,
 ) -> APIRouter:
-    """Expose capture and reads without launching or steering an execution session."""
+    """Expose owner-private captures, native starts and saved review reports."""
     router = APIRouter()
     service = ReviewService(review_store)
+
+    async def owned_review(request: Request, review_id: str) -> ReviewPass:
+        user_id = require_user(request, auth_provider)
+        review = await asyncio.to_thread(
+            review_store.get, _identifier(review_id), owner_user_id=user_id
+        )
+        if review is None:
+            raise HTTPException(404, "Review not found")
+        return review
 
     @router.post(
         "/sessions/{source_session_id}/studio/reviews",
@@ -209,13 +285,150 @@ def create_studio_reviews_router(
 
     @router.get("/studio/reviews/{review_id}", response_model=ReviewPass)
     async def get_review(request: Request, review_id: str) -> dict[str, Any]:
-        user_id = require_user(request, auth_provider)
-        review = await asyncio.to_thread(
-            review_store.get, _identifier(review_id), owner_user_id=user_id
-        )
-        if review is None:
-            raise HTTPException(status_code=404, detail="Review not found")
+        review = await owned_review(request, review_id)
         return review.model_dump(mode="json")
+
+    @router.post(
+        "/studio/reviews/{review_id}/start",
+        response_model=ReviewPass,
+        dependencies=[Depends(require_json_content_type), Depends(require_trusted_origin)],
+    )
+    async def start_review(
+        request: Request,
+        review_id: str,
+        _body: StartReviewRequest,
+        idempotency_key: IdempotencyKey,
+    ) -> ReviewPass:
+        review = await owned_review(request, review_id)
+        owner = review.owner_user_id
+        target = review.target
+        await _owned_source(
+            target.source_session_id, owner, conversation_store, permission_store, auth_provider
+        )
+        if read_patch is None or create_reviewer is None or send_review is None:
+            raise HTTPException(503, "Native review execution is unavailable")
+
+        async def validate_profile() -> None:
+            profile = review.profile
+            agent = await validate_session_agent(
+                user_id=owner,
+                agent_id=profile.agent_id,
+                agent_store=agent_store,
+                permission_store=permission_store,
+                conversation_store=conversation_store,
+            )
+            native = native_coding_agent_for_agent_name(agent.name)
+            if (
+                native is None
+                or native.harness != profile.harness
+                or agent.session_id is not None
+                or not agent.operator_authored
+                or agent.id != builtin_agent_id(agent.name)
+                or str(agent.version) != profile.agent_version
+            ):
+                raise HTTPException(409, "Choose a current built-in Codex or Claude reviewer")
+
+        async def prepare() -> str:
+            await validate_profile()
+            await _qualify_skill(request, review)
+            current = await capture_context(request, target.source_session_id, target.pr_url)
+            if current != target:
+                raise HTTPException(409, "The pull request revision or execution target changed")
+            patch = await read_patch(request, target)
+            source = await _owned_source(
+                target.source_session_id,
+                owner,
+                conversation_store,
+                permission_store,
+                auth_provider,
+            )
+            if (source.host_id, source.workspace) != (target.host_id, target.workspace):
+                raise HTTPException(409, "The review execution target changed")
+            try:
+                return review_prompt(review, patch, report_instructions(review))
+            except ValueError as exc:
+                raise HTTPException(409, str(exc)) from None
+
+        async def dispatch(session_id: str, prompt: str) -> None:
+            session = await create_reviewer(request, owner, review, session_id)
+            if (
+                session.id != session_id
+                or not session.runner_id
+                or session.agent_id != review.profile.agent_id
+                or session.harness != review.profile.harness
+                or (session.host_id, session.workspace) != (target.host_id, target.workspace)
+            ):
+                raise RuntimeError("Reviewer session binding did not match the capture")
+            reviewer = await _owned_source(
+                session_id,
+                owner,
+                conversation_store,
+                permission_store,
+                auth_provider,
+                private=True,
+            )
+            if (
+                reviewer.parent_conversation_id is not None
+                or reviewer.agent_id != review.profile.agent_id
+                or reviewer.runner_id != session.runner_id
+                or (reviewer.host_id, reviewer.workspace) != (target.host_id, target.workspace)
+            ):
+                raise RuntimeError("Reviewer session binding changed before delivery")
+            await validate_profile()
+            result = await send_review(
+                request,
+                session_id,
+                SessionEventInput(
+                    type="message",
+                    data={
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": prompt}],
+                        "stable_id": initial_input_id(session_id),
+                    },
+                ),
+                session.runner_id,
+            )
+            pending_id = result.get("pending_id")
+            if (
+                result.get("queued") is not True
+                or not isinstance(pending_id, str)
+                or not pending_id
+            ):
+                raise RuntimeError("Native review input was not acknowledged")
+
+        try:
+            return await run_review(
+                review_store, review, idempotency_key, prepare=prepare, dispatch=dispatch
+            )
+        except ReviewConflictError as exc:
+            raise HTTPException(409, str(exc)) from None
+
+    @router.get("/studio/reviews/{review_id}/report", response_model=ReviewReport)
+    async def get_review_report(
+        request: Request, response: Response, review_id: str
+    ) -> ReviewReport:
+        review = await owned_review(request, review_id)
+        response.headers["Cache-Control"] = "no-store"
+        if review.reviewer_session_id is not None:
+            conv = await asyncio.to_thread(
+                conversation_store.get_conversation, review.reviewer_session_id
+            )
+            if conv is not None:
+                await _owned_source(
+                    conv.id,
+                    review.owner_user_id,
+                    conversation_store,
+                    permission_store,
+                    auth_provider,
+                    private=True,
+                )
+                if (conv.agent_id, conv.host_id, conv.workspace) != (
+                    review.profile.agent_id,
+                    review.target.host_id,
+                    review.target.workspace,
+                ):
+                    raise HTTPException(409, "The linked reviewer session binding changed")
+        return await asyncio.to_thread(read_review_report, conversation_store, review)
 
     @router.get(
         "/studio/reviews/{review_id}/operations/{operation_id}", response_model=ReviewOperation
