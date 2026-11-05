@@ -397,6 +397,31 @@ the base and head results separately. **Copy rerun command** uses the same
 image ID and arguments. Run it on a Docker-enabled machine with the required
 checkout. Attached receipts follow the review run's private access rules.
 
+### Check a proposed fix
+
+Save the proposed change as a Git text patch against the review's captured
+head. Run the same check on that head and on a temporary snapshot with the
+patch applied.
+
+```sh
+uv run --no-sync python scripts/verify_studio.py reproduce \
+  --mode local --server http://127.0.0.1:6767 --run-id RUN_ID \
+  --pr https://github.com/your_org/your_repo/pull/17 \
+  --repository /path/to/repo --image "$TEST_IMAGE_ID" \
+  --fix-patch /path/to/proposed.patch \
+  --output .omnigent/studio/fix-check.json -- python path/to/check.py
+```
+
+The patch is applied in a temporary Git index. Both snapshots run in separate
+containers with networking disabled. Use a locally installed image ID for
+`TEST_IMAGE_ID`. If the full export exceeds 128 MiB, repeat `--include-path`
+for the tracked directories or files required by the check. Each selected path
+must exist in both snapshots. The receipt records the path scope, saved review
+and head, patch digest, temporary commit, image, and both check results.
+Keep the patch file to reproduce the comparison. The
+command exits zero when the check fails on the captured head and passes
+with the patch. The receipt describes this check on these two snapshots.
+
 ### Discuss a saved review
 
 Select **Discuss finding** to open its thread, or **Discuss review** to open

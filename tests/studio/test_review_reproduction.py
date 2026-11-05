@@ -16,10 +16,13 @@ import pytest
 from omnigent.studio.reviews import reproduction
 from omnigent.studio.reviews.reproduction import (
     ReproductionError,
+    ReproductionSide,
+    ReproductionSource,
     _capture,
     _export,
     _prepare_archive_repository,
     reproduce,
+    verify_fix,
 )
 
 
@@ -92,6 +95,95 @@ def test_reproduce_requires_full_commit_ids_before_using_docker(tmp_path: Path) 
             image="test-image",
             command=("echo", "approved"),
         )
+
+
+def test_fix_runs_the_captured_head_and_ephemeral_candidate(tmp_path: Path, monkeypatch) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+
+    def git(*args: str) -> str:
+        return subprocess.check_output(["git", "-C", str(repository), *args], text=True).strip()
+
+    git("init", "--quiet", "--object-format=sha1")
+    source_file = repository / "source.txt"
+    source_file.write_text("before\n")
+    (repository / "unrelated.txt").write_text("excluded\n")
+    git("add", "source.txt", "unrelated.txt")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-m", "fixture")
+    head = git("rev-parse", "HEAD")
+    source_file.write_text("dirty checkout\n")
+    original_status = git("status", "--porcelain")
+    source = ReproductionSource(
+        run_id="a" * 32,
+        pr_url="https://github.com/org/repo/pull/1",
+        patch_sha256="b" * 64,
+        base_sha="c" * 40,
+        head_sha=head,
+    )
+    patch = b"diff --git a/source.txt b/source.txt\n--- a/source.txt\n+++ b/source.txt\n"
+    patch += b"@@ -1 +1 @@\n-before\n+fixed\n"
+    observed = []
+
+    def run_side(_docker, *, commit, tree, archive, image_id, command, timeout):
+        assert command == ("check",) and timeout == 5 and image_id == "sha256:" + "d" * 64
+        with tarfile.open(fileobj=tree) as tar:
+            assert tar.getnames() == ["source.txt"]
+            file = tar.extractfile("source.txt")
+            assert file is not None
+            observed.append(file.read())
+        return ReproductionSide(
+            commit=commit,
+            archive_sha256=archive.digest,
+            archive_bytes=archive.size,
+            state="exited",
+            exit_code=1 if commit == head else 0,
+            elapsed_ms=1,
+            output="",
+            output_sha256=hashlib.sha256(b"").hexdigest(),
+            output_bytes=0,
+            output_truncated=False,
+        )
+
+    monkeypatch.setattr(reproduction, "_engine", lambda *_args: "sha256:" + "d" * 64 + " null")
+    monkeypatch.setattr(reproduction, "_run_side", run_side)
+    options = {
+        "repository": repository,
+        "source": source,
+        "image": "fixture",
+        "command": ("check",),
+        "timeout": 5,
+        "paths": ("source.txt",),
+    }
+    receipt = verify_fix(**options, patch=patch)
+    repeated = verify_fix(**options, patch=patch)
+    assert observed == [b"before\n", b"fixed\n"] * 2
+    assert receipt.before.commit == head and receipt.after.commit != head
+    assert receipt.after.commit == repeated.after.commit
+    assert receipt.after.archive_sha256 == repeated.after.archive_sha256
+    assert receipt.outcome == "fail_to_pass"
+    assert receipt.proposed_patch_sha256 == hashlib.sha256(patch).hexdigest()
+    assert receipt.source == source
+    assert receipt.included_paths == ("source.txt",)
+    with pytest.raises(ReproductionError, match="does not apply"):
+        verify_fix(**options, patch=patch.replace(b"-before", b"-unexpected"))
+    unsafe_patch = (
+        b"diff --git a/../escaped b/../escaped\nnew file mode 100644\n"
+        b"--- /dev/null\n+++ b/../escaped\n@@ -0,0 +1 @@\n+outside\n"
+    )
+    with pytest.raises(ReproductionError, match="does not apply"):
+        verify_fix(**options, patch=unsafe_patch)
+    assert not (tmp_path / "escaped").exists()
+    assert len(observed) == 4
+    assert source_file.read_text() == "dirty checkout\n"
+    assert git("status", "--porcelain") == original_status and git("rev-parse", "HEAD") == head
+    assert (
+        subprocess.run(
+            ["git", "-C", str(repository), "cat-file", "-e", receipt.after.commit],
+            capture_output=True,
+            check=False,
+        ).returncode
+        != 0
+    )
 
 
 @pytest.mark.parametrize("lost_create", [False, True])
