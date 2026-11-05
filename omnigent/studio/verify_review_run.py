@@ -89,14 +89,40 @@ def collect_review_run(
             probe.check("run.capture", "fail", "review_target_mismatch")
             return receipt
         probe.check("run.capture", "pass", "matching_pr_revision")
-        reviewer_ids = {member.id for member in run.reviewers}
+        reviewers = run.selected_reviewers()
+        reviewer_ids = {member.id for member in reviewers}
+        if run.coordinator is not None:
+            coordinator = run.coordinator
+            try:
+                if (
+                    run.plan is None
+                    or coordinator.run_id != run.id
+                    or coordinator.run_role != "coordinator"
+                    or coordinator.target != run.target
+                    or coordinator.reviewer_session_id != coordinator.id
+                    or coordinator.id in {member.id for member in run.reviewers}
+                ):
+                    raise ValueError("Missing approved plan or coordinator binding")
+                run.validate_plan(run.plan)
+            except ValueError:
+                probe.check("run.plan", "fail", "unverified_plan_or_coordinator")
+                return receipt
+            if any(
+                member.reviewer_session_id is not None
+                for member in run.reviewers
+                if member.id not in reviewer_ids
+            ):
+                probe.check("run.plan", "fail", "skipped_reviewer_started")
+                return receipt
+            probe.check("run.plan", "pass", "approved_roster_includes_required_reviewers")
+            receipt["skipped_reviewer_count"] = len(run.reviewers) - len(reviewers)
         roster_valid = minimum_reviewers <= len(reviewer_ids) == len(
-            run.reviewers
+            reviewers
         ) <= MAX_RUN_REVIEWERS and all(
             member.run_id == run.id
             and member.target == run.target
             and member.reviewer_session_id == member.id
-            for member in run.reviewers
+            for member in reviewers
         )
         probe.check("run.roster", "pass" if roster_valid else "fail", "unique_roster_members")
         receipt["reviewer_count"] = len(reviewer_ids)
@@ -155,7 +181,7 @@ def collect_review_run(
         originals = {entry.review_id: entry.report for entry in reports}
         bindings_valid = roster_valid and ready
         if bindings_valid:
-            for member in run.reviewers:
+            for member in reviewers:
                 try:
                     member_id = require_uuid(member.id)
                 except ValueError:

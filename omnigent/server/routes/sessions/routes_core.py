@@ -1317,13 +1317,14 @@ def register_core_routes(
             if source.project_id is None:
                 legacy_project = source.labels.get(PROJECT_LABEL_KEY)
         profile = review.profile
+        is_coordinator = review.run_role == "coordinator"
         body = SessionCreateRequest(
             agent_id=profile.agent_id,
             host_id=target.host_id,
             workspace=target.workspace,
-            title=f"Review PR #{target.pr_number}",
+            title=f"{'Plan review for' if is_coordinator else 'Review'} PR #{target.pr_number}",
             labels={
-                "omnigent.studio.review": "true",
+                **({} if is_coordinator else {"omnigent.studio.review": "true"}),
                 **({PROJECT_LABEL_KEY: legacy_project} if legacy_project else {}),
             },
             model_override=profile.model,

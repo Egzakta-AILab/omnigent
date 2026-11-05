@@ -329,6 +329,14 @@ select an individual reviewer to inspect the report. The run keeps its
 first complete report for each reviewer once read and shows a reason when
 a reviewer cannot start. A run with missing reports shows partial coverage.
 
+To let an agent choose the roster, configure a reviewer and select **Use as
+coordinator**. Add reviewer candidates and check **Required** beside anyone the
+run must include. Select **Ask coordinator to plan**. The run shows which
+candidates the coordinator chose or skipped and why. **Approve plan and start
+reviewers** saves those decisions and starts the selected reviewers. The planning
+session is available from the run, and consolidation counts the selected
+reviewers. Each review launch checks that the PR still matches the captured diff.
+
 New runs save the revision-checked diff before dispatch. **Show in captured
 diff** opens a finding's cited line from that saved copy, even after the PR
 advances. Findings whose path, side, or line is absent from the changed rows
@@ -345,9 +353,10 @@ uv run --no-sync python scripts/verify_studio.py review-run \
   --base BASE_SHA --head HEAD_SHA --minimum-reviewers 2 --json
 ```
 
-The receipt checks report coverage, the patch digest, changed-line citations,
-and the reviewer attribution of consolidated findings. It records observations
-from the saved run. Sandbox checks have separate execution receipts.
+The receipt checks the selected roster, report coverage, the patch digest,
+changed-line citations, and attribution of consolidated findings. For
+coordinated runs it also checks the approved decisions, required reviewers, and
+whether a skipped candidate has a session.
 
 For any workspace, open **Project settings → Repositories**, or open
 **Manage repositories** from the PR panel. The managers run on the connected

@@ -1180,6 +1180,26 @@
         "additionalProperties": false,
         "description": "Each member uses the same project checkout and captured revision.",
         "properties": {
+          "coordinator": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CaptureProjectReviewRequest"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "required_reviewer_indices": {
+            "items": {
+              "format": "int64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "maxItems": 16,
+            "title": "Required Reviewer Indices",
+            "type": "array"
+          },
           "reviewers": {
             "items": {
               "$ref": "#/components/schemas/CaptureProjectReviewRequest"
@@ -1916,6 +1936,16 @@
             },
             "title": "Findings",
             "type": "array"
+          },
+          "proposal": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReviewPlanProposal"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "reviewers": {
             "items": {
@@ -6365,6 +6395,22 @@
             ],
             "title": "Run Id"
           },
+          "run_role": {
+            "anyOf": [
+              {
+                "enum": [
+                  "coordinator",
+                  "candidate",
+                  "required"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Role"
+          },
           "state": {
             "enum": [
               "prepared",
@@ -6404,6 +6450,104 @@
           "version"
         ],
         "title": "ReviewPass",
+        "type": "object"
+      },
+      "ReviewPlan": {
+        "additionalProperties": false,
+        "properties": {
+          "base_sha": {
+            "pattern": "^[0-9a-f]{40}(?:[0-9a-f]{24})?$",
+            "title": "Base Sha",
+            "type": "string"
+          },
+          "coordinator_id": {
+            "title": "Coordinator Id",
+            "type": "string"
+          },
+          "decisions": {
+            "items": {
+              "$ref": "#/components/schemas/ReviewerDecision"
+            },
+            "maxItems": 16,
+            "minItems": 1,
+            "title": "Decisions",
+            "type": "array"
+          },
+          "head_sha": {
+            "pattern": "^[0-9a-f]{40}(?:[0-9a-f]{24})?$",
+            "title": "Head Sha",
+            "type": "string"
+          }
+        },
+        "required": [
+          "coordinator_id",
+          "base_sha",
+          "head_sha",
+          "decisions"
+        ],
+        "title": "ReviewPlan",
+        "type": "object"
+      },
+      "ReviewPlanProposal": {
+        "additionalProperties": false,
+        "properties": {
+          "digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Digest"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "message_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message Id"
+          },
+          "plan": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReviewPlan"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "state": {
+            "enum": [
+              "pending",
+              "incomplete",
+              "ready"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "state"
+        ],
+        "title": "ReviewPlanProposal",
         "type": "object"
       },
       "ReviewProfile": {
@@ -6820,6 +6964,16 @@
         "additionalProperties": false,
         "description": "One deliberately selected roster reviewing one captured PR revision.",
         "properties": {
+          "coordinator": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReviewPass"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "created_at": {
             "format": "int64",
             "title": "Created At",
@@ -6839,6 +6993,16 @@
               }
             ],
             "title": "Patch Sha256"
+          },
+          "plan": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReviewPlan"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "reviewers": {
             "items": {
@@ -7017,6 +7181,33 @@
           "head_sha"
         ],
         "title": "ReviewTarget",
+        "type": "object"
+      },
+      "ReviewerDecision": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "maxLength": 160,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "review_id": {
+            "pattern": "^[0-9a-f]{32}$",
+            "title": "Review Id",
+            "type": "string"
+          },
+          "selected": {
+            "title": "Selected",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "review_id",
+          "selected",
+          "reason"
+        ],
+        "title": "ReviewerDecision",
         "type": "object"
       },
       "ReviewerRunReport": {
@@ -11290,6 +11481,25 @@
         "description": "Start uses the captured target and profile, without overrides.",
         "properties": {},
         "title": "StartReviewRequest",
+        "type": "object"
+      },
+      "StartReviewRunRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "proposal_digest": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Proposal Digest"
+          }
+        },
+        "title": "StartReviewRunRequest",
         "type": "object"
       },
       "StartReviewRunResponse": {
@@ -22233,7 +22443,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/StartReviewRequest"
+                "$ref": "#/components/schemas/StartReviewRunRequest"
               }
             }
           },

@@ -20,6 +20,8 @@ from omnigent.studio.verify_review_run import collect_review_run
         "rejected",
         "wrong_session",
         "wrong_report",
+        "coordinated",
+        "skipped_started",
     ],
 )
 def test_verify_run_requires_evidence_and_attribution(monkeypatch, fault):
@@ -111,6 +113,35 @@ def test_verify_run_requires_evidence_and_attribution(monkeypatch, fault):
         },
     }
 
+    if fault in {"coordinated", "skipped_started"}:
+        run = responses[root]
+        required = run["reviewers"][0]
+        required["run_role"] = "required"
+        coordinator_id, skipped_id = "8" * 32, "9" * 32
+        run["coordinator"] = {
+            **required,
+            "id": coordinator_id,
+            "reviewer_session_id": coordinator_id,
+            "run_role": "coordinator",
+        }
+        run["reviewers"].append(
+            {
+                **required,
+                "id": skipped_id,
+                "run_role": "candidate",
+                "reviewer_session_id": skipped_id if fault == "skipped_started" else None,
+            }
+        )
+        run["plan"] = {
+            "coordinator_id": coordinator_id,
+            "base_sha": base,
+            "head_sha": head,
+            "decisions": [
+                {"review_id": member, "selected": member != skipped_id, "reason": "Scope"}
+                for member in [*member_ids, skipped_id]
+            ],
+        }
+
     for member, entry in zip(member_ids, responses[f"{root}/report"]["reviewers"], strict=True):
         responses[f"/v1/sessions/{member}"] = {
             "id": member,
@@ -141,7 +172,10 @@ def test_verify_run_requires_evidence_and_attribution(monkeypatch, fault):
         minimum_reviewers=2,
         transport=httpx.MockTransport(read),
     )
-    assert receipt["run_ready"] is (fault == "none")
+    assert receipt["run_ready"] is (fault in {"none", "coordinated"})
+    if fault == "coordinated":
+        assert receipt["reviewer_count"] == 2
+        assert receipt["skipped_reviewer_count"] == 1
     serialized = json.dumps(receipt)
     assert "private diff text" not in serialized
     assert "Private finding" not in serialized

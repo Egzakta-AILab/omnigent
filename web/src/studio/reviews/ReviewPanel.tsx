@@ -44,6 +44,7 @@ import {
   startReview,
   startReviewRun,
   type CaptureReview,
+  type CaptureReviewRun,
   type ReviewHarness,
   type ReviewPage,
   type ReviewPass,
@@ -220,7 +221,11 @@ function ReviewForm({
   const projectOrigin = "projectId" in origin ? origin : null;
   const { session } = useSession(active && "sessionId" in origin ? origin.sessionId : null);
   const [selectedRunId, setSelectedRunId] = useState("");
-  const [draftRun, setDraftRun] = useState<{ scope: string; members: ProjectReviewMember[] }>();
+  const [draftRun, setDraftRun] = useState<{
+    scope: string;
+    members: { config: ProjectReviewMember; required: boolean }[];
+    coordinator?: ProjectReviewMember;
+  }>();
   const runAttempt = useRef<{ intent: string; key: string } | undefined>(undefined);
   const runInFlight = useRef(false);
   const hostId = projectOrigin?.hostId ?? session?.hostId;
@@ -228,7 +233,9 @@ function ReviewForm({
   const scope =
     "sessionId" in origin ? origin : { projectId: origin.projectId, prUrl: revision.prUrl };
   const runScope = JSON.stringify([history.viewerId, projectOrigin, revision]);
-  const members = draftRun?.scope === runScope ? draftRun.members : [];
+  const currentDraft = draftRun?.scope === runScope ? draftRun : undefined;
+  const members = currentDraft?.members ?? [];
+  const coordinator = currentDraft?.coordinator;
   const runKey = reviewRunsKey(history.viewerId, projectOrigin?.projectId ?? "", revision.prUrl);
   const runAction = useMutation({
     mutationFn: async ({
@@ -237,12 +244,12 @@ function ReviewForm({
       key,
     }: {
       projectId: string;
-      roster: ProjectReviewMember[];
+      roster: CaptureReviewRun;
       key: string;
     }) => {
       const captured = await captureReviewRun(projectId, roster, key);
       rememberRun(captured);
-      const target = roster[0];
+      const target = roster.reviewers[0];
       if (
         captured.target.host_id !== target.host_id ||
         captured.target.workspace !== target.workspace ||
@@ -288,12 +295,23 @@ function ReviewForm({
 
   function launchRun() {
     if (!projectOrigin || !history.authorized || !members.length || runInFlight.current) return;
-    const intent = JSON.stringify(members);
+    const roster: CaptureReviewRun = {
+      reviewers: members.map((member) => member.config),
+      ...(coordinator
+        ? {
+            coordinator,
+            required_reviewer_indices: members.flatMap((member, index) =>
+              member.required ? [index] : [],
+            ),
+          }
+        : {}),
+    };
+    const intent = JSON.stringify(roster);
     if (runAttempt.current?.intent !== intent) runAttempt.current = { intent, key: randomUUID() };
     runInFlight.current = true;
     runAction.mutate({
       projectId: projectOrigin.projectId,
-      roster: members,
+      roster,
       key: runAttempt.current.key,
     });
   }
@@ -500,13 +518,33 @@ function ReviewForm({
     };
   }
 
-  function addReviewer() {
+  function addToRun(kind: "reviewer" | "coordinator") {
     const input = reviewInput();
-    if (!input || !projectOrigin || !hostId || !workspace || members.length >= 16) return;
-    const member = { ...input, host_id: hostId, workspace, repository: projectOrigin.repository };
-    if (members.some((entry) => JSON.stringify(entry) === JSON.stringify(member))) return;
-    setDraftRun({ scope: runScope, members: [...members, member] });
+    if (!input || !projectOrigin || !hostId || !workspace) return;
+    const config = { ...input, host_id: hostId, workspace, repository: projectOrigin.repository };
+    if (kind === "coordinator") {
+      setDraftRun({ scope: runScope, members, coordinator: config });
+    } else {
+      if (
+        members.length >= 16 ||
+        members.some((entry) => JSON.stringify(entry.config) === JSON.stringify(config))
+      )
+        return;
+      setDraftRun({
+        scope: runScope,
+        members: [...members, { config, required: false }],
+        coordinator,
+      });
+    }
     runAction.reset();
+  }
+
+  function draftLabel(config: ProjectReviewMember) {
+    const name =
+      profiles.find((profile) => profile.id === config.profile_id)?.label ??
+      config.profile_id ??
+      config.skill;
+    return [name, REVIEW_HARNESS_LABELS[config.harness], config.model].filter(Boolean).join(" · ");
   }
 
   function runReview() {
@@ -734,30 +772,79 @@ function ReviewForm({
           {projectOrigin && (
             <Button
               variant="outline"
-              onClick={addReviewer}
+              onClick={() => addToRun("reviewer")}
               disabled={!canRun || pending || runAction.isPending || members.length >= 16}
             >
               Add reviewer to run
             </Button>
           )}
+          {projectOrigin && (
+            <Button
+              variant="outline"
+              onClick={() => addToRun("coordinator")}
+              disabled={!canRun || pending || runAction.isPending}
+            >
+              Use as coordinator
+            </Button>
+          )}
         </div>
-        {projectOrigin && members.length > 0 && (
+        {projectOrigin && (members.length > 0 || coordinator) && (
           <section aria-label="Selected reviewers" className="space-y-2 rounded-md border p-3">
-            <h4 className="font-medium">Selected reviewers</h4>
-            <ul className="space-y-1">
-              {members.map((member, index) => (
-                <li
-                  key={JSON.stringify(member)}
-                  className="flex items-center justify-between gap-2 text-sm"
-                >
+            <h4 className="font-medium">{coordinator ? "Review plan" : "Selected reviewers"}</h4>
+            {coordinator && (
+              <>
+                <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
                   <span className="[overflow-wrap:anywhere]">
-                    {profiles.find((profile) => profile.id === member.profile_id)?.label ??
-                      member.profile_id ??
-                      member.skill}
-                    {" · "}
-                    {REVIEW_HARNESS_LABELS[member.harness]}
-                    {member.model && ` · ${member.model}`}
+                    Coordinator · {draftLabel(coordinator)}
                   </span>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={runAction.isPending}
+                    onClick={() => {
+                      setDraftRun({ scope: runScope, members });
+                      runAction.reset();
+                    }}
+                  >
+                    Remove coordinator
+                  </Button>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Add reviewer candidates and mark any the coordinator must include. You can approve
+                  the proposed roster before reviewers start.
+                </p>
+              </>
+            )}
+            <ul className="space-y-1">
+              {members.map(({ config, required }, index) => (
+                <li
+                  key={JSON.stringify(config)}
+                  className="flex flex-wrap items-center justify-between gap-2 text-sm"
+                >
+                  <span className="[overflow-wrap:anywhere]">{draftLabel(config)}</span>
+                  {coordinator && (
+                    <label className="flex items-center gap-1.5">
+                      <input
+                        type="checkbox"
+                        checked={required}
+                        aria-label={`Require ${draftLabel(config)}`}
+                        disabled={runAction.isPending}
+                        onChange={(event) => {
+                          setDraftRun({
+                            scope: runScope,
+                            coordinator,
+                            members: members.map((member, position) =>
+                              position === index
+                                ? { ...member, required: event.target.checked }
+                                : member,
+                            ),
+                          });
+                          runAction.reset();
+                        }}
+                      />
+                      Required
+                    </label>
+                  )}
                   <Button
                     size="sm"
                     variant="ghost"
@@ -765,6 +852,7 @@ function ReviewForm({
                     onClick={() => {
                       setDraftRun({
                         scope: runScope,
+                        coordinator,
                         members: members.filter((_, position) => index !== position),
                       });
                       runAction.reset();
@@ -777,9 +865,15 @@ function ReviewForm({
             </ul>
             <Button
               onClick={launchRun}
-              disabled={pending || runAction.isPending || !history.authorized}
+              disabled={pending || runAction.isPending || !history.authorized || !members.length}
             >
-              {runAction.isPending ? "Starting reviewers…" : "Run selected reviewers"}
+              {coordinator
+                ? runAction.isPending
+                  ? "Starting coordinator…"
+                  : "Ask coordinator to plan"
+                : runAction.isPending
+                  ? "Starting reviewers…"
+                  : "Run selected reviewers"}
             </Button>
           </section>
         )}

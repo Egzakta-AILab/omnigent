@@ -53,6 +53,7 @@ from omnigent.studio.reviews.models import (
     ReviewEvent,
     ReviewOperation,
     ReviewPass,
+    ReviewPlanProposal,
     ReviewProfile,
     ReviewRole,
     ReviewRun,
@@ -60,6 +61,7 @@ from omnigent.studio.reviews.models import (
     ReviewTarget,
     Sha,
 )
+from omnigent.studio.reviews.plan import plan_digest, plan_instructions, read_plan_proposal
 from omnigent.studio.reviews.report import (
     ConsolidatedReviewReport,
     ReviewerRunReport,
@@ -137,6 +139,10 @@ class StartReviewRequest(BaseModel):
     """Start uses the captured target and profile, without overrides."""
 
     model_config = ConfigDict(extra="forbid")
+
+
+class StartReviewRunRequest(StartReviewRequest):
+    proposal_digest: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")] | None = None
 
 
 _WRITE_GATES = [Depends(require_json_content_type), Depends(require_trusted_origin)]
@@ -645,13 +651,16 @@ def create_studio_reviews_router(
                 changed_anchors(patch)
             except ValueError as exc:
                 raise HTTPException(409, "The review diff contains a malformed text hunk") from exc
-            profiles = []
-            for member in body.reviewers:
+
+            async def capture_profile(member: CaptureProjectReviewRequest) -> ReviewProfile:
                 profile = await resolve_profile(user_id, member)
                 if member.profile_id is not None:
                     role = await resolve_role(request, user_id, member, target)
                     profile = profile.model_copy(update={"role": role})
-                profiles.append(profile)
+                return profile
+
+            profiles = [await capture_profile(member) for member in body.reviewers]
+            coordinator = await capture_profile(body.coordinator) if body.coordinator else None
             return await asyncio.to_thread(
                 review_store.capture_run,
                 owner_user_id=user_id,
@@ -660,6 +669,8 @@ def create_studio_reviews_router(
                 target=target,
                 profiles=profiles,
                 patch=patch,
+                coordinator=coordinator,
+                required_indices=frozenset(body.required_reviewer_indices),
             )
         except ReviewConflictError as exc:
             raise HTTPException(409, str(exc)) from exc
@@ -816,8 +827,15 @@ def create_studio_reviews_router(
         idempotency_key: IdempotencyKey,
     ) -> ReviewPass:
         review = await owned_review(request, review_id)
+        run = await owned_run(request, review.run_id) if review.run_id is not None else None
+        if (
+            run is not None
+            and (run.coordinator is None or run.coordinator.id != review.id)
+            and all(member.id != review.id for member in run.selected_reviewers())
+        ):
+            raise HTTPException(409, "This reviewer requires selection in an approved plan")
         try:
-            return await launch_member(request, review, idempotency_key)
+            return await launch_member(request, review, idempotency_key, run=run)
         except (HTTPException, OmnigentError) as exc:
             if review.run_id is not None:
                 await asyncio.to_thread(
@@ -827,8 +845,30 @@ def create_studio_reviews_router(
                 )
             raise
 
+    async def current_project_patch(
+        request: Request, target: ReviewTarget, owner: str | None, run_id: str | None
+    ) -> str:
+        assert target.source_project_id is not None and target.repository_path is not None
+        workspace = await resolve_project_workspace(
+            request,
+            project_store,
+            project_id=target.source_project_id,
+            owner_id=owner,
+            host_id=target.host_id,
+            workspace=target.workspace,
+        )
+        current = await _capture_project_target(workspace, target.repository_path, target.pr_url)
+        if current != target:
+            raise HTTPException(409, "The pull request revision or execution target changed")
+        patch = await _capture_project_patch(workspace, target)
+        if run_id is not None:
+            captured = await saved_run_patch(run_id, owner)
+            if captured is not None and captured != patch:
+                raise HTTPException(409, "The pull request diff differs from the saved review run")
+        return patch
+
     async def launch_member(
-        request: Request, review: ReviewPass, idempotency_key: str
+        request: Request, review: ReviewPass, idempotency_key: str, *, run: ReviewRun | None
     ) -> ReviewPass:
         owner = review.owner_user_id
         target = review.target
@@ -845,6 +885,7 @@ def create_studio_reviews_router(
             or (project_id is None and read_patch is None)
         ):
             raise HTTPException(503, "Native review execution is unavailable")
+        planning = review.run_role == "coordinator"
 
         async def validate_profile() -> None:
             profile = review.profile
@@ -869,24 +910,12 @@ def create_studio_reviews_router(
         async def prepare() -> str:
             await validate_profile()
             await _qualify_skill(request, review)
-            workspace = None
-            if project_id is not None:
-                workspace = await resolve_project_workspace(
-                    request,
-                    project_store,
-                    project_id=project_id,
-                    owner_id=owner,
-                    host_id=target.host_id,
-                    workspace=target.workspace,
-                )
-                assert target.repository_path is not None
-                current = await _capture_project_target(
-                    workspace, target.repository_path, target.pr_url
-                )
-            else:
+            if project_id is None:
                 current = await capture_context(request, target.origin_id, target.pr_url)
-            if current != target:
-                raise HTTPException(409, "The pull request revision or execution target changed")
+                if current != target:
+                    raise HTTPException(
+                        409, "The pull request revision or execution target changed"
+                    )
             role_instructions = None
             if (role := review.profile.role) is not None:
                 selected_role = await _read_selected_role(
@@ -897,14 +926,8 @@ def create_studio_reviews_router(
                         409, "The workspace review profile changed. Reload profiles."
                     )
                 role_instructions = selected_role.instructions
-            if workspace is not None:
-                patch = await _capture_project_patch(workspace, target)
-                if review.run_id is not None:
-                    captured_patch = await saved_run_patch(review.run_id, owner)
-                    if captured_patch is not None and captured_patch != patch:
-                        raise HTTPException(
-                            409, "The pull request diff differs from the saved review run"
-                        )
+            if project_id is not None:
+                patch = await current_project_patch(request, target, owner, review.run_id)
             else:
                 assert read_patch is not None
                 patch = await read_patch(request, target)
@@ -918,8 +941,11 @@ def create_studio_reviews_router(
                 if (source.host_id, source.workspace) != (target.host_id, target.workspace):
                     raise HTTPException(409, "The review execution target changed")
             try:
+                instructions = (
+                    plan_instructions(run) if planning and run else report_instructions(review)
+                )
                 return review_prompt(
-                    review, patch, report_instructions(review), role_instructions=role_instructions
+                    review, patch, instructions, role_instructions=role_instructions
                 )
             except ValueError as exc:
                 raise HTTPException(409, str(exc)) from None
@@ -985,7 +1011,7 @@ def create_studio_reviews_router(
         dependencies=_WRITE_GATES,
     )
     async def start_review_run(
-        request: Request, run_id: str, _body: StartReviewRequest
+        request: Request, run_id: str, body: StartReviewRunRequest
     ) -> StartReviewRunResponse:
         run = await owned_run(request, run_id)
         slots = asyncio.Semaphore(4)
@@ -995,7 +1021,9 @@ def create_studio_reviews_router(
                 return None
             async with slots:
                 try:
-                    await launch_member(request, review, f"studio-review-start-{review.id}")
+                    await launch_member(
+                        request, review, f"studio-review-start-{review.id}", run=run
+                    )
                 except (HTTPException, OmnigentError) as exc:
                     message = str(exc.detail if isinstance(exc, HTTPException) else exc.message)[
                         :512
@@ -1004,15 +1032,38 @@ def create_studio_reviews_router(
                     return review.id, message
             return None
 
-        outcomes = await asyncio.gather(*(launch(review) for review in run.reviewers))
+        if run.coordinator is not None and run.plan is None:
+            if body.proposal_digest is None:
+                members = [run.coordinator]
+            else:
+                proposal = await current_proposal(run)
+                if proposal.plan is None or proposal.digest != body.proposal_digest:
+                    raise HTTPException(409, "The proposed plan changed or is unavailable")
+                owner = run.coordinator.owner_user_id
+                await current_project_patch(request, run.target, owner, run.id)
+                try:
+                    run = await asyncio.to_thread(
+                        review_store.approve_run_plan,
+                        run.id,
+                        proposal.plan,
+                        owner_user_id=owner,
+                    )
+                except ReviewConflictError as exc:
+                    raise HTTPException(409, str(exc)) from exc
+                members = run.selected_reviewers()
+        else:
+            if body.proposal_digest is not None and (
+                run.plan is None or plan_digest(run.plan) != body.proposal_digest
+            ):
+                raise HTTPException(409, "The supplied plan is not the approved roster")
+            members = run.selected_reviewers()
+        outcomes = await asyncio.gather(*(launch(review) for review in members))
         return StartReviewRunResponse(
             run=await owned_run(request, run.id),
             errors=dict(outcome for outcome in outcomes if outcome is not None),
         )
 
-    async def verified_report(
-        review: ReviewPass, anchors: frozenset[Anchor] | None
-    ) -> ReviewReport:
+    async def verify_report_session(review: ReviewPass) -> None:
         if review.reviewer_session_id is not None:
             conv = await asyncio.to_thread(
                 conversation_store.get_conversation, review.reviewer_session_id
@@ -1032,6 +1083,16 @@ def create_studio_reviews_router(
                     review.target.workspace,
                 ):
                     raise HTTPException(409, "The linked reviewer session binding changed")
+
+    async def current_proposal(run: ReviewRun) -> ReviewPlanProposal:
+        assert run.coordinator is not None
+        await verify_report_session(run.coordinator)
+        return await asyncio.to_thread(read_plan_proposal, conversation_store, run)
+
+    async def verified_report(
+        review: ReviewPass, anchors: frozenset[Anchor] | None
+    ) -> ReviewReport:
+        await verify_report_session(review)
         if review.run_id is not None:
             snapshot = await asyncio.to_thread(review_store.get_report_snapshot, review)
             if snapshot is not None:
@@ -1076,9 +1137,12 @@ def create_studio_reviews_router(
                 report = ReviewReport(state="incomplete")
             return ReviewerRunReport(review_id=review.id, report=report)
 
-        return consolidate_reports(
-            await asyncio.gather(*(read_member(member) for member in run.reviewers))
+        report = consolidate_reports(
+            await asyncio.gather(*(read_member(member) for member in run.selected_reviewers()))
         )
+        if run.coordinator is not None and run.plan is None:
+            report = report.model_copy(update={"proposal": await current_proposal(run)})
+        return report
 
     @router.get(
         "/studio/reviews/{review_id}/operations/{operation_id}", response_model=ReviewOperation

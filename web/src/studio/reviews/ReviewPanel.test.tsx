@@ -148,7 +148,7 @@ it("prefills profile defaults and drops model overrides when the harness changes
   cache.clear();
 });
 
-it.each(["single", "run"] as const)(
+it.each(["single", "run", "coordinated"] as const)(
   "launches a project %s from the selected workspace",
   async (mode) => {
     const prUrl = "https://github.com/example/repo/pull/1";
@@ -161,6 +161,7 @@ it.each(["single", "run"] as const)(
     const runsPath = "/v1/projects/project/studio/review-runs";
     const runPath = "/v1/studio/review-runs/run";
     let runWasStarted = false;
+    let planWasApproved = false;
     const captured = {
       id: "review",
       target: {
@@ -187,6 +188,28 @@ it.each(["single", "run"] as const)(
       reviewers: [launched, second],
       created_at: 0,
     };
+    const plan = {
+      coordinator_id: "coordinator",
+      base_sha: baseSha,
+      head_sha: headSha,
+      decisions: [
+        { review_id: "review", selected: true, reason: "Backend coverage is required." },
+        { review_id: "other", selected: false, reason: "No security paths changed." },
+      ],
+    };
+    const digest = "a".repeat(64);
+    function visibleRun() {
+      if (mode !== "coordinated") return run;
+      return {
+        ...run,
+        coordinator: { ...launched, id: "coordinator", reviewer_session_id: "coordinator" },
+        reviewers: [
+          { ...(planWasApproved ? launched : captured), run_role: "required" },
+          { ...second, reviewer_session_id: null, dispatch_status: "not_requested" },
+        ],
+        plan: planWasApproved ? plan : null,
+      };
+    }
     const finding = {
       title: "A retry writes twice",
       detail: "The second write is visible.",
@@ -203,15 +226,31 @@ it.each(["single", "run"] as const)(
         posts.push({ path, body: JSON.parse(String(init.body)) });
         if (path === capturePath) return Response.json({ review: captured });
         if (path === launchPath) return Response.json(launched);
-        if (path === runsPath) return Response.json(run);
+        if (path === runsPath) return Response.json(visibleRun());
         if (path === `${runPath}/start`) {
           runWasStarted = true;
-          return Response.json({ run, errors: {} });
+          if (JSON.parse(String(init.body)).proposal_digest === digest) planWasApproved = true;
+          return Response.json({ run: visibleRun(), errors: {} });
         }
       }
       if (path === runsPath)
-        return Response.json({ entries: runWasStarted ? [run] : [], next_cursor: null });
-      if (path === `${runPath}/report`)
+        return Response.json({ entries: runWasStarted ? [visibleRun()] : [], next_cursor: null });
+      if (path === `${runPath}/report`) {
+        if (mode === "coordinated") {
+          return Response.json(
+            planWasApproved
+              ? {
+                  reviewers: [
+                    {
+                      review_id: "review",
+                      report: { state: "ready", summary: "Backend report", findings: [finding] },
+                    },
+                  ],
+                  findings: [{ finding, review_ids: ["review"] }],
+                }
+              : { proposal: { state: "ready", plan, digest }, reviewers: [], findings: [] },
+          );
+        }
         return Response.json({
           reviewers: [
             {
@@ -225,6 +264,7 @@ it.each(["single", "run"] as const)(
           ],
           findings: [{ finding, review_ids: ["review", "other"] }],
         });
+      }
       if (path === capturePath) {
         expect(url.searchParams.get("pr_url")).toBe(prUrl);
         return Response.json({ object: "list", data: [], next_cursor: null });
@@ -264,11 +304,34 @@ it.each(["single", "run"] as const)(
     await user.click(await screen.findByRole("option", { name: "Backend" }));
     await user.click(screen.getByRole("combobox", { name: "Reviewer" }));
     await user.click(await screen.findByRole("option", { name: "Codex" }));
-    if (mode === "run") {
+    if (mode !== "single") {
       await user.click(screen.getByRole("button", { name: "Add reviewer to run" }));
+      if (mode === "coordinated") {
+        await user.click(screen.getByRole("button", { name: "Use as coordinator" }));
+        await user.click(screen.getByRole("checkbox", { name: "Require Backend · Codex" }));
+      }
       await user.click(screen.getByRole("combobox", { name: "Reviewer profile" }));
       await user.click(await screen.findByRole("option", { name: "Security" }));
       await user.click(screen.getByRole("button", { name: "Add reviewer to run" }));
+      if (mode === "coordinated") {
+        await user.click(screen.getByRole("button", { name: "Ask coordinator to plan" }));
+        const approval = await screen.findByRole("button", {
+          name: "Approve plan and start reviewers",
+        });
+        expect(screen.getByText("No security paths changed.")).toBeVisible();
+        expect(screen.queryByText("Consolidated findings")).toBeNull();
+        expect(posts[0].body).toMatchObject({
+          coordinator: { profile_id: "backend" },
+          required_reviewer_indices: [0],
+        });
+        expect(posts).toHaveLength(2);
+        await user.click(approval);
+        expect(await screen.findByText("1 / 1 reports ready")).toBeVisible();
+        expect(screen.getByText("Skipped")).toBeVisible();
+        expect(screen.getByText("Plan approved")).toBeVisible();
+        expect(posts[2]).toEqual({ path: `${runPath}/start`, body: { proposal_digest: digest } });
+        return;
+      }
       await user.click(screen.getByRole("button", { name: "Run selected reviewers" }));
       expect(await screen.findByText("2 / 2 reports ready")).toBeVisible();
       expect(screen.getByText("Consolidated findings")).toBeVisible();

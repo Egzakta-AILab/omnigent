@@ -14,6 +14,7 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from omnigent.db.compression import encode
 from omnigent.db.db_models import (
     SqlStudioReviewEvent,
     SqlStudioReviewOperation,
@@ -45,9 +46,11 @@ from omnigent.studio.reviews.models import (
     ReviewOperation,
     ReviewPage,
     ReviewPass,
+    ReviewPlan,
     ReviewProfile,
     ReviewRun,
     ReviewRunPage,
+    ReviewRunRole,
     ReviewState,
     ReviewTarget,
     require_uuid,
@@ -134,16 +137,28 @@ def _name(codes: dict[_T, int], code: int) -> _T:
     return next(name for name, value in codes.items() if value == code)
 
 
+def _held(row: SqlStudioReviewPass) -> bool:
+    # Older dispatchers skip this status. Only an approved plan can release candidates.
+    return (
+        row.run_role is not None
+        and row.state == _PASS_STATES["prepared"]
+        and row.dispatch_status == _DISPATCH_STATES["cancelled"]
+    )
+
+
 def _review(row: SqlStudioReviewPass) -> ReviewPass:
     return ReviewPass(
         id=row.id,
         run_id=row.run_id,
+        run_role=cast(ReviewRunRole | None, row.run_role),
         launch_error=row.launch_error,
         owner_user_id=row.owner_user_id,
         target=ReviewTarget.model_validate_json(row.target_json),
         profile=ReviewProfile.model_validate_json(row.profile_json),
         state=_name(_PASS_STATES, row.state),
-        dispatch_status=_name(_DISPATCH_STATES, row.dispatch_status),
+        dispatch_status="not_requested"
+        if _held(row)
+        else _name(_DISPATCH_STATES, row.dispatch_status),
         reviewer_session_id=row.reviewer_session_id,
         created_at=row.created_at,
         updated_at=row.updated_at,
@@ -253,6 +268,7 @@ class StudioReviewStore:
         *,
         now: int,
         run_id: str | None = None,
+        run_role: ReviewRunRole | None = None,
     ) -> CaptureResult:
         owner = _owner_scope(owner_user_id)
         digest = _request_values(idempotency_key, request_hash)
@@ -261,13 +277,14 @@ class StudioReviewStore:
             id=uuid.uuid4().hex,
             owner_scope=owner,
             run_id=run_id,
+            run_role=run_role,
             owner_user_id=owner_user_id,
             source_session_id=target.source_session_id,
             source_project_id=target.source_project_id,
             target_json=_snapshot(target),
             profile_json=_snapshot(profile),
             state=_PASS_STATES["prepared"],
-            dispatch_status=_DISPATCH_STATES["not_requested"],
+            dispatch_status=_DISPATCH_STATES["not_requested" if run_role is None else "cancelled"],
             reviewer_session_id=None,
             created_at=now,
             updated_at=now,
@@ -351,8 +368,13 @@ class StudioReviewStore:
             .order_by(SqlStudioReviewPass.created_at, SqlStudioReviewPass.id)
         )
         by_run: dict[str, list[ReviewPass]] = {row.id: [] for row in rows}
+        coordinators: dict[str, ReviewPass] = {}
         for member in members:
-            if member.run_id is not None:
+            if member.run_id is None:
+                continue
+            if member.run_role == "coordinator":
+                coordinators[member.run_id] = _review(member)
+            else:
                 by_run[member.run_id].append(_review(member))
         return [
             ReviewRun(
@@ -361,6 +383,8 @@ class StudioReviewStore:
                 reviewers=by_run[row.id],
                 created_at=row.created_at,
                 patch_sha256=row.patch_sha256,
+                coordinator=coordinators.get(row.id),
+                plan=ReviewPlan.model_validate_json(row.plan_json) if row.plan_json else None,
             )
             for row in rows
         ]
@@ -398,11 +422,17 @@ class StudioReviewStore:
         target: ReviewTarget,
         profiles: list[ReviewProfile],
         patch: str,
+        coordinator: ReviewProfile | None = None,
+        required_indices: frozenset[int] = frozenset(),
     ) -> ReviewRun:
         """Persist the complete roster and its capture receipts in one transaction."""
         project_id = target.source_project_id
         if project_id is None or not 1 <= len(profiles) <= MAX_RUN_REVIEWERS:
             raise ValueError("A run requires a project and a bounded reviewer roster")
+        if required_indices and (
+            coordinator is None or not required_indices.issubset(range(len(profiles)))
+        ):
+            raise ValueError("Required reviewers must be members of an orchestrated run")
         owner = _owner_scope(owner_user_id)
         key = hashlib.sha256(idempotency_key.encode()).digest()
         digest = _request_values(idempotency_key, request_hash)
@@ -454,15 +484,36 @@ class StudioReviewStore:
                     profile,
                     now=now,
                     run_id=run_id,
+                    run_role=(
+                        None
+                        if coordinator is None
+                        else "required"
+                        if index in required_indices
+                        else "candidate"
+                    ),
                 ).review
                 for index, profile in enumerate(profiles)
             ]
+            coordinator_member = None
+            if coordinator is not None:
+                coordinator_member = self._insert_capture(
+                    session,
+                    owner_user_id,
+                    f"run:{run_id}:coordinator",
+                    request_hash,
+                    target,
+                    coordinator,
+                    now=now,
+                    run_id=run_id,
+                    run_role="coordinator",
+                ).review
             return ReviewRun(
                 id=run_id,
                 target=target,
                 reviewers=sorted(members, key=lambda member: member.id),
                 created_at=now,
                 patch_sha256=patch_sha256,
+                coordinator=coordinator_member,
             )
 
         try:
@@ -485,6 +536,61 @@ class StudioReviewStore:
                 )
             )
             return self._materialize_runs(session, [row], owner)[0] if row else None
+
+    def approve_run_plan(
+        self, run_id: str, plan: ReviewPlan, *, owner_user_id: str | None
+    ) -> ReviewRun:
+        """Freeze one approved roster before any reviewer can start."""
+        owner = _owner_scope(owner_user_id)
+        serialized = plan.model_dump_json()
+        encoded = encode(serialized)
+        if encoded is None or len(encoded) > 16_383:
+            raise ReviewConflictError("The review plan exceeds its stored byte budget")
+
+        def write(session: Session) -> ReviewRun:
+            row = session.scalar(
+                select(SqlStudioReviewRun)
+                .where(
+                    SqlStudioReviewRun.workspace_id == current_workspace_id(),
+                    SqlStudioReviewRun.owner_scope == owner,
+                    SqlStudioReviewRun.id == require_uuid(run_id),
+                )
+                .with_for_update()
+            )
+            if row is None:
+                raise ReviewNotFoundError("Review run not found")
+            run = self._materialize_runs(session, [row], owner)[0]
+            if run.plan is not None:
+                if run.plan != plan:
+                    raise ReviewConflictError("A different plan was already approved")
+                return run
+            try:
+                run.validate_plan(plan)
+            except ValueError as exc:
+                raise ReviewConflictError(str(exc)) from exc
+            selected = {decision.review_id for decision in plan.decisions if decision.selected}
+            candidates = list(
+                session.scalars(
+                    select(SqlStudioReviewPass)
+                    .where(
+                        SqlStudioReviewPass.workspace_id == current_workspace_id(),
+                        SqlStudioReviewPass.owner_scope == owner,
+                        SqlStudioReviewPass.run_id == row.id,
+                        SqlStudioReviewPass.id.in_(selected),
+                    )
+                    .with_for_update()
+                )
+            )
+            if len(candidates) != len(selected) or not all(_held(member) for member in candidates):
+                raise ReviewConflictError(
+                    "The selected candidates are no longer held for approval"
+                )
+            for member in candidates:
+                member.dispatch_status = _DISPATCH_STATES["not_requested"]
+            row.plan_json = serialized
+            return run.model_copy(update={"plan": plan})
+
+        return run_write_transaction(self._write, "approve_review_run_plan", write)
 
     def get_run_patch(self, run_id: str, *, owner_user_id: str | None) -> str | None:
         run_id = require_uuid(run_id)
@@ -571,7 +677,14 @@ class StudioReviewStore:
 
         def write(session: Session) -> None:
             row = self._pass_row(session, review.id, _owner_scope(review.owner_user_id), lock=True)
-            if row and row.run_id and row.dispatch_status == _DISPATCH_STATES["not_requested"]:
+            if (
+                row
+                and row.run_id
+                and (
+                    row.dispatch_status == _DISPATCH_STATES["not_requested"]
+                    or (row.run_role == "coordinator" and _held(row))
+                )
+            ):
                 row.launch_error = message[:512]
 
         run_write_transaction(self._write, "save_review_launch_error", write)
@@ -723,6 +836,7 @@ class StudioReviewStore:
         action: ReviewAction,
         idempotency_key: str,
         request_hash: str,
+        claim_coordinator: bool = False,
     ) -> OperationResult:
         try:
             review_id = require_uuid(review_id)
@@ -742,6 +856,15 @@ class StudioReviewStore:
                 if existing.review_id != row.id or bytes(existing.request_hash) != digest:
                     raise ReviewConflictError("Idempotency key was used for a different request")
                 return OperationResult(operation=_operation(existing), created=False)
+            if claim_coordinator:
+                if action != "review.start" or row.run_role != "coordinator" or not _held(row):
+                    raise ReviewConflictError("The coordinator already has a start attempt")
+                # Claim in this transaction so an older app can never consume a pending start.
+                row.dispatch_status = _DISPATCH_STATES["dispatching"]
+                row.reviewer_session_id = row.id
+                row.launch_error = None
+            elif _held(row):
+                raise ReviewConflictError("This review is held for planning")
             now = time.time_ns() // 1_000_000
             operation = SqlStudioReviewOperation(
                 workspace_id=current_workspace_id(),
@@ -752,13 +875,14 @@ class StudioReviewStore:
                 idempotency_key=idempotency_key,
                 request_hash=digest,
                 start_once=1 if action == "review.start" else None,
-                state=_OP_STATES["pending"],
+                state=_OP_STATES["dispatching" if claim_coordinator else "pending"],
                 version=1,
                 created_at=now,
                 updated_at=now,
             )
             session.add(operation)
-            self._event(session, row, operation, "operation.reserved", now)
+            event = "operation.dispatching" if claim_coordinator else "operation.reserved"
+            self._event(session, row, operation, event, now)
             return OperationResult(operation=_operation(operation), created=True)
 
         try:
