@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { copyText } from "@/lib/clipboard";
 import { getCliServerUrl } from "@/lib/host";
 import { Link } from "@/lib/routing";
+import { FindingEvidence } from "./FindingEvidence";
 import {
   attachFindingReproduction,
   listFindingReproductions,
@@ -127,7 +128,7 @@ function Reproductions({
   canAttach = !!run.target,
   canReReview = canAttach && !run.target?.candidate,
 }: {
-  run: Pick<ReviewRun, "id"> & Partial<Pick<ReviewRun, "target">>;
+  run: Pick<ReviewRun, "id"> & Partial<Pick<ReviewRun, "target" | "patch_sha256">>;
   findingKey: string;
   viewerId: string | null;
   canAttach?: boolean;
@@ -307,6 +308,15 @@ function Reproductions({
           </article>
         ))}
       {copyStatus && <p role="status">{copyStatus}</p>}
+      {!!run.patch_sha256 && (
+        <FindingEvidence
+          runId={run.id}
+          findingKey={findingKey}
+          patchDigest={run.patch_sha256}
+          viewerId={viewerId}
+          canAttach={canAttach}
+        />
+      )}
     </section>
   );
 }

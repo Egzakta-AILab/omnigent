@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from base64 import b64decode
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
@@ -1610,6 +1611,39 @@ def test_studio_review_from_pr_panel(
             },
         }
 
+        screenshot = b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/lX8AAAAASUVORK5CYII="
+        )
+        screenshot_digest = hashlib.sha256(screenshot).hexdigest()
+        finding_artifacts: list[dict] = []
+        artifact_path = f"**/v1/studio/review-runs/{run_id}/findings/{finding_key}/evidence"
+
+        def finding_evidence(route: Route) -> None:
+            if route.request.method == "GET":
+                route.fulfill(json=finding_artifacts)
+                return
+            assert route.request.method == "POST"
+            assert route.request.headers["content-type"] == "image/png"
+            assert route.request.post_data_buffer == screenshot
+            assert parse_qs(urlsplit(route.request.url).query) == {"patch_sha256": [patch_sha]}
+            entry = {
+                "digest": screenshot_digest,
+                "media_type": "image/png",
+                "provenance": "uploaded",
+                "byte_size": len(screenshot),
+                "attached_at": review["created_at"],
+                "source": {**revision, "patch_sha256": patch_sha},
+            }
+            finding_artifacts.append(entry)
+            route.fulfill(json=entry)
+
+        page.route(artifact_path, finding_evidence)
+        page.route(f"{artifact_path}?*", finding_evidence)
+        page.route(
+            f"{artifact_path}/{screenshot_digest}",
+            lambda route: route.fulfill(body=screenshot, content_type="image/png"),
+        )
+
         def project_reproductions(route: Route) -> None:
             if route.request.method == "GET":
                 route.fulfill(json=attached_receipts)
@@ -1871,6 +1905,17 @@ def test_studio_review_from_pr_panel(
         expect(consolidation.get_by_text(re.compile(r"1 unverified citation"))).to_be_visible()
         consolidation.get_by_text("Reproductions", exact=True).click()
         evidence_panel = consolidation.get_by_role("region", name="Finding reproductions")
+        attachments = evidence_panel.get_by_role("region", name="Finding evidence")
+        attachments.get_by_label("Finding evidence file").set_input_files(
+            {"name": "finding.png", "mimeType": "image/png", "buffer": screenshot}
+        )
+        attachments.get_by_role("button", name="Attach evidence", exact=True).click()
+        attachments.get_by_role("button", name="Open screenshot", exact=True).click()
+        expect(
+            attachments.get_by_role("img", name="Screenshot attached to this finding")
+        ).to_be_visible()
+        expect(attachments.get_by_role("link", name="Download evidence")).to_be_visible()
+        assert len(finding_artifacts) == 1
         evidence_panel.get_by_label("Reproduction receipt").set_input_files(
             {
                 "name": "reproduction.json",
@@ -2113,6 +2158,7 @@ def test_studio_review_from_pr_panel(
                     "pr_url": pr_url,
                     "pr_number": _PR_NUMBER,
                     "patch": _PR_DIFF["patch"],
+                    "patch_sha256": patch_sha,
                     "reports": [
                         {
                             "key": "6" * 64,

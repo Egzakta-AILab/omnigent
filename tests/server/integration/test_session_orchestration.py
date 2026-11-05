@@ -581,8 +581,9 @@ async def test_same_host_still_requires_host_ownership(auth_client, auth_app, pe
     "scenario", ["unfiled", "moved", "foreign", "legacy", "stale-agent", "project"]
 )
 async def test_studio_reviewer_uses_private_session_and_original_runner(
-    auth_client, auth_app, peers, db_uri, monkeypatch, scenario
+    auth_client, auth_app, peers, db_uri, monkeypatch, scenario, tmp_path
 ):
+    from base64 import b64decode
     from unittest.mock import AsyncMock
 
     from fastapi import APIRouter, Request
@@ -607,6 +608,7 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
     from omnigent.server.schemas import SessionEventInput
     from omnigent.server.sharing_settings import DefaultPublicSessions
     from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
+    from omnigent.stores.artifact_store.local import LocalArtifactStore
     from omnigent.stores.project_store.sqlalchemy_store import SqlAlchemyProjectStore
     from omnigent.stores.studio_review_store import StudioReviewStore
     from omnigent.studio.reviews.models import ReviewPass, ReviewProfile, ReviewTarget
@@ -809,6 +811,7 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
 
     monkeypatch.setattr(routes_core, "_announce_session_added", observe_announcement)
     if scenario == "project":
+        artifact_store = LocalArtifactStore(str(tmp_path / "review-evidence"))
         send_review = AsyncMock(return_value={"queued": True, "pending_id": "review-input"})
         legacy_capture, legacy_patch = AsyncMock(), AsyncMock()
         # Keep the optional SPA catch-all after the injected API routes.
@@ -827,6 +830,7 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
                 auth_provider=auth_provider,
                 permission_store=permissions,
                 project_store=projects,
+                artifact_store=artifact_store,
             ),
             prefix="/v1",
         )
@@ -1065,6 +1069,68 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
             "base": {**side, "commit": base_sha},
             "head": {**side, "commit": current_head, "exit_code": 1},
         }
+        artifacts_path = f"{run_path}/findings/{finding_key}/evidence"
+        artifact_params = {"patch_sha256": run["patch_sha256"]}
+        png = b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/lX8AAAAASUVORK5CYII="
+        )
+        upload_png = {"content": png, "headers": {"Content-Type": "image/png"}}
+        assert (await auth_client.get(artifacts_path)).json() == []
+        assert (
+            await auth_client.post(artifacts_path, params={"patch_sha256": "0" * 64}, **upload_png)
+        ).status_code == 409
+        assert (
+            await auth_client.post(
+                artifacts_path,
+                params=artifact_params,
+                content=b"<svg/>",
+                headers={"Content-Type": "image/png"},
+            )
+        ).status_code == 422
+        assert (
+            await auth_client.post(
+                artifacts_path,
+                params=artifact_params,
+                content=b" " * (64 * 1024 + 1),
+                headers={"Content-Type": "application/json"},
+            )
+        ).status_code == 413
+        png_upload = await auth_client.post(artifacts_path, params=artifact_params, **upload_png)
+        assert png_upload.status_code == 200, png_upload.text
+        screenshot = png_upload.json()
+        assert screenshot["source"] == receipt["source"]
+        assert screenshot["provenance"] == "uploaded"
+        assert screenshot["byte_size"] == len(png)
+        assert (
+            await auth_client.post(artifacts_path, params=artifact_params, **upload_png)
+        ).json() == screenshot
+        screenshot_url = f"{artifacts_path}/{screenshot['digest']}"
+        downloaded = await auth_client.get(screenshot_url)
+        assert downloaded.content == png
+        assert downloaded.headers["content-type"] == "image/png"
+        assert downloaded.headers["cache-control"] == "no-store"
+        assert downloaded.headers["x-content-type-options"] == "nosniff"
+        with monkeypatch.context() as corrupt:
+            corrupt.setattr(artifact_store, "get", lambda _key: png[:-1] + b"!")
+            assert (await auth_client.get(screenshot_url)).status_code == 409
+        metrics = {
+            "method": "Median of three runs",
+            "metrics": [{"label": "Latency", "unit": "ms", "baseline": 10, "observed": 20}],
+        }
+        repeated_metrics = {**metrics, "metrics": metrics["metrics"] * 2}
+        assert (
+            await auth_client.post(artifacts_path, params=artifact_params, json=repeated_metrics)
+        ).status_code == 422
+        measurement_upload = await auth_client.post(
+            artifacts_path, params=artifact_params, json=metrics
+        )
+        assert measurement_upload.status_code == 200, measurement_upload.text
+        measurement = measurement_upload.json()
+        assert measurement["measurements"] == metrics
+        assert {entry["digest"] for entry in (await auth_client.get(artifacts_path)).json()} == {
+            measurement["digest"],
+            screenshot["digest"],
+        }
         stale_receipt = {
             **receipt,
             "source": {**receipt["source"], "patch_sha256": "0" * 64},
@@ -1124,6 +1190,12 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
         assert view["findings"][0]["key"] == finding_key
         assert {"workspace", "host_id", "reviewer_session_id"}.isdisjoint(view)
         assert (await auth_client.get(run_path, headers=foreign_headers)).status_code == 404
+        assert (await auth_client.get(screenshot_url, headers=foreign_headers)).content == png
+        assert (
+            await auth_client.post(
+                artifacts_path, params=artifact_params, json=metrics, headers=foreign_headers
+            )
+        ).status_code == 404
         shared_evidence = (
             await auth_client.get(reproduction_path, headers=foreign_headers)
         ).json()
@@ -1206,6 +1278,8 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
         assert (
             await auth_client.delete(collaborators_path, params={"user_id": "bob"})
         ).status_code == 204
+        assert (await auth_client.get(screenshot_url, headers=foreign_headers)).status_code == 404
+        assert (await auth_client.get(artifacts_path, headers=foreign_headers)).status_code == 404
         assert (await auth_client.get(discussion_path, headers=foreign_headers)).status_code == 404
         assert (
             await auth_client.get(reproduction_path, headers=foreign_headers)

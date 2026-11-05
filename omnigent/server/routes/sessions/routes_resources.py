@@ -3431,6 +3431,7 @@ def register_resources_routes(
                 auth_provider=auth_provider,
                 permission_store=permission_store,
                 project_store=project_store,
+                artifact_store=artifact_store,
             )
         )
 

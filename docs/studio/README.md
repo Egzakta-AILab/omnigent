@@ -435,6 +435,31 @@ reviewers. This run reviews the proposed delta from the captured PR head to
 the candidate snapshot. Open it from the fix attachment or the review run
 list. Its discussion links back to the original finding.
 
+### Attach media and measurements to a finding
+
+Open **Reproductions** under a finding. In **Screenshots, recordings, and
+measurements**, select a PNG or JPEG screenshot, an MP4 or WebM recording,
+or a measurements JSON file. Images can be up to 4 MiB and recordings up
+to 16 MiB. Choose **Attach evidence**. People with access to the saved review
+can preview or download the evidence. Each attachment shows the saved PR
+head and the file's SHA-256.
+
+An agent can produce the following JSON during a check. Include enough
+detail in the method for a coworker to repeat the measurement. Omit
+`baseline` if you measured only one revision.
+
+```json
+{
+  "method": "Median of five runs with the same 100-document fixture.",
+  "metrics": [
+    {"label": "Indexing latency", "unit": "ms", "baseline": 420, "observed": 610}
+  ]
+}
+```
+
+These files are labeled **Uploaded**. Attach the check receipt separately
+when you also want to show which command ran and what it returned.
+
 ### Discuss a saved review
 
 Select **Discuss finding** to open its thread, or **Discuss review** to open

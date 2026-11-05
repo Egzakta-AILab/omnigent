@@ -2888,6 +2888,73 @@
         "title": "ErrorResponse",
         "type": "object"
       },
+      "EvidenceMeasurement": {
+        "additionalProperties": false,
+        "properties": {
+          "baseline": {
+            "anyOf": [
+              {
+                "format": "double",
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Baseline"
+          },
+          "label": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Label",
+            "type": "string"
+          },
+          "observed": {
+            "format": "double",
+            "title": "Observed",
+            "type": "number"
+          },
+          "unit": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Unit",
+            "type": "string"
+          }
+        },
+        "required": [
+          "label",
+          "unit",
+          "observed"
+        ],
+        "title": "EvidenceMeasurement",
+        "type": "object"
+      },
+      "EvidenceMeasurements": {
+        "additionalProperties": false,
+        "properties": {
+          "method": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Method",
+            "type": "string"
+          },
+          "metrics": {
+            "items": {
+              "$ref": "#/components/schemas/EvidenceMeasurement"
+            },
+            "maxItems": 30,
+            "minItems": 1,
+            "title": "Metrics",
+            "type": "array"
+          }
+        },
+        "required": [
+          "method",
+          "metrics"
+        ],
+        "title": "EvidenceMeasurements",
+        "type": "object"
+      },
       "ExtensionAssetErrorResponse": {
         "description": "Concise diagnostic for one unresolved browser bundle.",
         "properties": {
@@ -3473,6 +3540,65 @@
           "all_types"
         ],
         "title": "FilesystemAttachmentsInfo",
+        "type": "object"
+      },
+      "FindingArtifact": {
+        "additionalProperties": false,
+        "properties": {
+          "attached_at": {
+            "format": "int64",
+            "title": "Attached At",
+            "type": "integer"
+          },
+          "byte_size": {
+            "format": "int64",
+            "title": "Byte Size",
+            "type": "integer"
+          },
+          "digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Digest",
+            "type": "string"
+          },
+          "measurements": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EvidenceMeasurements"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "media_type": {
+            "enum": [
+              "image/png",
+              "image/jpeg",
+              "video/mp4",
+              "video/webm",
+              "application/json"
+            ],
+            "title": "Media Type",
+            "type": "string"
+          },
+          "provenance": {
+            "const": "uploaded",
+            "default": "uploaded",
+            "title": "Provenance",
+            "type": "string"
+          },
+          "source": {
+            "$ref": "#/components/schemas/ReproductionSource"
+          }
+        },
+        "required": [
+          "digest",
+          "source",
+          "media_type",
+          "byte_size",
+          "attached_at"
+        ],
+        "title": "FindingArtifact",
         "type": "object"
       },
       "FindingDiscussionAnchor": {
@@ -24478,6 +24604,242 @@
           }
         },
         "summary": "Share Review Question Answer",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/studio/review-runs/{run_id}/findings/{finding_key}/evidence": {
+      "get": {
+        "operationId": "list_finding_evidence_v1_studio_review_runs__run_id__findings__finding_key__evidence_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "finding_key",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{64}$",
+              "title": "Finding Key",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/FindingArtifact"
+                  },
+                  "title": "Response List Finding Evidence V1 Studio Review Runs  Run Id  Findings  Finding Key  Evidence Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Finding Evidence",
+        "tags": [
+          "sessions"
+        ]
+      },
+      "post": {
+        "operationId": "attach_finding_evidence_v1_studio_review_runs__run_id__findings__finding_key__evidence_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "finding_key",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{64}$",
+              "title": "Finding Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "patch_sha256",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{64}$",
+              "title": "Patch Sha256",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EvidenceMeasurements"
+              }
+            },
+            "image/jpeg": {
+              "schema": {
+                "format": "binary",
+                "type": "string"
+              }
+            },
+            "image/png": {
+              "schema": {
+                "format": "binary",
+                "type": "string"
+              }
+            },
+            "video/mp4": {
+              "schema": {
+                "format": "binary",
+                "type": "string"
+              }
+            },
+            "video/webm": {
+              "schema": {
+                "format": "binary",
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FindingArtifact"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Attach Finding Evidence",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/studio/review-runs/{run_id}/findings/{finding_key}/evidence/{digest}": {
+      "get": {
+        "operationId": "read_finding_evidence_v1_studio_review_runs__run_id__findings__finding_key__evidence__digest__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "finding_key",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{64}$",
+              "title": "Finding Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "digest",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{64}$",
+              "title": "Digest",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvidenceMeasurements"
+                }
+              },
+              "image/jpeg": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "image/png": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "video/mp4": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "video/webm": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Read Finding Evidence",
         "tags": [
           "sessions"
         ]
