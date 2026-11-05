@@ -52,6 +52,7 @@ _logger = logging.getLogger(__name__)
 _MAX_BODY = 1024 * 1024
 _MAX_CAPTURE_ATTEMPTS = 3
 _MAX_DRAFT_ATTEMPTS = 240
+_MAX_ACTIVE_DELIVERIES = 2
 _DRAFT_POLL_SECONDS = 15
 _REQUEST_SECONDS = 150
 _ACTIONS = {"opened", "reopened", "synchronize", "ready_for_review"}
@@ -464,6 +465,11 @@ class WebhookWorker:
             await asyncio.to_thread(self.inbox.finish, job, "failed", failure)
 
     async def run(self) -> None:
+        async with asyncio.TaskGroup() as workers:
+            for _ in range(_MAX_ACTIVE_DELIVERIES):
+                workers.create_task(self._process_deliveries())
+
+    async def _process_deliveries(self) -> None:
         while True:
             try:
                 job = await asyncio.to_thread(self.inbox.claim)
