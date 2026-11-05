@@ -1574,6 +1574,7 @@ def create_studio_reviews_router(
             body=body.body,
             execution=execution,
             prompt_digest=hashlib.sha256(prompt.rstrip().encode()).hexdigest(),
+            requires_citations=True,
         )
         try:
             record, created = await asyncio.to_thread(
@@ -1669,6 +1670,11 @@ def create_studio_reviews_router(
         if await asyncio.to_thread(conversation_store.get_conversation, view.session_id) is None:
             return view
         await verify_question_session(access, record)
+        captured_patch = None
+        if record.snapshot.requires_citations:
+            captured_patch = await saved_run_patch(access.run.id, access.owner)
+            if captured_patch is None:
+                return view.model_copy(update={"answer_state": "incomplete"})
         state, answer = await asyncio.to_thread(
             read_question_answer,
             conversation_store,
@@ -1678,6 +1684,7 @@ def create_studio_reviews_router(
             prompt_digest=record.snapshot.prompt_digest,
             updated_at=view.updated_at,
             running=view.status == "accepted",
+            captured_patch=captured_patch,
         )
         if answer is None:
             return view.model_copy(update={"answer_state": state})

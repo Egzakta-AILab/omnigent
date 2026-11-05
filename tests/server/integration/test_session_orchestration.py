@@ -1307,13 +1307,16 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
         ).status_code == 409
         prompt = send_review.await_args.args[2].data["content"][0]["text"]
         assert base_sha in prompt and current_head in prompt and "Which path accepts" in prompt
+        assert '"line": 1, "text": "after"' in prompt
+        citations = [{"path": "hello", "side": "head", "line": 1, "quote": "after"}]
         response_body = {
             "question_id": question["id"],
             "base_sha": base_sha,
             "head_sha": current_head,
             "answer": "The changed condition at hello:1 admits the invalid case.",
+            "citations": citations,
         }
-        reply = "```studio-review-answer-v1\n" + json.dumps(response_body) + "\n```"
+        reply = "```studio-review-answer-v2\n" + json.dumps(response_body) + "\n```"
 
         def question_echo(text: str) -> None:
             conversations.append(
@@ -1335,10 +1338,11 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
         different_answer = {**response_body, "answer": "The latest reply should not be shared."}
         save_assistant_message(
             private_session_id,
-            "```studio-review-answer-v1\n" + json.dumps(different_answer) + "\n```",
+            "```studio-review-answer-v2\n" + json.dumps(different_answer) + "\n```",
         )
         observed = await auth_client.get(private_path, headers=foreign_headers)
         assert observed.json()["answer"] == response_body["answer"], observed.text
+        assert observed.json()["citations"] == citations
         assert (await auth_client.get(discussion_path)).json()["agent_answers"] == []
         published = await auth_client.post(
             f"{private_path}/share", headers=foreign_headers, json={}
@@ -1346,6 +1350,7 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
         assert published.status_code == 200, published.text
         shared_answer = (await auth_client.get(discussion_path)).json()["agent_answers"][0]
         assert shared_answer["answer"] == response_body["answer"]
+        assert shared_answer["citations"] == citations
         assert shared_answer["requested_by"] == "bob"
         assert "session_id" not in shared_answer
         assert (

@@ -109,9 +109,17 @@ class QuestionInput(FrozenModel):
     body: str
     execution: QuestionExecution
     prompt_digest: ReviewRoleDigest
+    requires_citations: bool = False
 
 
 QuestionDispatch = Literal["dispatching", "accepted", "unknown"]
+
+
+class QuestionCitation(FrozenModel):
+    path: Annotated[str, StringConstraints(min_length=1, max_length=1024)]
+    side: Side
+    line: int = Field(strict=True, ge=1, le=2**31 - 1)
+    quote: Annotated[str, StringConstraints(min_length=1, max_length=400)]
 
 
 class QuestionAnswer(FrozenModel):
@@ -119,6 +127,7 @@ class QuestionAnswer(FrozenModel):
     base_sha: Sha
     head_sha: Sha
     answer: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)]
+    citations: list[QuestionCitation] | None = Field(default=None, max_length=6)
 
 
 class ReviewQuestion(FrozenModel):
@@ -130,6 +139,7 @@ class ReviewQuestion(FrozenModel):
     status: QuestionDispatch
     answer_state: ReportState = "pending"
     answer: str | None = None
+    citations: list[QuestionCitation] | None = None
     published_at: int | None = None
     updated_at: int
 
@@ -145,6 +155,7 @@ class SharedReviewAnswer(FrozenModel):
     anchor: DiscussionAnchor
     question: str
     answer: str
+    citations: list[QuestionCitation] | None = None
     harness: ReviewHarness
     requested_by: str | None
     published_at: int

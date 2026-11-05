@@ -5634,6 +5634,46 @@
         "title": "ProjectOrderResponse",
         "type": "object"
       },
+      "QuestionCitation": {
+        "additionalProperties": false,
+        "properties": {
+          "line": {
+            "format": "int64",
+            "maximum": 2147483647.0,
+            "minimum": 1.0,
+            "title": "Line",
+            "type": "integer"
+          },
+          "path": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "title": "Path",
+            "type": "string"
+          },
+          "quote": {
+            "maxLength": 400,
+            "minLength": 1,
+            "title": "Quote",
+            "type": "string"
+          },
+          "side": {
+            "enum": [
+              "base",
+              "head"
+            ],
+            "title": "Side",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "side",
+          "line",
+          "quote"
+        ],
+        "title": "QuestionCitation",
+        "type": "object"
+      },
       "QueuedEvent": {
         "description": "Optional event emitted between `created` and `in_progress`\nfor background tasks that are queued before they start.\n\nForeground streaming responses skip this event.",
         "properties": {
@@ -7396,6 +7436,20 @@
           "body": {
             "title": "Body",
             "type": "string"
+          },
+          "citations": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/QuestionCitation"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Citations"
           },
           "harness": {
             "enum": [
@@ -12067,6 +12121,20 @@
           "answer": {
             "title": "Answer",
             "type": "string"
+          },
+          "citations": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/QuestionCitation"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Citations"
           },
           "harness": {
             "enum": [
