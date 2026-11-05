@@ -189,6 +189,20 @@ export function FindingEvidence({
               {" · "}
               <code title={entry.digest}>SHA-256 {entry.digest.slice(0, 12)}</code>
             </p>
+            {!!entry.checks?.length && (
+              <ul aria-label="Check evidence sources" className="space-y-1 text-xs">
+                {entry.checks.map(({ receipt_digest, side, name, commit }) => (
+                  <li key={`${receipt_digest}/${side}/${name}`} className="break-words">
+                    {side === "base" ? "Base check" : "Head check"}{" "}
+                    <code title={commit}>{commit.slice(0, 8)}</code>
+                    {" · "}
+                    {name}
+                    {" · receipt "}
+                    <code title={receipt_digest}>{receipt_digest.slice(0, 12)}</code>
+                  </li>
+                ))}
+              </ul>
+            )}
             {entry.measurements && <Measurements evidence={entry.measurements} />}
             <Button
               variant="ghost"

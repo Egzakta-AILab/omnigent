@@ -124,7 +124,8 @@ def test_fix_runs_the_captured_head_and_ephemeral_candidate(tmp_path: Path, monk
     patch += b"@@ -1 +1 @@\n-before\n+fixed\n"
     observed = []
 
-    def run_side(_docker, *, commit, tree, archive, image_id, command, timeout):
+    def run_side(_docker, *, commit, tree, archive, image_id, command, timeout, collection):
+        assert collection is None
         assert command == ("check",) and timeout == 5 and image_id == "sha256:" + "d" * 64
         with tarfile.open(fileobj=tree) as tar:
             assert tar.getnames() == ["source.txt"]
@@ -221,3 +222,49 @@ def test_container_cleanup_after_invocation_error_or_lost_create(monkeypatch, lo
         assert result.state == "setup_error" and result.exit_code == 127
     create, cleanup = calls[0], calls[-1]
     assert create[0] == "create" and cleanup == ("rm", "--force", "--volumes", create[2])
+
+
+@pytest.mark.parametrize("member_kind", ["valid", "symlink", "extra", "wrong_name"])
+def test_collection_extracts_only_a_named_regular_evidence_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, member_kind: str
+) -> None:
+    evidence = b'{"method":"three runs","metrics":[{"label":"latency","unit":"ms","observed":4}]}'
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as archive:
+        item = tarfile.TarInfo("wrong.json" if member_kind == "wrong_name" else "metrics.json")
+        if member_kind == "symlink":
+            item.type = tarfile.SYMTYPE
+            item.linkname = "/etc/passwd"
+            archive.addfile(item)
+        else:
+            item.size = len(evidence)
+            archive.addfile(item, io.BytesIO(evidence))
+        if member_kind == "extra":
+            archive.addfile(tarfile.TarInfo("other.json"))
+
+    def copy(command, *, destination, **_kwargs):
+        assert command == [
+            "docker",
+            "exec",
+            "container",
+            "tar",
+            "-cf",
+            "-",
+            "-C",
+            "/evidence",
+            "metrics.json",
+        ]
+        content = buffer.getvalue()
+        destination.write(content)
+        return reproduction._Capture(0, len(content), hashlib.sha256(content).hexdigest())
+
+    monkeypatch.setattr(reproduction, "_capture", copy)
+    exported = reproduction._collect_evidence_file(
+        ["docker"], "container", "metrics.json", tmp_path
+    )
+    if member_kind == "valid":
+        assert exported is not None and exported.digest == hashlib.sha256(evidence).hexdigest()
+        assert (tmp_path / "metrics.json").read_bytes() == evidence
+    else:
+        assert exported is None
+        assert not list(tmp_path.iterdir())

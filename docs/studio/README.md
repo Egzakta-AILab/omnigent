@@ -460,6 +460,28 @@ detail in the method for a coworker to repeat the measurement. Omit
 These files are labeled **Uploaded**. Attach the check receipt separately
 when you also want to show which command ran and what it returned.
 
+For a check that writes its own files, add `--capture-evidence FILENAME` to
+the `reproduce` command before `--`. The check writes the named files under
+`/evidence` inside each container. Choose up to two filenames, such as
+`measurements.json` and `replay.webm`. The verifier saves the resulting files
+beside the receipt in `<receipt>.files/base` and `<receipt>.files/head` and
+records their hashes. The command reports any missing file. For a large
+repository, repeat `--include-path` for the paths the check needs. The receipt
+records that export scope.
+
+To attach the saved check and its files together, choose **Copy finding key**
+in the finding's **Reproductions** panel and run:
+
+```sh
+uv run --no-sync python scripts/verify_studio.py attach-proof \
+  --mode local --server http://127.0.0.1:6767 \
+  --finding FINDING_KEY --receipt .omnigent/studio/reproduction.json
+```
+
+Use the same receipt if an upload is interrupted. Omnigent checks the files
+against the receipt and shows the associated check, commit, and base or head
+side. This uses the same captured run when the PR advances.
+
 ### Discuss a saved review
 
 Select **Discuss finding** to open its thread, or **Discuss review** to open

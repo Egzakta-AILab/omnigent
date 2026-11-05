@@ -1306,6 +1306,46 @@
         "title": "CaptureReviewRunRequest",
         "type": "object"
       },
+      "CapturedEvidenceFile": {
+        "additionalProperties": false,
+        "properties": {
+          "byte_size": {
+            "exclusiveMinimum": 0.0,
+            "format": "int64",
+            "title": "Byte Size",
+            "type": "integer"
+          },
+          "digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Digest",
+            "type": "string"
+          },
+          "media_type": {
+            "enum": [
+              "image/png",
+              "image/jpeg",
+              "video/mp4",
+              "video/webm",
+              "application/json"
+            ],
+            "title": "Media Type",
+            "type": "string"
+          },
+          "name": {
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]{0,95}$",
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "digest",
+          "media_type",
+          "byte_size"
+        ],
+        "title": "CapturedEvidenceFile",
+        "type": "object"
+      },
       "ChildSessionList": {
         "description": "Paginated list of child sessions; `data` is a page of `ChildSessionSummary`.",
         "properties": {
@@ -2888,6 +2928,42 @@
         "title": "ErrorResponse",
         "type": "object"
       },
+      "EvidenceCheck": {
+        "additionalProperties": false,
+        "properties": {
+          "commit": {
+            "pattern": "^[0-9a-f]{40}(?:[0-9a-f]{24})?$",
+            "title": "Commit",
+            "type": "string"
+          },
+          "name": {
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]{0,95}$",
+            "title": "Name",
+            "type": "string"
+          },
+          "receipt_digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Receipt Digest",
+            "type": "string"
+          },
+          "side": {
+            "enum": [
+              "base",
+              "head"
+            ],
+            "title": "Side",
+            "type": "string"
+          }
+        },
+        "required": [
+          "receipt_digest",
+          "side",
+          "name",
+          "commit"
+        ],
+        "title": "EvidenceCheck",
+        "type": "object"
+      },
       "EvidenceMeasurement": {
         "additionalProperties": false,
         "properties": {
@@ -3554,6 +3630,15 @@
             "format": "int64",
             "title": "Byte Size",
             "type": "integer"
+          },
+          "checks": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/EvidenceCheck"
+            },
+            "maxItems": 8,
+            "title": "Checks",
+            "type": "array"
           },
           "digest": {
             "pattern": "^[0-9a-f]{64}$",
@@ -6330,6 +6415,14 @@
             "title": "Image Id",
             "type": "string"
           },
+          "included_paths": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Included Paths",
+            "type": "array"
+          },
           "observed_at": {
             "format": "date-time",
             "title": "Observed At",
@@ -6401,6 +6494,15 @@
             "minimum": 0.0,
             "title": "Elapsed Ms",
             "type": "integer"
+          },
+          "evidence": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/CapturedEvidenceFile"
+            },
+            "maxItems": 2,
+            "title": "Evidence",
+            "type": "array"
           },
           "exit_code": {
             "anyOf": [
@@ -12625,6 +12727,14 @@
           "image_id": {
             "title": "Image Id",
             "type": "string"
+          },
+          "included_paths": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Included Paths",
+            "type": "array"
           },
           "observed_at": {
             "format": "date-time",
@@ -24694,6 +24804,60 @@
               "pattern": "^[0-9a-f]{64}$",
               "title": "Patch Sha256",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "receipt_digest",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Receipt Digest"
+            }
+          },
+          {
+            "in": "query",
+            "name": "side",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "base",
+                    "head"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Side"
+            }
+          },
+          {
+            "in": "query",
+            "name": "filename",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]{0,95}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Filename"
             }
           }
         ],

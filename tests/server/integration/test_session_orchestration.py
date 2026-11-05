@@ -1131,6 +1131,14 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
             measurement["digest"],
             screenshot["digest"],
         }
+        manifest = {
+            "name": "finding.png",
+            "digest": screenshot["digest"],
+            "media_type": "image/png",
+            "byte_size": len(png),
+        }
+        receipt["base"]["evidence"] = [manifest]
+        receipt["head"]["evidence"] = [manifest]
         stale_receipt = {
             **receipt,
             "source": {**receipt["source"], "patch_sha256": "0" * 64},
@@ -1150,6 +1158,34 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
         assert evidence["provenance"] == "uploaded" and evidence["receipt"] == receipt
         assert (await auth_client.post(reproduction_path, json=receipt)).json() == evidence
         assert (await auth_client.get(reproduction_path)).json() == [evidence]
+        check = {
+            **artifact_params,
+            "receipt_digest": evidence["digest"],
+            "filename": "finding.png",
+        }
+        assert (
+            await auth_client.post(artifacts_path, params=check, **upload_png)
+        ).status_code == 422
+        wrong_bytes = {**upload_png, "content": png[:-1] + b"!"}
+        assert (
+            await auth_client.post(artifacts_path, params={**check, "side": "head"}, **wrong_bytes)
+        ).status_code == 409
+        for side_name in ("base", "head"):
+            params = {**check, "side": side_name}
+            linked = await auth_client.post(artifacts_path, params=params, **upload_png)
+            assert linked.status_code == 200, linked.text
+            assert (
+                await auth_client.post(artifacts_path, params=params, **upload_png)
+            ).json() == linked.json()
+        assert linked.json()["checks"] == [
+            {
+                "receipt_digest": evidence["digest"],
+                "name": "finding.png",
+                "side": side_name,
+                "commit": commit,
+            }
+            for side_name, commit in (("base", base_sha), ("head", current_head))
+        ]
         foreign_headers = {"X-Forwarded-Email": "bob"}
         assert (
             await auth_client.get(reproduction_path, headers=foreign_headers)

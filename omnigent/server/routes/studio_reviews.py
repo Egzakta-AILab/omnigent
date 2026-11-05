@@ -63,8 +63,7 @@ from omnigent.stores.studio_review_store import (
     StudioReviewStore,
 )
 from omnigent.studio.reviews.artifacts import (
-    EVIDENCE_LIMITS,
-    EvidenceMediaType,
+    EvidenceCheckSelection,
     EvidenceStorageError,
     FindingArtifact,
 )
@@ -99,6 +98,11 @@ from omnigent.studio.reviews.evidence import (
     changed_anchors,
     changed_lines,
     displayed_anchors,
+)
+from omnigent.studio.reviews.evidence_files import (
+    EVIDENCE_LIMITS,
+    EvidenceMediaType,
+    EvidenceSide,
 )
 from omnigent.studio.reviews.launch import SKILL_NAME, review_prompt, run_review, verified_patch
 from omnigent.studio.reviews.models import (
@@ -1457,10 +1461,22 @@ def create_studio_reviews_router(
         run_id: str,
         finding_key: FindingKey,
         patch_sha256: Annotated[str, Query(pattern=r"^[0-9a-f]{64}$")],
+        receipt_digest: Annotated[str | None, Query(pattern=r"^[0-9a-f]{64}$")] = None,
+        side: EvidenceSide | None = None,
+        filename: Annotated[
+            str | None, Query(pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,95}$")
+        ] = None,
     ) -> FindingArtifact:
         run, owner, _ = await require_saved_finding(request, run_id, finding_key)
         if run.patch_sha256 != patch_sha256:
             raise HTTPException(409, "The evidence does not match the saved diff")
+        selection = None
+        if receipt_digest is not None and side is not None and filename is not None:
+            selection = EvidenceCheckSelection(
+                receipt_digest=receipt_digest, side=side, name=filename
+            )
+        elif any(value is not None for value in (receipt_digest, side, filename)):
+            raise HTTPException(422, "Provide the check receipt, side, and filename together")
         if artifact_store is None:
             raise HTTPException(503, "Review evidence storage is unavailable")
         media_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
@@ -1479,6 +1495,7 @@ def create_studio_reviews_router(
                     bytes(payload),
                     owner=owner,
                     artifacts=artifact_store,
+                    check_selection=selection,
                 )
         except ReviewNotFoundError as exc:
             raise HTTPException(404, str(exc)) from exc

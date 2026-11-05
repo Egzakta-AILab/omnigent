@@ -172,6 +172,8 @@ def test_verify_run_requires_evidence_and_attribution(monkeypatch, fault):
         }
         source = read_reproduction_source(**source_args, pr_url=target["pr_url"])
         assert (source.base_sha, source.head_sha, source.patch_sha256) == (base, head, digest)
+        alternate = target["pr_url"].replace("/example/", "/Example/")
+        assert read_reproduction_source(**source_args, pr_url=alternate) == source
         with pytest.raises(ReproductionError, match="does not match"):
             read_reproduction_source(**source_args, pr_url=target["pr_url"] + "0")
 

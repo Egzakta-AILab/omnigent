@@ -6,19 +6,14 @@ from typing import Annotated, Literal
 
 from pydantic import Field, FiniteFloat, StringConstraints, model_validator
 
-from omnigent.studio.reviews.models import FrozenModel, ReviewRoleDigest
+from omnigent.studio.reviews.evidence_files import (
+    EVIDENCE_LIMITS,
+    EvidenceFilename,
+    EvidenceMediaType,
+    EvidenceSide,
+)
+from omnigent.studio.reviews.models import FrozenModel, ReviewRoleDigest, Sha
 from omnigent.studio.reviews.reproduction import ReproductionSource
-
-EvidenceMediaType = Literal[
-    "image/png", "image/jpeg", "video/mp4", "video/webm", "application/json"
-]
-EVIDENCE_LIMITS: dict[EvidenceMediaType, int] = {
-    "image/png": 4 * 1024 * 1024,
-    "image/jpeg": 4 * 1024 * 1024,
-    "video/mp4": 16 * 1024 * 1024,
-    "video/webm": 16 * 1024 * 1024,
-    "application/json": 64 * 1024,
-}
 
 
 class EvidenceStorageError(RuntimeError):
@@ -46,6 +41,16 @@ class EvidenceMeasurements(FrozenModel):
         return self
 
 
+class EvidenceCheckSelection(FrozenModel):
+    receipt_digest: ReviewRoleDigest
+    side: EvidenceSide
+    name: EvidenceFilename
+
+
+class EvidenceCheck(EvidenceCheckSelection):
+    commit: Sha
+
+
 class FindingArtifact(FrozenModel):
     digest: ReviewRoleDigest
     source: ReproductionSource
@@ -54,6 +59,7 @@ class FindingArtifact(FrozenModel):
     attached_at: int
     provenance: Literal["uploaded"] = "uploaded"
     measurements: EvidenceMeasurements | None = None
+    checks: tuple[EvidenceCheck, ...] = Field(default=(), max_length=8)
 
 
 def inspect_evidence(media_type: EvidenceMediaType, content: bytes) -> EvidenceMeasurements | None:
