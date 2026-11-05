@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from playwright.sync_api import Locator, Page, Route, expect
@@ -1266,18 +1267,24 @@ def test_studio_review_from_pr_panel(
 ) -> None:
     """Exercise the UI with scripted review and provider responses."""
     base_url, session_id = seeded_session
-    pr_url = "https://github.com/acme/app/pull/4242"
+    rail = entry == "rail"
+    repository = "Egzakta-AILab/Services" if rail else "acme/app"
+    remote = f"github.com/{repository}"
+    pr_url = f"https://{remote}/pull/4242"
+    pr_title = "Update the services health check" if rail else _INFO["pr"]["title"]
+    branch = "feature/service-health" if rail else _INFO["pr"]["head_ref"]
+    head_repo = f"https://github.com/contributor/{repository.split('/')[-1]}"
     host_id, agent_id, review_id, reviewer_id = ("a" * 32, "b" * 32, "c" * 32, "d" * 32)
     base_sha, head_sha = "1" * 40, "2" * 40
     revision = {"base_sha": base_sha, "head_sha": head_sha}
-    workspace = "/work/acme/app"
+    workspace = "/work/acme/egzakta-org" if rail else "/work/acme/app"
     association = {
         "url": pr_url,
         "host": "github.com",
         "provider": "github",
-        "repository": "acme/app",
+        "repository": repository,
         "number": _PR_NUMBER,
-        "relationship": "created",
+        "relationship": "attached" if rail else "created",
     }
     info = {
         **_INFO,
@@ -1289,7 +1296,9 @@ def test_studio_review_from_pr_panel(
             **_INFO["pr"],
             **revision,
             "url": pr_url,
-            "head_repository_url": "https://github.com/contributor/app",
+            "title": pr_title,
+            "head_ref": branch,
+            "head_repository_url": head_repo,
         },
     }
     review = {
@@ -1317,6 +1326,55 @@ def test_studio_review_from_pr_panel(
     capture_keys: list[str] = []
     start_keys: list[str] = []
     older_reads = 0
+    attached = not rail
+    branch_reads: list[str] = []
+
+    def workspace_repositories(route: Route) -> None:
+        assert route.request.method == "GET"
+        selected = parse_qs(urlsplit(route.request.url).query).get("repository")
+        if selected:
+            branch_reads.extend(selected)
+            route.fulfill(
+                json={
+                    "repository": "Services",
+                    "branch": branch,
+                    "remote": remote,
+                    "state": "found",
+                    "pr": {"url": pr_url, "title": pr_title, "number": _PR_NUMBER},
+                }
+            )
+            return
+        route.fulfill(
+            json={
+                "manifest": "repos.yaml",
+                "repositories": [
+                    {
+                        "name": "KVARK",
+                        "path": "KVARK",
+                        "status": "active",
+                        "description": "Main product",
+                        "depends_on": ["Services"],
+                        "checkout": "ready",
+                    },
+                    {
+                        "name": "Services",
+                        "path": "Services",
+                        "status": "active",
+                        "description": "Supporting services",
+                        "depends_on": [],
+                        "checkout": "ready",
+                    },
+                ],
+            }
+        )
+
+    def attach(route: Route) -> None:
+        nonlocal attached
+        assert route.request.method == "POST"
+        assert route.request.post_data_json == {"url": pr_url, "action": "attach"}
+        assert not attached
+        attached = True
+        route.fulfill(json=info)
 
     def list_or_capture(route: Route) -> None:
         nonlocal captured, older_reads
@@ -1372,8 +1430,18 @@ def test_studio_review_from_pr_panel(
             response=response, json={**response.json(), "host_id": host_id, "workspace": workspace}
         )
 
-    stub_session_pull_requests(page, lambda: [association], lambda _url: None)
-    page.route(re.compile(r"/resources/github(?:\?|$)"), lambda r: r.fulfill(json=info))
+    stub_session_pull_requests(page, lambda: [association] if attached else [], lambda _url: None)
+    page.route(
+        re.compile(r"/resources/github(?:\?|$)"),
+        lambda r: r.fulfill(
+            json=info if attached else {**info, "pr": None, "prs": [], "selected_pr_url": None}
+        ),
+    )
+    if rail:
+        page.route(
+            re.compile(r"/resources/workspace-repositories(?:\?|$)"), workspace_repositories
+        )
+        page.route("**/resources/github/prs", attach)
     page.route(
         re.compile(r"/resources/github/changes"),
         lambda r: r.fulfill(json={**_CHANGES, **revision}),
@@ -1390,6 +1458,7 @@ def test_studio_review_from_pr_panel(
                 "features": {"canvas": entry == "canvas"},
                 "session_pull_requests": True,
                 "studio_reviews": True,
+                "workspace_repositories": rail,
             }
         ),
     )
@@ -1432,13 +1501,38 @@ def test_studio_review_from_pr_panel(
         if mobile
         else page.get_by_role("complementary", name="Workspace")
     )
-    if entry == "rail":
+    if rail:
         open_right_rail(page)
         panel.get_by_role("tab", name="Pull Requests", exact=True).click()
+        panel.get_by_text("Workspace repositories", exact=True).click()
+        picker = panel.get_by_role("combobox", name="Workspace repository", exact=True)
+        expect(picker).to_have_value("KVARK")
+        expect(panel.get_by_text("Uses Services", exact=True)).to_be_visible()
+        expect(panel.get_by_text("repos.yaml", exact=True)).to_be_visible()
+        expect(panel.get_by_text("Ready", exact=True)).to_be_visible()
+        find_button = panel.get_by_role("button", name="Find branch PR", exact=True)
+        expect(find_button).to_be_enabled()
+        page.screenshot(path=str(tmp_path / "workspace-repositories.png"))
+        picker.select_option("Services")
+        expect(panel.get_by_text("Supporting services", exact=True)).to_be_visible()
+        assert branch_reads == []
+        find_button.click()
+        expect(panel.get_by_text(pr_title, exact=False)).to_be_visible()
+        expect(panel.get_by_text(branch, exact=True)).to_be_visible()
+        expect(panel.get_by_text(remote, exact=True)).to_be_visible()
+        assert branch_reads == ["Services"]
+        assert not attached
+        page.screenshot(path=str(tmp_path / "workspace-repositories-branch-pr.png"))
+        panel.get_by_role("button", name="Link this PR", exact=True).click()
+        panel.get_by_text("Workspace repositories", exact=True).click()
     else:
         page.get_by_test_id("composer-pr-link").click()
     tabs = panel.get_by_role("tablist", name="Pull request", exact=True)
     tabs.get_by_role("tab", name="Review", exact=True).click()
+    if rail:
+        expect(
+            panel.get_by_role("region", name="Run a review").get_by_text(workspace)
+        ).to_be_visible()
     panel.get_by_role("combobox", name="Reviewer", exact=True).click()
     page.get_by_role("option", name="Codex", exact=True).click()
     panel.get_by_role("combobox", name="Review skill", exact=True).click()
@@ -1476,7 +1570,7 @@ def test_studio_review_from_pr_panel(
     panel.get_by_role("button", name="Refresh report", exact=True).click()
     expect(panel.get_by_role("heading", name="Keep the input validation")).to_be_visible()
     expect(panel.get_by_role("link", name="Open source")).to_have_attribute(
-        "href", f"https://github.com/contributor/app/blob/{head_sha}/src/app/main.py#L2"
+        "href", f"{head_repo}/blob/{head_sha}/src/app/main.py#L2"
     )
     page.screenshot(path=str(tmp_path / f"studio-review-{entry}-findings.png"))
     if entry == "rail":
@@ -1521,6 +1615,9 @@ def test_studio_review_from_pr_panel(
     )
     assert len(start_keys) == (2 if entry == "rail" else 1)
     assert len(set(start_keys)) == 1
+    if rail:
+        assert attached
+        assert branch_reads == ["Services"]
 
 
 # Two additions match "added": the first on line 2, the second on line 4.

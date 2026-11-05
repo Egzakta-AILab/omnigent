@@ -10,6 +10,9 @@ links findings to their captured changes.
 
 - `request-selection`: A single PR opens its details directly; multiple PRs open
   a list with navigation back from details.
+- `workspace-repositories`: In a session rooted at a workspace with a version 1
+  `repos.yaml`, choose a declared nested checkout, find its open GitHub branch
+  PR, and link it to the session. The agent keeps the workspace working directory.
 - `commit-history`: Comments interleave commit and force-push entries by time,
   with short commit links and exact timestamps on hover. Missing history is
   marked incomplete; the Comments badge counts only comments.
@@ -74,6 +77,9 @@ A session with one PR opens its details directly. With multiple PRs, select a
 request from the list first; **All pull requests** returns to that list.
 Choose Comments on any of these surfaces to see commit history.
 Choose **Review** to open private native reviews on the fork as session owner.
+Open **Workspace repositories** in Pull Requests to choose a checkout declared
+in the workspace manifest. **Find branch PR** looks up that checkout's branch.
+**Link this PR** makes the found PR available in the current session.
 
 With a pointer, hovering the composer's PR link previews each PR's status. The
 icon beside each title opens that PR in a new browser tab without opening the
@@ -122,7 +128,9 @@ pagination, old-side placement, revision, permission and failure matrices.
 drives **Review** from the rail, both composer layouts and Canvas. It scripts
 GitHub and review responses to check the skill picker, a retry after a lost
 start response, report repair, and navigation to a captured line. The rail
-case also checks that an earlier report stays separate from the updated diff.
+case selects a nested checkout, links its branch PR, and starts the review
+from the enclosing workspace. It also checks that an earlier report stays
+separate from the updated diff.
 Use the [local review walkthrough](../docs/studio/README.md#run-a-review-locally)
 for the native skill, transcript and saved-report checks.
 

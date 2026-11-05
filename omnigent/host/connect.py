@@ -4012,7 +4012,13 @@ class HostProcess:
         """
         from pathlib import Path
 
-        from omnigent.workspace_fs import WorkspaceReaderError, read_repository_branches
+        from omnigent.runtime.filesystem_registry import detect_git_root
+        from omnigent.workspace_fs import (
+            WorkspaceReader,
+            WorkspaceReaderError,
+            read_repository_branches,
+        )
+        from omnigent.workspace_repositories import read_workspace_repositories
 
         try:
             expanded = os.path.expanduser(frame.workspace)
@@ -4045,6 +4051,8 @@ class HostProcess:
                 payload = read_repository_branches(
                     Path(expanded), cast("list[dict[str, str]]", params["repositories"])
                 )
+            elif frame.op == "workspace_repositories":
+                payload = read_workspace_repositories(Path(expanded), params.get("repository"))
             else:
                 reader = self._workspace_reader(expanded)
                 with pr_resource.server_tracking(

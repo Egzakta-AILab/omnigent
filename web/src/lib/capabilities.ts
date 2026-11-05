@@ -357,6 +357,8 @@ export interface ServerInfo {
    * (``/v1/settings/session-title-instructions``); absent on older servers (off).
    */
   session_title_instructions?: boolean;
+  /** The session workspace can expose its repos.yaml repository catalog. */
+  workspace_repositories?: boolean;
   /** Private pull request review capture and execution are available. */
   studio_reviews?: boolean;
   /**
@@ -756,6 +758,7 @@ export async function resolveServerInfo(): Promise<ServerInfo> {
           session_title_instructions: data.session_title_instructions === true,
           admin_view: data.admin_view === true,
           comment_anchor_metadata: data.comment_anchor_metadata === true,
+          workspace_repositories: data.workspace_repositories === true,
           studio_reviews: data.studio_reviews === true,
           filesystem_attachments: parseFilesystemAttachments(data.filesystem_attachments),
           scheduled_task_projects: data.scheduled_task_projects === true,
