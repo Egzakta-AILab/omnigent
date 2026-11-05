@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO, Literal
 
-from pydantic import AwareDatetime, Field, computed_field, field_validator
+from pydantic import AwareDatetime, Field, RootModel, field_validator, model_validator
 
 from omnigent.studio.reviews.models import FrozenModel, ReviewRoleDigest, Sha
 
@@ -95,6 +95,22 @@ class ReproductionReceipt(FrozenModel):
         return command
 
 
+FixOutcome = Literal[
+    "fail_to_pass", "pass_to_pass", "fail_to_fail", "pass_to_fail", "inconclusive"
+]
+
+
+def _fix_outcome(before: ReproductionSide, after: ReproductionSide) -> FixOutcome:
+    if any(
+        side.state != "exited" or side.oom_killed or side.exit_code is None
+        for side in (before, after)
+    ):
+        return "inconclusive"
+    if before.exit_code == 0:
+        return "pass_to_pass" if after.exit_code == 0 else "pass_to_fail"
+    return "fail_to_pass" if after.exit_code == 0 else "fail_to_fail"
+
+
 class FixVerificationReceipt(FrozenModel):
     schema_version: Literal["omnigent.studio.fix-verification.v1"] = (
         "omnigent.studio.fix-verification.v1"
@@ -106,30 +122,54 @@ class FixVerificationReceipt(FrozenModel):
     proposed_patch_sha256: ReviewRoleDigest
     included_paths: tuple[str, ...]
     command: tuple[str, ...]
-    timeout_seconds: int
+    timeout_seconds: int = Field(ge=1, le=300)
     before: ReproductionSide
     after: ReproductionSide
 
-    @computed_field
-    @property
-    def outcome(
-        self,
-    ) -> Literal["fail_to_pass", "pass_to_pass", "fail_to_fail", "pass_to_fail", "inconclusive"]:
-        if any(
-            side.state != "exited" or side.oom_killed or side.exit_code is None
-            for side in (self.before, self.after)
+    outcome: FixOutcome
+
+    @model_validator(mode="after")
+    def validate_comparison(self) -> FixVerificationReceipt:
+        ReproductionReceipt.validate_command(self.command)
+        _validate_fix_paths(self.included_paths)
+        if (
+            self.before.commit != self.source.head_sha
+            or self.after.commit == self.before.commit
+            or len(self.after.commit) != len(self.before.commit)
+            or self.outcome != _fix_outcome(self.before, self.after)
         ):
-            return "inconclusive"
-        if self.before.exit_code == 0:
-            return "pass_to_pass" if self.after.exit_code == 0 else "pass_to_fail"
-        return "fail_to_pass" if self.after.exit_code == 0 else "fail_to_fail"
+            raise ValueError("The fix results do not match the captured head and outcome")
+        return self
+
+
+class FixCheckEvidence(FixVerificationReceipt):
+    patch: str = Field(min_length=1, max_length=MAX_FIX_PATCH_BYTES)
+
+    @field_validator("patch")
+    @classmethod
+    def validate_patch(cls, patch: str) -> str:
+        _validate_fix_patch(patch.encode())
+        return patch
+
+    @model_validator(mode="after")
+    def validate_patch_digest(self) -> FixCheckEvidence:
+        if hashlib.sha256(self.patch.encode()).hexdigest() != self.proposed_patch_sha256:
+            raise ValueError("The proposed patch differs from the patch used in the fix check")
+        return self
+
+
+ReviewCheckReceipt = ReproductionReceipt | FixCheckEvidence
+
+
+class ReviewCheckUpload(RootModel[ReviewCheckReceipt]):
+    pass
 
 
 class AttachedReproduction(FrozenModel):
     digest: ReviewRoleDigest
     attached_at: int
     provenance: Literal["uploaded"] = "uploaded"
-    receipt: ReproductionReceipt
+    receipt: ReviewCheckReceipt
 
 
 class SharedReproductionReceipt(FrozenModel):
@@ -140,15 +180,38 @@ class SharedReproductionReceipt(FrozenModel):
     head: ReproductionSide
 
 
+class SharedFixCheckEvidence(FrozenModel):
+    observed_at: AwareDatetime
+    image_id: str
+    timeout_seconds: int
+    before: ReproductionSide
+    after: ReproductionSide
+    outcome: FixOutcome
+    included_paths: tuple[str, ...]
+    patch: str
+
+
 class SharedAttachedReproduction(FrozenModel):
     digest: ReviewRoleDigest
     attached_at: int
     provenance: Literal["uploaded"] = "uploaded"
-    receipt: SharedReproductionReceipt
+    receipt: SharedReproductionReceipt | SharedFixCheckEvidence
 
     @classmethod
     def from_attachment(cls, entry: AttachedReproduction) -> SharedAttachedReproduction:
         receipt = entry.receipt
+        if isinstance(receipt, FixCheckEvidence):
+            shared = SharedFixCheckEvidence(
+                observed_at=receipt.observed_at,
+                image_id=receipt.image_id,
+                timeout_seconds=receipt.timeout_seconds,
+                before=receipt.before,
+                after=receipt.after,
+                outcome=receipt.outcome,
+                included_paths=receipt.included_paths,
+                patch=receipt.patch,
+            )
+            return cls(digest=entry.digest, attached_at=entry.attached_at, receipt=shared)
         return cls(
             digest=entry.digest,
             attached_at=entry.attached_at,
@@ -550,6 +613,30 @@ def reproduce(
     )
 
 
+def _validate_fix_patch(patch: bytes) -> None:
+    if not 0 < len(patch) <= MAX_FIX_PATCH_BYTES or b"\0" in patch:
+        raise ValueError("Provide a Git text patch of at most 128 KiB")
+    try:
+        text = patch.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("The proposed patch must be UTF-8 text") from exc
+    if "GIT binary patch" in text.splitlines():
+        raise ValueError("The proposed patch must contain text changes")
+
+
+def _validate_fix_paths(paths: tuple[str, ...]) -> None:
+    if len(paths) > 32 or any(
+        len(path.encode()) > 1024
+        or path in ("", ".")
+        or not path.isprintable()
+        or PurePosixPath(path).is_absolute()
+        or ".." in PurePosixPath(path).parts
+        or str(PurePosixPath(path)) != path
+        for path in paths
+    ):
+        raise ValueError("Provide up to 32 relative Git paths, without parent traversal")
+
+
 def verify_fix(
     *,
     repository: Path,
@@ -562,24 +649,8 @@ def verify_fix(
     paths: tuple[str, ...] = (),
 ) -> FixVerificationReceipt:
     """Compare the captured head with the same head plus a proposed text patch."""
-    if not 0 < len(patch) <= MAX_FIX_PATCH_BYTES or b"\0" in patch:
-        raise ValueError("Provide a Git text patch of at most 128 KiB")
-    try:
-        text = patch.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise ValueError("The proposed patch must be UTF-8 text") from exc
-    if "GIT binary patch" in text.splitlines():
-        raise ValueError("The proposed patch must contain text changes")
-    if len(paths) > 32 or any(
-        len(path.encode()) > 1024
-        or path in ("", ".")
-        or not path.isprintable()
-        or PurePosixPath(path).is_absolute()
-        or ".." in PurePosixPath(path).parts
-        or str(PurePosixPath(path)) != path
-        for path in paths
-    ):
-        raise ValueError("Provide up to 32 relative Git paths, without parent traversal")
+    _validate_fix_patch(patch)
+    _validate_fix_paths(paths)
     image_id, before, after = _compare_revisions(
         repository=repository,
         base=source.head_sha,
@@ -601,4 +672,5 @@ def verify_fix(
         timeout_seconds=timeout,
         before=before,
         after=after,
+        outcome=_fix_outcome(before, after),
     )

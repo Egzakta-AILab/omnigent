@@ -1722,10 +1722,30 @@ def test_studio_review_from_pr_panel(
             if route.request.method == "GET":
                 route.fulfill(json=attached_receipts)
                 return
-            assert route.request.method == "POST" and route.request.post_data_json == receipt
-            saved = {"digest": "8" * 64, "provenance": "uploaded", "receipt": receipt}
+            assert route.request.method == "POST"
+            uploaded = route.request.post_data_json
+            expected = (
+                receipt if not attached_receipts else {**fix_receipt, "patch": proposed_patch}
+            )
+            assert uploaded == expected
+            digest = "8" if not attached_receipts else "9"
+            saved = {"digest": digest * 64, "provenance": "uploaded", "receipt": uploaded}
             attached_receipts.append(saved)
             route.fulfill(json=saved)
+
+        proposed_patch = (
+            "diff --git a/src/app/main.py b/src/app/main.py\n"
+            "--- a/src/app/main.py\n+++ b/src/app/main.py\n"
+            "@@ -2 +2 @@\n-added line\n+verified input\n"
+        )
+        fix_receipt = {
+            **{key: value for key, value in receipt.items() if key not in {"base", "head"}},
+            "schema_version": "omnigent.studio.fix-verification.v1",
+            "included_paths": ["src/app"],
+            "before": receipt["head"],
+            "after": {**receipt["base"], "commit": "3" * 40},
+            "outcome": "fail_to_pass",
+        }
 
         def project_runs(route: Route) -> None:
             if route.request.method == "GET":
@@ -1963,6 +1983,30 @@ def test_studio_review_from_pr_panel(
         evidence_panel.scroll_into_view_if_needed()
         page.screenshot(path=str(tmp_path / "review-reproduction.png"))
         assert len(attached_receipts) == 1
+        evidence_panel.get_by_label("Reproduction receipt").set_input_files(
+            {
+                "name": "fix-check.json",
+                "mimeType": "application/json",
+                "buffer": json.dumps(fix_receipt).encode(),
+            }
+        )
+        evidence_panel.get_by_role("button", name="Attach receipt", exact=True).click()
+        expect(evidence_panel.get_by_role("alert")).to_have_text(
+            "Choose the Git patch used for this fix check."
+        )
+        evidence_panel.get_by_label("Proposed patch for fix checks").set_input_files(
+            {"name": "proposed.patch", "mimeType": "text/plain", "buffer": proposed_patch.encode()}
+        )
+        evidence_panel.get_by_role("button", name="Attach receipt", exact=True).click()
+        expect(evidence_panel.get_by_text("Failed before, passed after")).to_be_visible()
+        expect(evidence_panel.get_by_text(re.compile(r"Captured head.*Exit 1"))).to_be_visible()
+        expect(
+            evidence_panel.get_by_text(re.compile(r"Proposed snapshot.*Exit 0"))
+        ).to_be_visible()
+        evidence_panel.get_by_text("View proposed patch", exact=True).click()
+        expect(evidence_panel.get_by_text("+verified input", exact=False)).to_be_visible()
+        page.screenshot(path=str(tmp_path / "review-fix-check.png"))
+        assert len(attached_receipts) == 2
         consolidation.get_by_role("button", name="Show in captured diff", exact=True).click()
         captured_diff = runs_panel.get_by_role("region", name="Captured diff", exact=True)
         expect(captured_diff.get_by_text("Review finding · src/app/main.py:2")).to_be_visible()

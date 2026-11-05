@@ -282,6 +282,7 @@ function DiscussionContent({
                       run={discussion}
                       findingKey={selectedFinding.key}
                       viewerId={viewerId}
+                      canAttach={discussion.can_attach_evidence}
                     />
                   </>
                 )}

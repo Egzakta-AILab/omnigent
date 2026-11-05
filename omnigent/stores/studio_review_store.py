@@ -82,6 +82,8 @@ from omnigent.studio.reviews.reproduction import (
     AttachedReproduction,
     ReproductionReceipt,
     ReproductionSource,
+    ReviewCheckReceipt,
+    ReviewCheckUpload,
 )
 
 _ACTIONS: dict[ReviewAction, int] = {
@@ -629,7 +631,7 @@ class StudioReviewStore:
         self,
         run_id: str,
         finding_key: str,
-        receipt: ReproductionReceipt,
+        receipt: ReviewCheckReceipt,
         *,
         owner_user_id: str | None,
     ) -> AttachedReproduction:
@@ -656,7 +658,11 @@ class StudioReviewStore:
                     base_sha=target.base_sha,
                     head_sha=target.head_sha,
                 )
-                or (receipt.base.commit, receipt.head.commit) != (target.base_sha, target.head_sha)
+                or (
+                    isinstance(receipt, ReproductionReceipt)
+                    and (receipt.base.commit, receipt.head.commit)
+                    != (target.base_sha, target.head_sha)
+                )
             ):
                 raise ReviewConflictError(
                     "The receipt does not match this saved PR revision and diff"
@@ -747,7 +753,7 @@ class StudioReviewStore:
                     AttachedReproduction(
                         digest=digest.hex(),
                         attached_at=chunks[0].attached_at,
-                        receipt=ReproductionReceipt.model_validate_json(payload),
+                        receipt=ReviewCheckUpload.model_validate_json(payload).root,
                     )
                 )
             return results

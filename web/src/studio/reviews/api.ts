@@ -182,18 +182,27 @@ export interface ReproductionSide {
   output_truncated: boolean;
 }
 
+interface CheckReceiptSummary {
+  observed_at: string;
+  image_id: string;
+  command?: string[];
+  timeout_seconds: number;
+}
+
+export interface FixCheckSummary extends CheckReceiptSummary {
+  before: ReproductionSide;
+  after: ReproductionSide;
+  outcome: "fail_to_pass" | "pass_to_pass" | "fail_to_fail" | "pass_to_fail" | "inconclusive";
+  included_paths: string[];
+  patch: string;
+}
+
 export interface AttachedReproduction {
   digest: string;
   attached_at: number;
   provenance: "uploaded";
-  receipt: {
-    observed_at: string;
-    image_id: string;
-    command?: string[];
-    timeout_seconds: number;
-    base: ReproductionSide;
-    head: ReproductionSide;
-  };
+  receipt:
+    (CheckReceiptSummary & { base: ReproductionSide; head: ReproductionSide }) | FixCheckSummary;
 }
 
 export type DiscussionAnchor =
@@ -264,6 +273,7 @@ export interface ReviewDiscussion {
   questions?: ReviewQuestion[];
   agent_answers?: SharedReviewAnswer[];
   can_comment: boolean;
+  can_attach_evidence?: boolean;
   can_ask?: boolean;
   can_use_review_workspace?: boolean;
   review_workspace_host_id?: string | null;
@@ -335,12 +345,33 @@ export function listFindingReproductions(runId: string, findingKey: string, sign
   return reviewRequest<AttachedReproduction[]>(reproductionPath(runId, findingKey), { signal });
 }
 
-export async function attachFindingReproduction(runId: string, findingKey: string, file: File) {
-  if (file.size > 192 * 1024) throw new Error("Choose a receipt smaller than 192 KiB.");
+export async function attachFindingReproduction(
+  runId: string,
+  findingKey: string,
+  file: File,
+  patch?: File,
+) {
+  if (file.size + (patch?.size ?? 0) > 192 * 1024)
+    throw new Error("Choose files that total at most 192 KiB.");
+  let body = await file.text();
+  let receipt: Record<string, unknown> | null;
+  try {
+    receipt = JSON.parse(body) as Record<string, unknown> | null;
+  } catch {
+    throw new Error("Choose a valid JSON check receipt.");
+  }
+  if (receipt?.schema_version === "omnigent.studio.fix-verification.v1") {
+    if (!patch) throw new Error("Choose the Git patch used for this fix check.");
+    body = JSON.stringify({ ...receipt, patch: await patch.text() });
+    if (new TextEncoder().encode(body).length > 192 * 1024)
+      throw new Error("The encoded receipt and patch exceed 192 KiB.");
+  } else if (patch) {
+    throw new Error("Choose a fix check receipt to attach a proposed patch.");
+  }
   return reviewRequest<AttachedReproduction>(reproductionPath(runId, findingKey), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: await file.text(),
+    body,
   });
 }
 
