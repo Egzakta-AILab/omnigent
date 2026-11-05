@@ -2,7 +2,8 @@
 
 import pytest
 
-from omnigent.studio.reviews.evidence import changed_anchors
+from omnigent.studio.reviews.discussion import DiffDiscussionAnchor
+from omnigent.studio.reviews.evidence import changed_anchors, displayed_anchors
 from omnigent.studio.reviews.report import ReviewFinding, ReviewReport, qualify_citations
 
 
@@ -25,6 +26,15 @@ def test_old_and_new_paths_and_line_numbers_survive_a_rename():
         ("new name.py", "head", 25),
         ("new name.py", "head", 26),
     }
+    assert displayed_anchors(patch) == changed_anchors(patch) | {
+        ("café.py", "base", 10),
+        ("new name.py", "head", 24),
+    }
+    selection = DiffDiscussionAnchor(
+        kind="diff", path="new name.py", side="head", start=24, end=26
+    )
+    assert selection.is_in(displayed_anchors(patch))
+    assert not selection.is_in(changed_anchors(patch))
 
 
 def test_context_binary_and_zero_count_sides_are_not_citable():

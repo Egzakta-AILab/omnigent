@@ -3,19 +3,26 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Annotated, Any, Literal
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Annotated, Any, Literal, TypeVar
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 
 from omnigent.db.utils import builtin_agent_id
-from omnigent.entities import Conversation
+from omnigent.entities import Conversation, Project
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.harness_availability import reported_harness_availability
 from omnigent.native.native_coding_agents import native_coding_agent_for_agent_name
 from omnigent.runner.session_prs import PullRequestRef
-from omnigent.server.auth import AuthProvider
+from omnigent.server.auth import (
+    RESERVED_USER_LOCAL,
+    RESERVED_USER_PUBLIC,
+    AuthProvider,
+    SharingMode,
+)
 from omnigent.server.routes._auth_helpers import require_user
 from omnigent.server.routes._content_type import require_json_content_type
 from omnigent.server.routes._host_filesystem import (
@@ -46,7 +53,23 @@ from omnigent.stores.studio_review_store import (
     ReviewNotFoundError,
     StudioReviewStore,
 )
-from omnigent.studio.reviews.evidence import Anchor, Side, changed_anchors, changed_lines
+from omnigent.studio.reviews.discussion import (
+    AccountId,
+    CreateReviewComment,
+    FindingDiscussionAnchor,
+    ReviewCollaboratorInput,
+    ReviewComment,
+    ReviewDiscussionFinding,
+    ReviewDiscussionReport,
+    ReviewDiscussionView,
+)
+from omnigent.studio.reviews.evidence import (
+    Anchor,
+    Side,
+    changed_anchors,
+    changed_lines,
+    displayed_anchors,
+)
 from omnigent.studio.reviews.launch import SKILL_NAME, review_prompt, run_review, verified_patch
 from omnigent.studio.reviews.models import (
     CaptureResult,
@@ -75,6 +98,7 @@ from omnigent.studio.reviews.reproduction import (
     MAX_REPRODUCTION_BYTES,
     AttachedReproduction,
     ReproductionReceipt,
+    SharedAttachedReproduction,
 )
 from omnigent.studio.reviews.service import (
     CaptureProjectReviewRequest,
@@ -100,6 +124,45 @@ IdempotencyKey = Annotated[
     Header(alias="Idempotency-Key", min_length=1, max_length=128, pattern=r"^[!-~]+$"),
 ]
 FindingKey = Annotated[str, Path(pattern=r"^[0-9a-f]{64}$")]
+_RequestBody = TypeVar("_RequestBody", bound=BaseModel)
+
+
+async def _bounded_json(
+    request: Request, model: type[_RequestBody], *, limit: int
+) -> _RequestBody:
+    payload = bytearray()
+    async for chunk in request.stream():
+        if len(chunk) > limit - len(payload):
+            raise HTTPException(413, f"Request exceeds {limit // 1024} KiB")
+        payload.extend(chunk)
+    try:
+        return model.model_validate_json(payload, strict=True)
+    except ValidationError as exc:
+        raise HTTPException(422, "The request body is invalid") from exc
+
+
+def _discussion_request_schema(model: type[BaseModel]) -> dict[str, object]:
+    schema = model.model_json_schema(ref_template="#/components/schemas/{model}")
+    schema.pop("$defs", None)
+    return {
+        "requestBody": {
+            "required": True,
+            "content": {"application/json": {"schema": schema}},
+        }
+    }
+
+
+@dataclass(frozen=True)
+class DiscussionAccess:
+    run: ReviewRun
+    project: Project
+    actor: str | None
+    owner: str | None
+    mode: SharingMode
+
+    @property
+    def can_comment(self) -> bool:
+        return self.actor == self.owner or self.mode == SharingMode.ON
 
 
 class ReviewListResponse(BaseModel):
@@ -1156,10 +1219,16 @@ def create_studio_reviews_router(
         return report
 
     async def require_saved_finding(
-        request: Request, run_id: str, finding_key: str
+        request: Request, run_id: str, finding_key: str, *, allow_collaborator: bool = False
     ) -> tuple[ReviewRun, str | None]:
-        run = await owned_run(request, run_id)
-        owner = require_user(request, auth_provider)
+        try:
+            run = await owned_run(request, run_id)
+            owner = require_user(request, auth_provider)
+        except HTTPException as exc:
+            if not allow_collaborator or exc.status_code != 404:
+                raise
+            access = await discussion_access(request, run_id)
+            run, owner = access.run, access.owner
         anchors = await run_anchors(run.id, owner)
         if anchors is not None:
             report = await read_consolidation(run, anchors, include_finding_keys=True)
@@ -1169,21 +1238,219 @@ def create_studio_reviews_router(
 
     @router.get(
         "/studio/review-runs/{run_id}/findings/{finding_key}/reproductions",
-        response_model=list[AttachedReproduction],
+        response_model=list[AttachedReproduction | SharedAttachedReproduction],
     )
     async def get_finding_reproductions(
         request: Request, response: Response, run_id: str, finding_key: FindingKey
-    ) -> list[AttachedReproduction]:
-        run, owner = await require_saved_finding(request, run_id, finding_key)
+    ) -> list[AttachedReproduction | SharedAttachedReproduction]:
+        run, owner = await require_saved_finding(
+            request, run_id, finding_key, allow_collaborator=True
+        )
         response.headers["Cache-Control"] = "no-store"
+        actor = require_user(request, auth_provider)
+        try:
+            entries = await asyncio.to_thread(
+                review_store.list_reproductions,
+                run.id,
+                finding_key,
+                owner_user_id=owner,
+                actor=actor,
+            )
+            return [
+                entry if actor == owner else SharedAttachedReproduction.from_attachment(entry)
+                for entry in entries
+            ]
+        except ReviewNotFoundError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ReviewConflictError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    async def discussion_access(request: Request, run_id: str) -> DiscussionAccess:
+        run_id = _identifier(run_id)
+        actor = require_user(request, auth_provider)
+        mode = getattr(request.app.state, "sharing_mode", lambda: SharingMode.ON)()
+        owner = actor
+        run = await asyncio.to_thread(review_store.get_run, run_id, owner_user_id=owner)
+        if (
+            run is None
+            and actor is not None
+            and 0 < len(actor) <= 128
+            and mode in (SharingMode.ON, SharingMode.READ_ONLY)
+        ):
+            owner = await asyncio.to_thread(review_store.discussion_owner, run_id, actor)
+            if owner is not None:
+                run = await asyncio.to_thread(review_store.get_run, run_id, owner_user_id=owner)
+        if run is None or run.target.source_project_id is None:
+            raise HTTPException(404, "Review run not found")
+        if not await asyncio.to_thread(
+            review_store.review_discussion_owner_current, run.id, owner
+        ):
+            raise HTTPException(404, "Review discussion not found for this account")
+        project = await require_owned_project(project_store, run.target.source_project_id, owner)
+        return DiscussionAccess(run, project, actor, owner, mode)
+
+    @router.get("/studio/review-runs/{run_id}/discussion", response_model=ReviewDiscussionView)
+    async def get_review_discussion(
+        request: Request, response: Response, run_id: str
+    ) -> ReviewDiscussionView:
+        access = await discussion_access(request, run_id)
+        run, target = access.run, access.run.target
+        patch = await saved_run_patch(run.id, access.owner)
+        if patch is None or run.patch_sha256 is None:
+            raise HTTPException(404, "This review has no captured diff")
+        report = await read_consolidation(run, changed_anchors(patch), include_finding_keys=True)
+        profiles = {member.id: member.profile for member in run.reviewers}
+        reports = []
+        for member in report.reviewers:
+            profile = profiles[member.review_id]
+            reports.append(
+                ReviewDiscussionReport(
+                    key=hashlib.sha256(f"discussion:{member.review_id}".encode()).hexdigest(),
+                    label=profile.role.label if profile.role else profile.skill or profile.harness,
+                    state=member.report.state,
+                    summary=member.report.summary,
+                )
+            )
+        try:
+            comments = await asyncio.to_thread(
+                review_store.list_discussion_comments,
+                run.id,
+                actor=access.actor,
+                owner=access.owner,
+            )
+            collaborators = (
+                await asyncio.to_thread(
+                    review_store.list_review_collaborators, run.id, owner=access.owner
+                )
+                if access.actor == access.owner and access.owner is not None
+                else None
+            )
+        except ReviewNotFoundError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        response.headers["Cache-Control"] = "no-store"
+        return ReviewDiscussionView(
+            id=run.id,
+            project_name=access.project.name,
+            repository=target.repository,
+            pr_url=target.pr_url,
+            pr_number=target.pr_number,
+            base_sha=target.base_sha,
+            head_sha=target.head_sha,
+            patch_sha256=run.patch_sha256,
+            patch=patch,
+            reports=reports,
+            findings=[
+                ReviewDiscussionFinding(key=entry.finding_key, finding=entry.finding)
+                for entry in report.findings
+                if entry.finding_key is not None
+            ],
+            comments=comments,
+            can_comment=access.can_comment,
+            collaborators=collaborators,
+            sharing_available=(
+                access.actor == access.owner
+                and access.owner not in (None, RESERVED_USER_LOCAL, RESERVED_USER_PUBLIC)
+                and access.mode == SharingMode.ON
+                and permission_store is not None
+            ),
+        )
+
+    @router.post(
+        "/studio/review-runs/{run_id}/discussion/comments",
+        response_model=ReviewComment,
+        dependencies=_WRITE_GATES,
+        openapi_extra=_discussion_request_schema(CreateReviewComment),
+    )
+    async def create_review_discussion_comment(request: Request, run_id: str) -> ReviewComment:
+        access = await discussion_access(request, run_id)
+        if not access.can_comment or (access.actor is not None and len(access.actor) > 128):
+            raise HTTPException(403, "This account cannot comment on the review")
+        body = await _bounded_json(request, CreateReviewComment, limit=20 * 1024)
+        patch = await saved_run_patch(access.run.id, access.owner)
+        if patch is None:
+            raise HTTPException(404, "This review has no captured diff")
+        anchor = body.anchor
+        if isinstance(anchor, FindingDiscussionAnchor):
+            report = await read_consolidation(
+                access.run, changed_anchors(patch), include_finding_keys=True
+            )
+            valid = any(entry.finding_key == anchor.finding_key for entry in report.findings)
+        else:
+            valid = anchor.is_in(displayed_anchors(patch))
+        if not valid:
+            raise HTTPException(422, "The discussion anchor is outside the captured diff")
         try:
             return await asyncio.to_thread(
-                review_store.list_reproductions, run.id, finding_key, owner_user_id=owner
+                review_store.post_discussion_comment,
+                access.run.id,
+                body,
+                actor=access.actor,
+                owner=access.owner,
             )
         except ReviewNotFoundError as exc:
             raise HTTPException(404, str(exc)) from exc
         except ReviewConflictError as exc:
             raise HTTPException(409, str(exc)) from exc
+
+    @router.post(
+        "/studio/review-runs/{run_id}/discussion/collaborators",
+        status_code=204,
+        dependencies=_WRITE_GATES,
+        openapi_extra=_discussion_request_schema(ReviewCollaboratorInput),
+    )
+    async def share_review_discussion(request: Request, run_id: str) -> Response:
+        run = await owned_run(request, run_id)
+        owner = require_user(request, auth_provider)
+        mode = getattr(request.app.state, "sharing_mode", lambda: SharingMode.ON)()
+        if (
+            owner is None
+            or len(owner) > 128
+            or owner in (RESERVED_USER_LOCAL, RESERVED_USER_PUBLIC)
+            or mode != SharingMode.ON
+            or permission_store is None
+        ):
+            raise HTTPException(403, "Review sharing is unavailable on this instance")
+        if run.patch_sha256 is None:
+            raise HTTPException(404, "This review has no captured diff")
+        body = await _bounded_json(request, ReviewCollaboratorInput, limit=2 * 1024)
+        if body.user_id in (owner, RESERVED_USER_PUBLIC, RESERVED_USER_LOCAL):
+            raise HTTPException(422, "Choose another Omnigent account")
+        account = await asyncio.to_thread(permission_store.get_user, body.user_id)
+        if account is None or account.id != body.user_id:
+            raise HTTPException(404, "Omnigent account not found")
+        try:
+            await asyncio.to_thread(
+                review_store.set_review_collaborator,
+                run.id,
+                account.id,
+                owner=owner,
+                target_generation=account.account_generation,
+            )
+        except ReviewNotFoundError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ReviewConflictError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return Response(status_code=204)
+
+    @router.delete(
+        "/studio/review-runs/{run_id}/discussion/collaborators",
+        status_code=204,
+        dependencies=[Depends(require_trusted_origin)],
+    )
+    async def revoke_review_discussion(
+        request: Request, run_id: str, user_id: AccountId
+    ) -> Response:
+        run = await owned_run(request, run_id)
+        owner = require_user(request, auth_provider)
+        if owner is None:
+            raise HTTPException(404, "Review collaborator not found")
+        try:
+            await asyncio.to_thread(
+                review_store.set_review_collaborator, run.id, user_id, owner=owner, revoke=True
+            )
+        except ReviewNotFoundError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        return Response(status_code=204)
 
     @router.post(
         "/studio/review-runs/{run_id}/findings/{finding_key}/reproductions",
@@ -1205,15 +1472,7 @@ def create_studio_reviews_router(
     ) -> AttachedReproduction:
         run, owner = await require_saved_finding(request, run_id, finding_key)
         response.headers["Cache-Control"] = "no-store"
-        payload = bytearray()
-        async for chunk in request.stream():
-            if len(chunk) > MAX_REPRODUCTION_BYTES - len(payload):
-                raise HTTPException(413, "The reproduction receipt exceeds 192 KiB")
-            payload.extend(chunk)
-        try:
-            receipt = ReproductionReceipt.model_validate_json(payload, strict=True)
-        except ValidationError as exc:
-            raise HTTPException(422, "Choose a valid Omnigent reproduction receipt") from exc
+        receipt = await _bounded_json(request, ReproductionReceipt, limit=MAX_REPRODUCTION_BYTES)
         try:
             return await asyncio.to_thread(
                 review_store.attach_reproduction, run.id, finding_key, receipt, owner_user_id=owner

@@ -27,7 +27,11 @@ function hasTerminalControls(value: string) {
   });
 }
 
-function rerunCommand(run: ReviewRun, receipt: AttachedReproduction["receipt"]) {
+function rerunCommand(
+  run: Pick<ReviewRun, "id" | "target">,
+  receipt: AttachedReproduction["receipt"],
+) {
+  if (!receipt.command) throw new Error("The command is unavailable.");
   const server = getCliServerUrl();
   const mode = new URL(server).protocol === "http:" ? "local" : "server";
   const relative = run.target.repository_path;
@@ -91,7 +95,7 @@ function Reproductions({
   findingKey,
   viewerId,
 }: {
-  run: ReviewRun;
+  run: Pick<ReviewRun, "id"> & Partial<Pick<ReviewRun, "target">>;
   findingKey: string;
   viewerId: string | null;
 }) {
@@ -104,6 +108,8 @@ function Reproductions({
     queryKey,
     queryFn: ({ signal }) => listFindingReproductions(run.id, findingKey, signal),
     retry: false,
+    staleTime: 0,
+    gcTime: run.target ? undefined : 0,
   });
   const attach = useMutation({
     mutationFn: (selected: File) => attachFindingReproduction(run.id, findingKey, selected),
@@ -115,8 +121,9 @@ function Reproductions({
   });
 
   async function copyRerun(receipt: AttachedReproduction["receipt"]) {
+    if (!run.target) return;
     try {
-      await copyText(rerunCommand(run, receipt));
+      await copyText(rerunCommand({ id: run.id, target: run.target }, receipt));
       setCopyStatus("Rerun command copied.");
     } catch {
       setCopyStatus("Couldn’t copy the rerun command.");
@@ -125,33 +132,37 @@ function Reproductions({
 
   return (
     <section aria-label="Finding reproductions" className="mt-2 space-y-2 text-sm">
-      <p className="text-xs text-muted-foreground">
-        Attach a receipt from the Studio reproduce command for this saved review run.
-      </p>
-      <form
-        className="flex flex-wrap items-center gap-2"
-        onSubmit={(event) => {
-          event.preventDefault();
-          if (file && !attach.isPending) attach.mutate(file);
-        }}
-      >
-        <input
-          ref={fileInput}
-          className="max-w-full text-xs"
-          type="file"
-          accept=".json,application/json"
-          aria-label="Reproduction receipt"
-          disabled={attach.isPending}
-          onChange={(event) => {
-            setFile(event.target.files?.[0]);
-            attach.reset();
-          }}
-        />
-        <Button type="submit" size="sm" variant="outline" disabled={!file || attach.isPending}>
-          {attach.isPending ? "Attaching…" : "Attach receipt"}
-        </Button>
-      </form>
-      {attach.error && <p role="alert">{attach.error.message}</p>}
+      {run.target && (
+        <>
+          <p className="text-xs text-muted-foreground">
+            Attach a receipt from the Studio reproduce command for this saved review run.
+          </p>
+          <form
+            className="flex flex-wrap items-center gap-2"
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (file && !attach.isPending) attach.mutate(file);
+            }}
+          >
+            <input
+              ref={fileInput}
+              className="max-w-full text-xs"
+              type="file"
+              accept=".json,application/json"
+              aria-label="Reproduction receipt"
+              disabled={attach.isPending}
+              onChange={(event) => {
+                setFile(event.target.files?.[0]);
+                attach.reset();
+              }}
+            />
+            <Button type="submit" size="sm" variant="outline" disabled={!file || attach.isPending}>
+              {attach.isPending ? "Attaching…" : "Attach receipt"}
+            </Button>
+          </form>
+          {attach.error && <p role="alert">{attach.error.message}</p>}
+        </>
+      )}
       {receipts.isFetching && <p role="status">Loading reproductions…</p>}
       {receipts.error && <p role="alert">{receipts.error.message}</p>}
       {receipts.isSuccess && !receipts.isFetching && receipts.data.length === 0 && (
@@ -165,26 +176,30 @@ function Reproductions({
               <span className="text-xs font-medium">
                 Uploaded receipt · {new Date(receipt.observed_at).toLocaleString()}
               </span>
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={receipt.command.some(hasTerminalControls)}
-                onClick={() => void copyRerun(receipt)}
-              >
-                Copy rerun command
-              </Button>
+              {run.target && receipt.command && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={receipt.command.some(hasTerminalControls)}
+                  onClick={() => void copyRerun(receipt)}
+                >
+                  Copy rerun command
+                </Button>
+              )}
             </div>
             <p className="break-all font-mono text-xs" title="Sandbox image ID">
               {receipt.image_id}
             </p>
-            {receipt.command.some(hasTerminalControls) && (
+            {run.target && receipt.command?.some(hasTerminalControls) && (
               <p className="text-xs text-muted-foreground">
                 This command contains terminal control characters. Re-enter it manually.
               </p>
             )}
-            <p className="whitespace-pre-wrap break-all font-mono text-xs">
-              {receipt.command.map(shellQuote).join(" ")}
-            </p>
+            {run.target && receipt.command && (
+              <p className="whitespace-pre-wrap break-all font-mono text-xs">
+                {receipt.command.map(shellQuote).join(" ")}
+              </p>
+            )}
             <ReproductionOutcome label="Base" side={receipt.base} />
             <ReproductionOutcome label="Head" side={receipt.head} />
           </article>

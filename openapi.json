@@ -2336,6 +2336,53 @@
         "title": "DailyCost",
         "type": "object"
       },
+      "DiffDiscussionAnchor": {
+        "additionalProperties": false,
+        "properties": {
+          "end": {
+            "format": "int64",
+            "maximum": 2147483647.0,
+            "minimum": 1.0,
+            "title": "End",
+            "type": "integer"
+          },
+          "kind": {
+            "const": "diff",
+            "title": "Kind",
+            "type": "string"
+          },
+          "path": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "title": "Path",
+            "type": "string"
+          },
+          "side": {
+            "enum": [
+              "base",
+              "head"
+            ],
+            "title": "Side",
+            "type": "string"
+          },
+          "start": {
+            "format": "int64",
+            "maximum": 2147483647.0,
+            "minimum": 1.0,
+            "title": "Start",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "path",
+          "side",
+          "start",
+          "end"
+        ],
+        "title": "DiffDiscussionAnchor",
+        "type": "object"
+      },
       "ElicitationRequestEvent": {
         "description": "Synchronous request for a decision from upstream.\n\nEmitted by Omnigent (or, under the new contract, by a harness)\nwhen the LLM / a tool / a policy needs a verdict before\nproceeding. The consumer replies via\n`POST /v1/sessions/{session_id}/events` with\n`type == \"approval\"` and\n`omnigent.server.schemas.ElicitationResult` fields in\n`data`. This preserves MCP request/reply correlation by id\nwithout threading elicitations through PATCH.\n\nWire shape matches the existing emit at\n`omnigent/runtime/policies/approval.py:175`.",
         "properties": {
@@ -3367,6 +3414,27 @@
           "all_types"
         ],
         "title": "FilesystemAttachmentsInfo",
+        "type": "object"
+      },
+      "FindingDiscussionAnchor": {
+        "additionalProperties": false,
+        "properties": {
+          "finding_key": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Finding Key",
+            "type": "string"
+          },
+          "kind": {
+            "const": "finding",
+            "title": "Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "finding_key"
+        ],
+        "title": "FindingDiscussionAnchor",
         "type": "object"
       },
       "FunctionCallData": {
@@ -6321,6 +6389,231 @@
           "error"
         ],
         "title": "RetryEvent",
+        "type": "object"
+      },
+      "ReviewComment": {
+        "additionalProperties": false,
+        "properties": {
+          "anchor": {
+            "discriminator": {
+              "mapping": {
+                "diff": "#/components/schemas/DiffDiscussionAnchor",
+                "finding": "#/components/schemas/FindingDiscussionAnchor"
+              },
+              "propertyName": "kind"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/FindingDiscussionAnchor"
+              },
+              {
+                "$ref": "#/components/schemas/DiffDiscussionAnchor"
+              }
+            ],
+            "title": "Anchor"
+          },
+          "author": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Author"
+          },
+          "body": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Body",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "int64",
+            "title": "Created At",
+            "type": "integer"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "anchor",
+          "body",
+          "author",
+          "created_at"
+        ],
+        "title": "ReviewComment",
+        "type": "object"
+      },
+      "ReviewDiscussionFinding": {
+        "additionalProperties": false,
+        "properties": {
+          "finding": {
+            "$ref": "#/components/schemas/ReviewFinding"
+          },
+          "key": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "finding"
+        ],
+        "title": "ReviewDiscussionFinding",
+        "type": "object"
+      },
+      "ReviewDiscussionReport": {
+        "additionalProperties": false,
+        "properties": {
+          "key": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Key",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "pending",
+              "incomplete",
+              "ready"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Summary"
+          }
+        },
+        "required": [
+          "key",
+          "label",
+          "state",
+          "summary"
+        ],
+        "title": "ReviewDiscussionReport",
+        "type": "object"
+      },
+      "ReviewDiscussionView": {
+        "additionalProperties": false,
+        "properties": {
+          "base_sha": {
+            "pattern": "^[0-9a-f]{40}(?:[0-9a-f]{24})?$",
+            "title": "Base Sha",
+            "type": "string"
+          },
+          "can_comment": {
+            "title": "Can Comment",
+            "type": "boolean"
+          },
+          "collaborators": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Collaborators"
+          },
+          "comments": {
+            "items": {
+              "$ref": "#/components/schemas/ReviewComment"
+            },
+            "title": "Comments",
+            "type": "array"
+          },
+          "findings": {
+            "items": {
+              "$ref": "#/components/schemas/ReviewDiscussionFinding"
+            },
+            "title": "Findings",
+            "type": "array"
+          },
+          "head_sha": {
+            "pattern": "^[0-9a-f]{40}(?:[0-9a-f]{24})?$",
+            "title": "Head Sha",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "patch": {
+            "title": "Patch",
+            "type": "string"
+          },
+          "patch_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Patch Sha256",
+            "type": "string"
+          },
+          "pr_number": {
+            "format": "int64",
+            "title": "Pr Number",
+            "type": "integer"
+          },
+          "pr_url": {
+            "title": "Pr Url",
+            "type": "string"
+          },
+          "project_name": {
+            "title": "Project Name",
+            "type": "string"
+          },
+          "reports": {
+            "items": {
+              "$ref": "#/components/schemas/ReviewDiscussionReport"
+            },
+            "title": "Reports",
+            "type": "array"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          },
+          "sharing_available": {
+            "title": "Sharing Available",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "project_name",
+          "repository",
+          "pr_url",
+          "pr_number",
+          "base_sha",
+          "head_sha",
+          "patch_sha256",
+          "patch",
+          "reports",
+          "findings",
+          "comments",
+          "can_comment",
+          "sharing_available"
+        ],
+        "title": "ReviewDiscussionView",
         "type": "object"
       },
       "ReviewEvent": {
@@ -11547,6 +11840,71 @@
           }
         },
         "title": "SetSharingRequest",
+        "type": "object"
+      },
+      "SharedAttachedReproduction": {
+        "additionalProperties": false,
+        "properties": {
+          "attached_at": {
+            "format": "int64",
+            "title": "Attached At",
+            "type": "integer"
+          },
+          "digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Digest",
+            "type": "string"
+          },
+          "provenance": {
+            "const": "uploaded",
+            "default": "uploaded",
+            "title": "Provenance",
+            "type": "string"
+          },
+          "receipt": {
+            "$ref": "#/components/schemas/SharedReproductionReceipt"
+          }
+        },
+        "required": [
+          "digest",
+          "attached_at",
+          "receipt"
+        ],
+        "title": "SharedAttachedReproduction",
+        "type": "object"
+      },
+      "SharedReproductionReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "base": {
+            "$ref": "#/components/schemas/ReproductionSide"
+          },
+          "head": {
+            "$ref": "#/components/schemas/ReproductionSide"
+          },
+          "image_id": {
+            "title": "Image Id",
+            "type": "string"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "title": "Observed At",
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "format": "int64",
+            "title": "Timeout Seconds",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "observed_at",
+          "image_id",
+          "timeout_seconds",
+          "base",
+          "head"
+        ],
+        "title": "SharedReproductionReceipt",
         "type": "object"
       },
       "SkillContentResponse": {
@@ -22524,6 +22882,237 @@
         ]
       }
     },
+    "/v1/studio/review-runs/{run_id}/discussion": {
+      "get": {
+        "operationId": "get_review_discussion_v1_studio_review_runs__run_id__discussion_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewDiscussionView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Review Discussion",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/studio/review-runs/{run_id}/discussion/collaborators": {
+      "delete": {
+        "operationId": "revoke_review_discussion_v1_studio_review_runs__run_id__discussion_collaborators_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[^\\s\\x00-\\x1f\\x7f]{1,128}$",
+              "title": "User Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Revoke Review Discussion",
+        "tags": [
+          "sessions"
+        ]
+      },
+      "post": {
+        "operationId": "share_review_discussion_v1_studio_review_runs__run_id__discussion_collaborators_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "user_id": {
+                    "pattern": "^[^\\s\\x00-\\x1f\\x7f]{1,128}$",
+                    "title": "User Id",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "user_id"
+                ],
+                "title": "ReviewCollaboratorInput",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Share Review Discussion",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/studio/review-runs/{run_id}/discussion/comments": {
+      "post": {
+        "operationId": "create_review_discussion_comment_v1_studio_review_runs__run_id__discussion_comments_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "anchor": {
+                    "discriminator": {
+                      "mapping": {
+                        "diff": "#/components/schemas/DiffDiscussionAnchor",
+                        "finding": "#/components/schemas/FindingDiscussionAnchor"
+                      },
+                      "propertyName": "kind"
+                    },
+                    "oneOf": [
+                      {
+                        "$ref": "#/components/schemas/FindingDiscussionAnchor"
+                      },
+                      {
+                        "$ref": "#/components/schemas/DiffDiscussionAnchor"
+                      }
+                    ],
+                    "title": "Anchor"
+                  },
+                  "body": {
+                    "maxLength": 2000,
+                    "minLength": 1,
+                    "title": "Body",
+                    "type": "string"
+                  },
+                  "id": {
+                    "title": "Id",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "anchor",
+                  "body"
+                ],
+                "title": "CreateReviewComment",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewComment"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Review Discussion Comment",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
     "/v1/studio/review-runs/{run_id}/findings/{finding_key}/reproductions": {
       "get": {
         "operationId": "get_finding_reproductions_v1_studio_review_runs__run_id__findings__finding_key__reproductions_get",
@@ -22554,7 +23143,14 @@
               "application/json": {
                 "schema": {
                   "items": {
-                    "$ref": "#/components/schemas/AttachedReproduction"
+                    "anyOf": [
+                      {
+                        "$ref": "#/components/schemas/AttachedReproduction"
+                      },
+                      {
+                        "$ref": "#/components/schemas/SharedAttachedReproduction"
+                      }
+                    ]
                   },
                   "title": "Response Get Finding Reproductions V1 Studio Review Runs  Run Id  Findings  Finding Key  Reproductions Get",
                   "type": "array"

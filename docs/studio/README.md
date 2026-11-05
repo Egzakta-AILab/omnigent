@@ -397,6 +397,22 @@ the base and head results separately. **Copy rerun command** uses the same
 image ID and arguments. Run it on a Docker-enabled machine with the required
 checkout. Attached receipts follow the review run's private access rules.
 
+### Discuss a saved review
+
+Select **Discuss finding** to open its thread, or **Discuss review** to open
+the full captured diff. Click a line number or drag across one side of a hunk
+to select a range. Replies stay in Omnigent and remain attached to that saved
+revision.
+
+On a multi-user instance with sharing enabled, the run owner can open **Share
+this review**, grant access to an existing Omnigent account ID, and send the
+link using **Copy review link**. A collaborator can see this review's captured
+diff, finding summaries, and uploaded reproduction output. They can reply
+while the instance allows editing. The grant covers this run within its project
+and repository. **Revoke access** removes the collaborator's review and
+receipt access. Capture a new run to share a review from before the instance
+recorded the owner's account identity with each capture.
+
 For any workspace, open **Project settings → Repositories**, or open
 **Manage repositories** from the PR panel. The managers run on the connected
 macOS or Linux host. Choose a scan depth from 0 to 5 and click **Scan

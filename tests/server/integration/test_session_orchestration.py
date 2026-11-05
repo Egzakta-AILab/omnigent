@@ -1079,6 +1079,84 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
         save_assistant_message(next(iter(members)), "A later response from the reviewer.")
         assert (await auth_client.get(f"{run_path}/report")).json() == ready.json()
         assert (await auth_client.get(reproduction_path)).json() == [evidence]
+        discussion_path = f"{run_path}/discussion"
+        collaborators_path = f"{discussion_path}/collaborators"
+        assert (await auth_client.get(discussion_path, headers=foreign_headers)).status_code == 404
+        permissions.ensure_user("bob")
+        grant = await auth_client.post(collaborators_path, json={"user_id": "bob"})
+        assert grant.status_code == 204, grant.text
+        shared = await auth_client.get(discussion_path, headers=foreign_headers)
+        assert shared.status_code == 200, shared.text
+        view = shared.json()
+        assert view["collaborators"] is None and view["can_comment"] is True
+        assert (view["base_sha"], view["head_sha"], view["patch"]) == (
+            base_sha,
+            current_head,
+            captured_patch,
+        )
+        assert view["findings"][0]["key"] == finding_key
+        assert {"workspace", "host_id", "reviewer_session_id"}.isdisjoint(view)
+        assert (await auth_client.get(run_path, headers=foreign_headers)).status_code == 404
+        shared_evidence = (
+            await auth_client.get(reproduction_path, headers=foreign_headers)
+        ).json()
+        assert shared_evidence[0]["receipt"]["head"] == evidence["receipt"]["head"]
+        assert {"command", "source"}.isdisjoint(shared_evidence[0]["receipt"])
+        assert (
+            await auth_client.post(reproduction_path, json=receipt, headers=foreign_headers)
+        ).status_code == 404
+        message = {
+            "id": uuid4().hex,
+            "anchor": {"kind": "finding", "finding_key": finding_key},
+            "body": "Can we reproduce this with an empty input?",
+        }
+        comment_path = f"{discussion_path}/comments"
+        oversized = await auth_client.post(
+            comment_path,
+            content=b" " * (20 * 1024 + 1),
+            headers={**foreign_headers, "Content-Type": "application/json"},
+        )
+        assert oversized.status_code == 413
+        comment = await auth_client.post(comment_path, headers=foreign_headers, json=message)
+        assert comment.status_code == 200, comment.text
+        assert comment.json()["author"] == "bob"
+        replay = await auth_client.post(comment_path, headers=foreign_headers, json=message)
+        assert replay.json() == comment.json()
+        conflict = await auth_client.post(
+            comment_path, headers=foreign_headers, json={**message, "body": "Another message"}
+        )
+        assert conflict.status_code == 409
+        line_message = {
+            **message,
+            "id": uuid4().hex,
+            "anchor": {"kind": "diff", "path": "hello", "side": "head", "start": 1, "end": 1},
+        }
+        assert (await auth_client.post(comment_path, json=line_message)).status_code == 200
+        invalid_anchor = {**line_message["anchor"], "end": 2}
+        invalid_range = await auth_client.post(
+            comment_path, json={**line_message, "id": uuid4().hex, "anchor": invalid_anchor}
+        )
+        assert invalid_range.status_code == 422
+        assert {
+            item["author"] for item in (await auth_client.get(discussion_path)).json()["comments"]
+        } == {
+            "alice",
+            "bob",
+        }
+        cannot_share = await auth_client.post(
+            collaborators_path, headers=foreign_headers, json={"user_id": "eve"}
+        )
+        assert cannot_share.status_code == 404
+        assert (
+            await auth_client.delete(collaborators_path, params={"user_id": "bob"})
+        ).status_code == 204
+        assert (await auth_client.get(discussion_path, headers=foreign_headers)).status_code == 404
+        assert (
+            await auth_client.get(reproduction_path, headers=foreign_headers)
+        ).status_code == 404
+        assert (
+            await auth_client.post(comment_path, headers=foreign_headers, json=message)
+        ).status_code == 404
 
         private_run = await auth_client.get(run_path, headers={"X-Forwarded-Email": "bob"})
         assert private_run.status_code == 404, private_run.text

@@ -10,19 +10,24 @@ import uuid
 from itertools import groupby
 from typing import Any, Literal, TypeVar, cast
 
-from sqlalchemy import select, tuple_, update
+from pydantic import TypeAdapter
+from sqlalchemy import func, select, tuple_, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from omnigent.db.account_authority import account_generation, require_active_account
 from omnigent.db.compression import encode
 from omnigent.db.db_models import (
+    SqlStudioReviewCollaborator,
+    SqlStudioReviewComment,
     SqlStudioReviewEvent,
     SqlStudioReviewOperation,
     SqlStudioReviewPass,
     SqlStudioReviewPatchChunk,
     SqlStudioReviewReceiptChunk,
     SqlStudioReviewRun,
+    SqlUser,
     current_workspace_id,
 )
 from omnigent.db.utils import (
@@ -30,6 +35,7 @@ from omnigent.db.utils import (
     make_named_managed_session_maker,
     run_write_transaction,
 )
+from omnigent.studio.reviews.discussion import CreateReviewComment, DiscussionAnchor, ReviewComment
 from omnigent.studio.reviews.evidence import (
     MAX_PATCH_CHUNKS,
     MAX_REVIEW_PATCH_BYTES,
@@ -104,6 +110,9 @@ _HASH = re.compile(r"^[0-9a-f]{64}$")
 _MAX_SNAPSHOT_BYTES = 12_000
 _MAX_RECEIPTS_PER_RUN = 24
 _MAX_RECEIPTS_PER_FINDING = 4
+_MAX_COLLABORATORS = 32
+_MAX_DISCUSSION_COMMENTS = 200
+_DISCUSSION_ANCHOR = TypeAdapter(DiscussionAnchor)
 
 
 class ReviewConflictError(RuntimeError):
@@ -457,6 +466,7 @@ class StudioReviewStore:
             existing = self._run_request(session, owner, key, digest)
             if existing is not None:
                 return existing
+            owner_generation = require_active_account(session, owner_user_id)
             now = time.time_ns() // 1_000_000
             run_id = uuid.uuid4().hex
             session.add(
@@ -464,6 +474,7 @@ class StudioReviewStore:
                     workspace_id=current_workspace_id(),
                     id=run_id,
                     owner_scope=owner,
+                    owner_generation=owner_generation,
                     project_id=project_id,
                     pr_key=hashlib.sha256(target.pr_url.casefold().encode()).digest(),
                     request_key=key,
@@ -678,11 +689,17 @@ class StudioReviewStore:
         return run_write_transaction(self._write, "attach_review_reproduction", write)
 
     def list_reproductions(
-        self, run_id: str, finding_key: str, *, owner_user_id: str | None
+        self,
+        run_id: str,
+        finding_key: str,
+        *,
+        owner_user_id: str | None,
+        actor: str | None,
     ) -> list[AttachedReproduction]:
         with self._session("list_review_reproductions") as session:
-            run = self._run_row(session, run_id, _owner_scope(owner_user_id))
-            if run is None:
+            if actor != owner_user_id:
+                self._require_discussion_access(session, run_id, actor, owner_user_id, lock=False)
+            elif self._run_row(session, run_id, _owner_scope(owner_user_id)) is None:
                 raise ReviewNotFoundError("Review run not found")
             chunk = SqlStudioReviewReceiptChunk
             rows = list(
@@ -690,7 +707,7 @@ class StudioReviewStore:
                     select(chunk)
                     .where(
                         chunk.workspace_id == current_workspace_id(),
-                        chunk.run_id == run.id,
+                        chunk.run_id == run_id,
                         chunk.finding_key == bytes.fromhex(finding_key),
                     )
                     .order_by(chunk.attached_at.desc(), chunk.receipt_digest, chunk.position)
@@ -721,6 +738,234 @@ class StudioReviewStore:
                     )
                 )
             return results
+
+    @staticmethod
+    def _discussion_owner_current(
+        session: Session, run: SqlStudioReviewRun, owner: str | None
+    ) -> bool:
+        if owner is None:
+            return run.owner_generation is None
+        account = session.get(SqlUser, (current_workspace_id(), owner), populate_existing=True)
+        if account is not None and (account.id != owner or account.deleted_at is not None):
+            return False
+        generation = account.account_generation if account is not None else None
+        return run.owner_generation == generation and account_generation(owner) in (
+            None,
+            generation,
+        )
+
+    def review_discussion_owner_current(self, run_id: str, owner: str | None) -> bool:
+        with self._session("check_review_discussion_owner") as session:
+            run = self._run_row(session, run_id, _owner_scope(owner))
+            return run is not None and self._discussion_owner_current(session, run, owner)
+
+    @staticmethod
+    def _collaborator(
+        session: Session, run_id: str, actor: str
+    ) -> SqlStudioReviewCollaborator | None:
+        return session.scalar(
+            select(SqlStudioReviewCollaborator)
+            .where(
+                SqlStudioReviewCollaborator.workspace_id == current_workspace_id(),
+                SqlStudioReviewCollaborator.run_id == require_uuid(run_id),
+                SqlStudioReviewCollaborator.user_key == _owner_scope(actor),
+            )
+            .execution_options(populate_existing=True)
+        )
+
+    @staticmethod
+    def _active_collaborator(session: Session, grant: SqlStudioReviewCollaborator) -> bool:
+        users = {
+            row.id: row
+            for row in session.scalars(
+                select(SqlUser)
+                .where(
+                    SqlUser.workspace_id == current_workspace_id(),
+                    SqlUser.id.in_([grant.user_id, grant.owner_user_id]),
+                )
+                .execution_options(populate_existing=True)
+            )
+        }
+        actor, owner = users.get(grant.user_id), users.get(grant.owner_user_id)
+        authenticated_generation = account_generation(grant.user_id)
+        return (
+            actor is not None
+            and actor.deleted_at is None
+            and actor.account_generation == grant.user_generation
+            and authenticated_generation in (None, grant.user_generation)
+            and (
+                (owner is None and grant.owner_generation is None)
+                or (
+                    owner is not None
+                    and owner.deleted_at is None
+                    and owner.account_generation == grant.owner_generation
+                )
+            )
+        )
+
+    def discussion_owner(self, run_id: str, actor: str) -> str | None:
+        with self._session("resolve_review_collaborator") as session:
+            grant = self._collaborator(session, run_id, actor)
+            return (
+                grant.owner_user_id
+                if grant and self._active_collaborator(session, grant)
+                else None
+            )
+
+    def list_review_collaborators(self, run_id: str, *, owner: str) -> list[str]:
+        with self._session("list_review_collaborators") as session:
+            if self._run_row(session, run_id, _owner_scope(owner)) is None:
+                raise ReviewNotFoundError("Review run not found")
+            return list(
+                session.scalars(
+                    select(SqlStudioReviewCollaborator.user_id)
+                    .where(
+                        SqlStudioReviewCollaborator.workspace_id == current_workspace_id(),
+                        SqlStudioReviewCollaborator.run_id == run_id,
+                    )
+                    .order_by(SqlStudioReviewCollaborator.user_id)
+                    .limit(_MAX_COLLABORATORS)
+                )
+            )
+
+    def set_review_collaborator(
+        self,
+        run_id: str,
+        user_id: str,
+        *,
+        owner: str,
+        target_generation: str | None = None,
+        revoke: bool = False,
+    ) -> None:
+        def write(session: Session) -> None:
+            owner_generation = require_active_account(
+                session, owner, related_accounts=None if revoke else {user_id: target_generation}
+            )
+            run = self._run_row(session, run_id, _owner_scope(owner), lock=True)
+            if run is None or not self._discussion_owner_current(session, run, owner):
+                raise ReviewNotFoundError("Review run not found")
+            grant = self._collaborator(session, run_id, user_id)
+            if revoke:
+                if grant is not None:
+                    session.delete(grant)
+                return
+            if grant is None:
+                count = session.scalar(
+                    select(func.count())
+                    .select_from(SqlStudioReviewCollaborator)
+                    .where(
+                        SqlStudioReviewCollaborator.workspace_id == current_workspace_id(),
+                        SqlStudioReviewCollaborator.run_id == run_id,
+                    )
+                )
+                if count is not None and count >= _MAX_COLLABORATORS:
+                    raise ReviewConflictError("This review has reached its collaborator limit")
+                grant = SqlStudioReviewCollaborator(
+                    workspace_id=current_workspace_id(),
+                    run_id=run_id,
+                    user_key=_owner_scope(user_id),
+                    user_id=user_id,
+                    owner_user_id=owner,
+                )
+                session.add(grant)
+            grant.owner_generation = owner_generation
+            grant.user_generation = target_generation
+
+        run_write_transaction(self._write, "change_review_collaborator", write)
+
+    @staticmethod
+    def _comment(row: SqlStudioReviewComment) -> ReviewComment:
+        return ReviewComment(
+            id=row.id,
+            anchor=_DISCUSSION_ANCHOR.validate_json(row.anchor_json),
+            author=row.author_user_id,
+            body=row.body,
+            created_at=row.created_at,
+        )
+
+    def _require_discussion_access(
+        self, session: Session, run_id: str, actor: str | None, owner: str | None, *, lock: bool
+    ) -> None:
+        run = self._run_row(session, run_id, _owner_scope(owner), lock=lock)
+        if run is None or not self._discussion_owner_current(session, run, owner):
+            raise ReviewNotFoundError("Review run not found")
+        if actor != owner:
+            grant = self._collaborator(session, run_id, actor) if actor is not None else None
+            if (
+                grant is None
+                or grant.owner_user_id != owner
+                or not self._active_collaborator(session, grant)
+            ):
+                raise ReviewNotFoundError("Review run not found")
+
+    def list_discussion_comments(
+        self, run_id: str, *, actor: str | None, owner: str | None
+    ) -> list[ReviewComment]:
+        with self._session("read_review_discussion") as session:
+            self._require_discussion_access(session, run_id, actor, owner, lock=False)
+            rows = session.scalars(
+                select(SqlStudioReviewComment)
+                .where(
+                    SqlStudioReviewComment.workspace_id == current_workspace_id(),
+                    SqlStudioReviewComment.run_id == run_id,
+                )
+                .order_by(SqlStudioReviewComment.created_at, SqlStudioReviewComment.id)
+                .limit(_MAX_DISCUSSION_COMMENTS)
+            )
+            return [self._comment(row) for row in rows]
+
+    def post_discussion_comment(
+        self, run_id: str, comment: CreateReviewComment, *, actor: str | None, owner: str | None
+    ) -> ReviewComment:
+        if len(comment.body.encode("utf-8")) > 8000:
+            raise ReviewConflictError("The comment exceeds its stored byte budget")
+
+        def write(session: Session) -> ReviewComment:
+            related = None
+            if actor != owner and owner is not None:
+                run = self._run_row(session, run_id, _owner_scope(owner))
+                if run is None:
+                    raise ReviewNotFoundError("Review run not found")
+                related = {owner: run.owner_generation}
+            generation = require_active_account(session, actor, related_accounts=related)
+            self._require_discussion_access(session, run_id, actor, owner, lock=True)
+            existing = session.get(
+                SqlStudioReviewComment, (current_workspace_id(), run_id, comment.id)
+            )
+            anchor_json = comment.anchor.model_dump_json()
+            if existing is not None:
+                if (
+                    existing.author_user_id,
+                    existing.author_generation,
+                    existing.anchor_json,
+                    existing.body,
+                ) != (actor, generation, anchor_json, comment.body):
+                    raise ReviewConflictError("This comment ID was used for a different message")
+                return self._comment(existing)
+            count = session.scalar(
+                select(func.count())
+                .select_from(SqlStudioReviewComment)
+                .where(
+                    SqlStudioReviewComment.workspace_id == current_workspace_id(),
+                    SqlStudioReviewComment.run_id == run_id,
+                )
+            )
+            if count is not None and count >= _MAX_DISCUSSION_COMMENTS:
+                raise ReviewConflictError("This review has reached its discussion limit")
+            row = SqlStudioReviewComment(
+                workspace_id=current_workspace_id(),
+                run_id=run_id,
+                id=comment.id,
+                author_user_id=actor,
+                author_generation=generation,
+                anchor_json=anchor_json,
+                body=comment.body,
+                created_at=time.time_ns() // 1_000_000,
+            )
+            session.add(row)
+            return self._comment(row)
+
+        return run_write_transaction(self._write, "post_review_discussion_comment", write)
 
     def get_run_patch(self, run_id: str, *, owner_user_id: str | None) -> str | None:
         run_id = require_uuid(run_id)

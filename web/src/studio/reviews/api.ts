@@ -189,17 +189,80 @@ export interface AttachedReproduction {
   receipt: {
     observed_at: string;
     image_id: string;
-    command: string[];
+    command?: string[];
     timeout_seconds: number;
     base: ReproductionSide;
     head: ReproductionSide;
   };
 }
 
+export type DiscussionAnchor =
+  | { kind: "finding"; finding_key: string }
+  | { kind: "diff"; path: string; side: "base" | "head"; start: number; end: number };
+
+export interface ReviewDiscussionComment {
+  id: string;
+  anchor: DiscussionAnchor;
+  body: string;
+  author: string | null;
+  created_at: number;
+}
+
+export interface ReviewDiscussion {
+  id: string;
+  project_name: string;
+  repository: string;
+  pr_url: string;
+  pr_number: number;
+  base_sha: string;
+  head_sha: string;
+  patch: string;
+  reports: {
+    key: string;
+    label: string;
+    state: "pending" | "incomplete" | "ready";
+    summary: string | null;
+  }[];
+  findings: { key: string; finding: ReviewFinding }[];
+  comments: ReviewDiscussionComment[];
+  can_comment: boolean;
+  collaborators: string[] | null;
+  sharing_available: boolean;
+}
+
 function reviewRunPath(runId: string) {
   return `/v1/studio/review-runs/${encodeURIComponent(runId)}`;
 }
 
+export function getReviewDiscussion(runId: string, signal: AbortSignal) {
+  return reviewRequest<ReviewDiscussion>(`${reviewRunPath(runId)}/discussion`, { signal });
+}
+
+export function postReviewDiscussionComment(
+  runId: string,
+  comment: Pick<ReviewDiscussionComment, "id" | "anchor" | "body">,
+) {
+  return postReview<ReviewDiscussionComment>(
+    `${reviewRunPath(runId)}/discussion/comments`,
+    comment.id,
+    comment,
+  );
+}
+
+export async function changeReviewCollaborator(runId: string, userId: string, revoke: boolean) {
+  const endpoint = `${reviewRunPath(runId)}/discussion/collaborators`;
+  const response = await authenticatedFetch(
+    revoke ? `${endpoint}?${new URLSearchParams({ user_id: userId })}` : endpoint,
+    revoke
+      ? { method: "DELETE" }
+      : {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ user_id: userId }),
+        },
+  );
+  if (!response.ok) throw await apiErrorFromResponse(response);
+}
 function reproductionPath(runId: string, findingKey: string) {
   return `${reviewRunPath(runId)}/findings/${encodeURIComponent(findingKey)}/reproductions`;
 }

@@ -62,8 +62,7 @@ def _path(header: str, prefix: str) -> str | None:
     return field[len(prefix) :]
 
 
-def changed_lines(patch: str) -> dict[Anchor, str]:
-    """Return exact added and removed rows, rejecting malformed hunks."""
+def _patch_lines(patch: str, *, include_context: bool) -> dict[Anchor, str]:
     lines: dict[Anchor, str] = {}
     old_path = new_path = None
     saw_file = saw_old = saw_new = False
@@ -74,6 +73,9 @@ def changed_lines(patch: str) -> dict[Anchor, str]:
         if old_left or new_left:
             marker = raw[:1]
             if marker == " " and old_left and new_left:
+                if include_context and old_path is not None and new_path is not None:
+                    lines[(old_path, "base", old_line)] = raw[1:]
+                    lines[(new_path, "head", new_line)] = raw[1:]
                 old_line, new_line = old_line + 1, new_line + 1
                 old_left, new_left = old_left - 1, new_left - 1
             elif marker == "-" and old_left and old_path is not None:
@@ -114,5 +116,15 @@ def changed_lines(patch: str) -> dict[Anchor, str]:
     return lines
 
 
+def changed_lines(patch: str) -> dict[Anchor, str]:
+    """Return exact added and removed rows, rejecting malformed hunks."""
+    return _patch_lines(patch, include_context=False)
+
+
 def changed_anchors(patch: str) -> frozenset[Anchor]:
     return frozenset(changed_lines(patch))
+
+
+def displayed_anchors(patch: str) -> frozenset[Anchor]:
+    """Return changed and context rows present on each side of the saved diff."""
+    return frozenset(_patch_lines(patch, include_context=True))
