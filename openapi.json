@@ -581,6 +581,17 @@
             "title": "Attached At",
             "type": "integer"
           },
+          "candidate_run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Candidate Run Id"
+          },
           "digest": {
             "pattern": "^[0-9a-f]{64}$",
             "title": "Digest",
@@ -950,6 +961,46 @@
           "response"
         ],
         "title": "CancelledEvent",
+        "type": "object"
+      },
+      "CandidateReviewOrigin": {
+        "additionalProperties": false,
+        "properties": {
+          "attachment_digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Attachment Digest",
+            "type": "string"
+          },
+          "finding_detail": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Finding Detail",
+            "type": "string"
+          },
+          "finding_key": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Finding Key",
+            "type": "string"
+          },
+          "finding_title": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Finding Title",
+            "type": "string"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "finding_key",
+          "attachment_digest",
+          "finding_title",
+          "finding_detail"
+        ],
+        "title": "CandidateReviewOrigin",
         "type": "object"
       },
       "CaptureProjectReviewRequest": {
@@ -6686,6 +6737,16 @@
             "title": "Can Use Review Workspace",
             "type": "boolean"
           },
+          "candidate": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CandidateReviewOrigin"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "collaborators": {
             "anyOf": [
               {
@@ -7950,6 +8011,16 @@
             "pattern": "^[0-9a-f]{40}(?:[0-9a-f]{24})?$",
             "title": "Base Sha",
             "type": "string"
+          },
+          "candidate": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CandidateReviewOrigin"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "head_sha": {
             "pattern": "^[0-9a-f]{40}(?:[0-9a-f]{24})?$",
@@ -23993,6 +24064,68 @@
           }
         },
         "summary": "Attach Finding Reproduction",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/studio/review-runs/{run_id}/findings/{finding_key}/reproductions/{digest}/re-review": {
+      "post": {
+        "operationId": "re_review_fix_v1_studio_review_runs__run_id__findings__finding_key__reproductions__digest__re_review_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "finding_key",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{64}$",
+              "title": "Finding Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "digest",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{64}$",
+              "title": "Digest",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StartReviewRunResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Re Review Fix",
         "tags": [
           "sessions"
         ]

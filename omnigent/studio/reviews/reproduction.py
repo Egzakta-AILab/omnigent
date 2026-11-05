@@ -169,6 +169,7 @@ class AttachedReproduction(FrozenModel):
     digest: ReviewRoleDigest
     attached_at: int
     provenance: Literal["uploaded"] = "uploaded"
+    candidate_run_id: str | None = None
     receipt: ReviewCheckReceipt
 
 

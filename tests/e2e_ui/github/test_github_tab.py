@@ -1625,6 +1625,16 @@ def test_studio_review_from_pr_panel(
             attached_receipts.append(saved)
             route.fulfill(json=saved)
 
+        candidate_run_id = "3" * 32
+
+        def start_candidate_review(route: Route) -> None:
+            assert route.request.method == "POST" and route.request.post_data_json == {}
+            assert attached_receipts[1]["digest"] == "9" * 64
+            attached_receipts[1]["candidate_run_id"] = candidate_run_id
+            route.fulfill(json={"run": {"id": candidate_run_id}, "errors": {}})
+
+        page.route("**/reproductions/" + "9" * 64 + "/re-review", start_candidate_review)
+
         proposed_patch = (
             "diff --git a/src/app/main.py b/src/app/main.py\n"
             "--- a/src/app/main.py\n+++ b/src/app/main.py\n"
@@ -1899,6 +1909,10 @@ def test_studio_review_from_pr_panel(
         expect(evidence_panel.get_by_text("+verified input", exact=False)).to_be_visible()
         page.screenshot(path=str(tmp_path / "review-fix-check.png"))
         assert len(attached_receipts) == 2
+        evidence_panel.get_by_role("button", name="Re-review candidate", exact=True).click()
+        expect(evidence_panel.get_by_role("link", name="Open candidate review")).to_have_attribute(
+            "href", f"/reviews/{candidate_run_id}/discussion"
+        )
         consolidation.get_by_role("button", name="Show in captured diff", exact=True).click()
         captured_diff = runs_panel.get_by_role("region", name="Captured diff", exact=True)
         expect(captured_diff.get_by_text("Review finding · src/app/main.py:2")).to_be_visible()

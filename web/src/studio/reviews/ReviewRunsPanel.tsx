@@ -102,7 +102,10 @@ export function ReviewRunsPanel({
         : false,
   });
   const entries = (runs.data?.pages ?? []).flatMap((page) => page.entries);
-  const run = entries.find((entry) => entry.id === selectedRunId) ?? entries[0];
+  const run =
+    entries.find((entry) => entry.id === selectedRunId) ??
+    entries.find((entry) => !entry.target.candidate) ??
+    entries[0];
   const capturedOpen = !!run?.patch_sha256 && captured?.runId === run.id && !runs.isRefetchError;
   const capturedSource = capturedOpen ? (captured?.source ?? null) : null;
   const savedDiff = useQuery({
@@ -241,6 +244,7 @@ export function ReviewRunsPanel({
             <option key={entry.id} value={entry.id}>
               {entry.target.head_sha.slice(0, 8)} · {entry.reviewers.length}{" "}
               {entry.coordinator ? "candidates" : "reviewers"} ·{" "}
+              {entry.target.candidate && "Candidate snapshot · "}
               {new Date(entry.created_at).toLocaleString()}
             </option>
           ))}
@@ -258,7 +262,7 @@ export function ReviewRunsPanel({
       )}
       <p className="font-mono text-xs text-muted-foreground">
         {run.target.base_sha.slice(0, 8)} → {run.target.head_sha.slice(0, 8)}
-        {!current && " · Earlier revision"}
+        {run.target.candidate ? " · Candidate snapshot" : !current && " · Earlier revision"}
       </p>
       <p className="wrap-break-word text-xs text-muted-foreground">
         {run.target.workspace} · Host {run.target.host_id}
