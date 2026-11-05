@@ -35,6 +35,7 @@ import { PullRequestCommentForm } from "./PullRequestCommentComposer";
 import { LocalReviewComment } from "./LocalReviewComment";
 import { PullRequestReviewThread, type ReviewThreadContext } from "./PullRequestReviewThread";
 import { highlightsSupported } from "./previewSearch";
+import { findDiffRow } from "./pullRequestReview";
 
 /** A ghost icon button with a tooltip; the toolbar's shared control element.
  *  No-delay is set by the surrounding TooltipProvider. */
@@ -145,24 +146,6 @@ const CENTRE_WINDOW_MS = 5000;
 
 /** The diff's rows live in its open shadow root once @pierre/diffs has rendered. */
 // Scoped to the main diff: thread snippets render their own diffs in the same section.
-function diffRoot(section: HTMLElement): ParentNode {
-  const main = section.querySelector<HTMLElement>("[data-main-diff]") ?? section;
-  return main.querySelector(":scope > diffs-container")?.shadowRoot ?? main;
-}
-
-function findDiffRow({ side, line }: FindHighlight, section: HTMLElement): HTMLElement | null {
-  const root = diffRoot(section);
-  // Split views give each side its own column; unified rows use one number per line.
-  const unified =
-    side === "deletions"
-      ? '[data-line-type="change-deletion"]'
-      : ':not([data-line-type="change-deletion"])';
-  return (
-    root.querySelector<HTMLElement>(`[data-${side}] [data-line="${line}"]`) ??
-    root.querySelector<HTMLElement>(`[data-line="${line}"]${unified}`)
-  );
-}
-
 /** A DOM range over `start`..`end` of the row's text, which may span several token spans. */
 function rowRange(row: HTMLElement, start: number, end: number): Range | null {
   const walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT);

@@ -2,6 +2,7 @@
 
 import type { FileDiffMetadata } from "@pierre/diffs";
 import type { PullRequestChangedFile } from "@/hooks/usePullRequests";
+import type { ReviewSource } from "@/studio/reviews/api";
 
 /** Files whose path or previous path contains `query`, ignoring case and slash direction. */
 export function filterChangedPaths(
@@ -307,4 +308,57 @@ export function pullRequestFileUrl({
     default:
       return null;
   }
+}
+
+export function findingLine(
+  diff: FileDiffMetadata,
+  source: ReviewSource,
+  layout: "unified" | "split",
+): { side: "additions" | "deletions"; line: number; start: number; end: number } | null {
+  const base = source.side === "base";
+  for (const hunk of diff.hunks) {
+    for (const part of hunk.hunkContent) {
+      const count = part.type === "context" ? part.lines : base ? part.deletions : part.additions;
+      const first = base
+        ? hunk.deletionStart + part.deletionLineIndex - hunk.deletionLineIndex
+        : hunk.additionStart + part.additionLineIndex - hunk.additionLineIndex;
+      const offset = source.line - first;
+      if (offset < 0 || offset >= count) continue;
+      // Unified diffs number shared context using the head side.
+      const deletion = base && (part.type !== "context" || layout === "split");
+      const index = deletion ? part.deletionLineIndex : part.additionLineIndex;
+      const text = (deletion ? diff.deletionLines : diff.additionLines)[index + offset];
+      if (text === undefined) return null;
+      return {
+        side: deletion ? "deletions" : "additions",
+        line: deletion
+          ? source.line
+          : hunk.additionStart + part.additionLineIndex - hunk.additionLineIndex + offset,
+        start: 0,
+        end: text.replace(/\r?\n$/, "").length,
+      };
+    }
+  }
+  return null;
+}
+
+function diffRoot(section: HTMLElement): ParentNode {
+  const main = section.querySelector<HTMLElement>("[data-main-diff]") ?? section;
+  return main.querySelector(":scope > diffs-container")?.shadowRoot ?? main;
+}
+
+export function findDiffRow(
+  { side, line }: { side: "additions" | "deletions"; line: number },
+  section: HTMLElement,
+): HTMLElement | null {
+  const root = diffRoot(section);
+  // Split views give each side its own column; unified rows use one number per line.
+  const unified =
+    side === "deletions"
+      ? '[data-line-type="change-deletion"]'
+      : ':not([data-line-type="change-deletion"])';
+  return (
+    root.querySelector<HTMLElement>(`[data-${side}] [data-line="${line}"]`) ??
+    root.querySelector<HTMLElement>(`[data-line="${line}"]${unified}`)
+  );
 }

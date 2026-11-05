@@ -1736,21 +1736,43 @@ def test_studio_review_from_pr_panel(
             lambda r: r.fulfill(json={"pull_requests": [info["pr"]]}),
         )
         page.route(f"{project_path}/studio/pull-requests/preview?*", project_preview)
+
+        def project_patch(route: Route) -> None:
+            query = parse_qs(urlsplit(route.request.url).query)
+            assert query["base_sha"] == [base_sha]
+            assert query["head_sha"] == [head_sha]
+            route.fulfill(json={"patch": _PR_DIFF["patch"], "truncated": False})
+
+        page.route(f"{project_path}/studio/pull-requests/patch?*", project_patch)
         page.route(
             f"{project_path}/studio/review-profiles?*", lambda r: r.fulfill(json={"profiles": []})
         )
         page.route(f"**/v1/sessions/{reviewer_id}/studio/review", lambda r: r.fulfill(json=review))
         report.update(
             state="ready",
-            summary="The captured patch has no actionable findings.",
+            summary="The captured patch has one actionable finding.",
             message_id="report-1",
+            findings=[
+                {
+                    "title": "Keep the input validation",
+                    "detail": "The new branch accepts invalid values.",
+                    "severity": "high",
+                    "path": "src/app/main.py",
+                    "side": "head",
+                    "line": 2,
+                }
+            ],
         )
         page.goto(f"{base_url}/?project=Workspace%20Review")
         workspace_panel = page.get_by_role("complementary", name="Project workspace")
         expect(workspace_panel).to_be_visible()
         workspace_panel.get_by_role("tab", name="Pull Requests", exact=True).click()
         workspace_panel.get_by_role("button", name=re.compile(re.escape(pr_title))).click()
-        expect(workspace_panel.get_by_text("src/app/main.py", exact=True)).to_be_visible()
+        diff_tab = workspace_panel.get_by_role("tab", name="Diff", exact=True)
+        expect(diff_tab).to_have_attribute("data-state", "active")
+        expect(workspace_panel.get_by_role("combobox", name="Changed file")).to_have_value(
+            "src/app/main.py"
+        )
         workspace_panel.get_by_role("tab", name="Review", exact=True).click()
         workspace_panel.get_by_role("combobox", name="Reviewer", exact=True).click()
         page.get_by_role("option", name="Codex", exact=True).click()
@@ -1766,6 +1788,13 @@ def test_studio_review_from_pr_panel(
         expect(page.get_by_text(report["summary"], exact=True)).to_be_visible(timeout=15_000)
         expect(page.get_by_role("link", name="Open transcript", exact=True)).to_be_visible()
         page.screenshot(path=str(tmp_path / "project-review-report.png"))
+        page.goto(f"{base_url}/?project=Workspace%20Review")
+        workspace_panel.get_by_role("tab", name="Pull Requests", exact=True).click()
+        workspace_panel.get_by_role("button", name=re.compile(re.escape(pr_title))).click()
+        workspace_panel.get_by_role("tab", name="Review", exact=True).click()
+        workspace_panel.get_by_role("button", name="Show in diff", exact=True).click()
+        expect(diff_tab).to_have_attribute("data-state", "active")
+        expect(workspace_panel.get_by_text("Review finding · src/app/main.py:2")).to_be_visible()
         assert len(capture_keys) == len(start_keys) == 1
         assert not ordinary_creates and not review_events
         return
