@@ -159,6 +159,9 @@ MAX_PROPOSED_PATCH_BYTES = 24 * 1024
 
 class AskReviewQuestion(CreateReviewComment):
     action: QuestionAction = "question"
+    proof_digest: ReviewRoleDigest | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     agent_id: str | None = None
     reviewer_key: ReviewRoleDigest | None = None
     host_id: str | None = None
@@ -173,6 +176,8 @@ class AskReviewQuestion(CreateReviewComment):
 
     @model_validator(mode="after")
     def validate_selection(self) -> AskReviewQuestion:
+        if self.proof_digest is not None and not isinstance(self.anchor, FindingDiscussionAnchor):
+            raise ValueError("Choose a finding for the check receipt")
         if self.action != "question" and not isinstance(self.anchor, FindingDiscussionAnchor):
             raise ValueError("Choose a finding for the proposal")
         if (self.agent_id is None) == (self.reviewer_key is None):
@@ -199,6 +204,9 @@ class QuestionInput(FrozenModel):
     execution: QuestionExecution
     prompt_digest: ReviewRoleDigest
     requires_citations: bool = False
+    proof_digest: ReviewRoleDigest | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 QuestionDispatch = Literal["dispatching", "accepted", "unknown"]
@@ -236,6 +244,9 @@ class ReviewQuestion(FrozenModel):
     answer: str | None = None
     citations: list[QuestionCitation] | None = None
     action: QuestionAction = "question"
+    proof_digest: ReviewRoleDigest | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     proposed_patch: str | None = None
     proposed_check: ProposedCheck | None = None
     proposed_check_digest: ReviewRoleDigest | None = None
@@ -256,6 +267,9 @@ class SharedReviewAnswer(FrozenModel):
     question: str
     answer: str
     citations: list[QuestionCitation] | None = None
+    proof_digest: ReviewRoleDigest | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     harness: ReviewHarness
     requested_by: str | None
     published_at: int

@@ -8,6 +8,7 @@ import { FindingEvidence } from "./FindingEvidence";
 import { hasTerminalControls, shellQuote } from "./sandboxCommand";
 import {
   attachFindingReproduction,
+  findingReproductionsKey,
   listFindingReproductions,
   reReviewCandidate,
   type AttachedReproduction,
@@ -140,7 +141,7 @@ function Reproductions({
   canReReview?: boolean;
 }) {
   const queryClient = useQueryClient();
-  const queryKey = ["studio-finding-reproductions", viewerId, run.id, findingKey] as const;
+  const queryKey = findingReproductionsKey(viewerId, run.id, findingKey);
   const [file, setFile] = useState<File>();
   const [patchFile, setPatchFile] = useState<File>();
   const [copyStatus, setCopyStatus] = useState("");
@@ -244,7 +245,7 @@ function Reproductions({
             <div className="flex flex-wrap items-center justify-between gap-1">
               <span className="text-xs font-medium">
                 {"patch" in receipt ? "Uploaded fix check" : "Uploaded receipt"} ·{" "}
-                {new Date(receipt.observed_at).toLocaleString()}
+                {new Date(receipt.observed_at).toLocaleString()} · {digest.slice(0, 8)}
               </span>
               {run.target && receipt.command && "base" in receipt && (
                 <Button

@@ -276,6 +276,7 @@ export interface ProposedCheck {
 
 export interface AskReviewQuestion extends Pick<ReviewDiscussionComment, "id" | "anchor" | "body"> {
   action?: QuestionAction;
+  proof_digest?: string;
   agent_id?: string;
   reviewer_key?: string;
   host_id?: string;
@@ -291,6 +292,7 @@ export interface QuestionCitation {
 
 export interface ReviewQuestion extends Pick<ReviewDiscussionComment, "id" | "anchor" | "body"> {
   action?: QuestionAction;
+  proof_digest?: string;
   session_id: string;
   harness: ReviewHarness;
   status: "dispatching" | "accepted" | "unknown";
@@ -311,6 +313,7 @@ export interface SharedReviewAnswer {
   question: string;
   answer: string;
   citations?: QuestionCitation[] | null;
+  proof_digest?: string;
   harness: ReviewHarness;
   requested_by: string | null;
   published_at: number;
@@ -567,6 +570,14 @@ export async function readFindingEvidence(
 
 function reproductionPath(runId: string, findingKey: string) {
   return `${reviewRunPath(runId)}/findings/${encodeURIComponent(findingKey)}/reproductions`;
+}
+
+export function findingReproductionsKey(
+  viewerId: string | null,
+  runId: string,
+  findingKey: string,
+) {
+  return ["studio-finding-reproductions", viewerId, runId, findingKey] as const;
 }
 
 export function listFindingReproductions(runId: string, findingKey: string, signal: AbortSignal) {

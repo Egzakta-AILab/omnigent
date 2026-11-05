@@ -600,6 +600,22 @@ reviewers. This run reviews the proposed delta from the captured PR head to
 the candidate snapshot. Open it from the fix attachment or the review run
 list. Its discussion links back to the original finding.
 
+To verify a saved lifecycle, provide the original run, a proof-backed question
+about its failing head check, and the candidate that passed its fix comparison.
+
+```sh
+uv run --no-sync python scripts/verify_studio.py lifecycle \
+  --mode local --server http://127.0.0.1:6767 \
+  --pr https://github.com/your_org/your_repo/pull/17 \
+  --run-id RUN_ID --finding FINDING_KEY --question QUESTION_ID \
+  --candidate CANDIDATE_RUN_ID --output .omnigent/studio/lifecycle.json
+```
+
+The command reads saved records and verifies the receipt digests, revision
+bindings, selected reviewer reports and diff citations for both runs. Use
+`--mode server` for a trusted remote instance. Client reconnect, deployed
+execution and GitHub publication have separate acceptance checks.
+
 ### Draft a sandbox check with an agent
 
 Open a finding and choose **Draft sandbox check**. Pick a reviewer or native
@@ -687,6 +703,20 @@ captured workspace's configured account. A posted draft links to its provider
 thread. If delivery is unconfirmed, check the PR for that comment before taking
 further action. The current Studio capture flow supports GitHub.
 
+Before confirming, **Download preview** saves the exact proposed comments.
+After publication, the review owner can verify one comment using the saved
+preview and a GitHub CLI login with read access to the repository.
+
+```sh
+uv run --no-sync python scripts/verify_studio.py publication \
+  --mode local --server http://127.0.0.1:6767 \
+  --preview /path/to/publication-preview.json --draft DRAFT_ID \
+  --author GITHUB_LOGIN --output .omnigent/studio/publication.json
+```
+
+The command compares the saved confirmation with GitHub's original commit,
+diff location, body, and author. Find the draft ID in the downloaded JSON.
+
 On a multi-user instance with sharing enabled, the run owner can open **Share
 this review**, grant access to an existing Omnigent account ID, and send the
 link using **Copy review link**. A collaborator can see this review's captured
@@ -705,6 +735,11 @@ configuration. **Saved reviewer settings** reuses the captured agent, model,
 and effort in a fresh session. The owner can use the saved workspace.
 Collaborators choose a connected host and working directory under their own
 account.
+
+For a finding with a saved reproduction or fix comparison, use **Include
+check receipt** before sending. The agent gets the selected revisions, check
+outcomes, and bounded output excerpts. Private and shared answers show the
+receipt identifier beside the question.
 
 **Ask privately** sends the question and captured diff to the agent. The
 session uses the selected native agent's permissions. It receives numbered
