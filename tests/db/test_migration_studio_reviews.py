@@ -9,6 +9,7 @@ import sqlalchemy as sa
 from alembic import command
 
 from omnigent.db.db_models import (
+    SqlStudioFindingArtifact,
     SqlStudioInlineDraft,
     SqlStudioReviewCollaborator,
     SqlStudioReviewComment,
@@ -29,6 +30,7 @@ _RUNS = "8f4b6c20a115"
 _RUN_REPORTS = "3792ec30b1de"
 _INLINE_DRAFTS = "4bf0aa1e9173"
 _INLINE_DELIVERY = "7a2594cfe931"
+_FINDING_ARTIFACTS = "ba9152e8d96f"
 _TABLES = {"studio_review_passes", "studio_review_operations", "studio_review_events"}
 
 
@@ -76,7 +78,7 @@ def test_upgrade_and_downgrade_preserve_existing_database(tmp_path: Path) -> Non
         _migrate(uri, engine, "upgrade", _RUN_REPORTS)
         assert "studio_inline_drafts" not in sa.inspect(engine).get_table_names()
         _migrate(uri, engine, "upgrade", _INLINE_DRAFTS)
-        _migrate(uri, engine, "upgrade", _INLINE_DELIVERY)
+        _migrate(uri, engine, "upgrade", _FINDING_ARTIFACTS)
         for model in (
             SqlStudioReviewPass,
             SqlStudioReviewOperation,
@@ -88,6 +90,7 @@ def test_upgrade_and_downgrade_preserve_existing_database(tmp_path: Path) -> Non
             SqlStudioReviewCollaborator,
             SqlStudioReviewComment,
             SqlStudioInlineDraft,
+            SqlStudioFindingArtifact,
         ):
             inspected = sa.inspect(engine)
             actual = {c["name"] for c in inspected.get_columns(model.__tablename__)}
@@ -97,6 +100,24 @@ def test_upgrade_and_downgrade_preserve_existing_database(tmp_path: Path) -> Non
             assert connection.execute(
                 sa.text("SELECT source_session_id, source_project_id FROM studio_review_passes")
             ).one() == (b"s" * 16, None)
+        artifacts = SqlStudioFindingArtifact.__table__
+        with engine.begin() as connection:
+            connection.execute(
+                artifacts.insert().values(
+                    workspace_id=0,
+                    run_id="a" * 32,
+                    finding_key=b"f" * 32,
+                    digest=b"d" * 32,
+                    attached_at=1,
+                    metadata_json="{}",
+                )
+            )
+        with pytest.raises(RuntimeError, match="finding artifacts exist"):
+            _migrate(uri, engine, "downgrade", _INLINE_DELIVERY)
+        with engine.begin() as connection:
+            connection.execute(artifacts.delete())
+        _migrate(uri, engine, "downgrade", _INLINE_DELIVERY)
+        assert artifacts.name not in sa.inspect(engine).get_table_names()
         drafts = SqlStudioInlineDraft.__table__
         with engine.begin() as connection:
             connection.execute(

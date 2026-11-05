@@ -1649,6 +1649,18 @@ class SqlStudioReviewReceiptChunk(OmnigentBase):
     )
 
 
+class SqlStudioFindingArtifact(OmnigentBase):
+    """Immutable metadata for review evidence bytes stored in the artifact store."""
+
+    __tablename__ = "studio_finding_artifacts"
+    workspace_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    run_id: Mapped[str] = mapped_column(Uuid16, primary_key=True)
+    finding_key: Mapped[bytes] = mapped_column(_CKSUM32, primary_key=True)
+    digest: Mapped[bytes] = mapped_column(_CKSUM32, primary_key=True)
+    attached_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    metadata_json: Mapped[str] = mapped_column(CompressedText(), nullable=False)
+
+
 class SqlStudioReviewCollaborator(OmnigentBase):
     """Explicit access to a single captured review within a project."""
 
