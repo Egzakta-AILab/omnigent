@@ -429,10 +429,12 @@ CMD ["sleep", "infinity"]
 
 # ── Server runtime (default target) ─────────────────────
 FROM python:${PYTHON_VERSION}-slim AS runtime
+ARG OMNIGENT_BUILD_SOURCE_COMMIT=
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PATH="/opt/venv/bin:${PATH}"
+    PATH="/opt/venv/bin:${PATH}" \
+    OMNIGENT_BUILD_SOURCE_COMMIT=${OMNIGENT_BUILD_SOURCE_COMMIT}
 
 # curl + ca-certificates only — for the HEALTHCHECK and for outbound
 # HTTPS to LLM gateways / external services.

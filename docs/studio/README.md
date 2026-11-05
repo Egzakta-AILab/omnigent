@@ -338,6 +338,34 @@ not prove a model turn, PR access, continuation, reconnect or the full review
 workflow. Those qualifications remain explicitly `not_run`. Unknown readiness,
 incomplete discovery and missing required assets keep preflight blocked.
 
+## Release A matrix
+
+Use `python scripts/verify_studio.py release-a --schema` to inspect the JSON
+evidence format. Enter the candidate checkout commit and the instance, host,
+workspace, review, finding, question, and candidate IDs for each of the four
+routes. For a source launch, set `OMNIGENT_BUILD_SOURCE_COMMIT` to the verified
+checkout commit before starting Omnigent. The Studio Compose image records
+`STUDIO_REVISION` as build metadata.
+
+```sh
+python scripts/verify_studio.py release-a \
+  --pr https://github.com/Egzakta-AILab/KVARK/pull/1488 \
+  --second-repo /absolute/path/to/second-checkout \
+  --manifest .omnigent/studio/release-evidence.json \
+  --output .omnigent/studio/release-a.json
+```
+
+The verifier reads the selected instance, checks the saved native review and
+proof lifecycle, and verifies the second repository and any confirmed inline
+publication. Server lanes require non-loopback HTTPS. Record each native
+workflow on the candidate build, plus disconnect, restart, desktop/browser
+parity, and a provider head change. Put the operator-reviewed recordings or
+logs under the manifest directory and include their run ID, checkout commit,
+reviewer name, and SHA-256. The head-change record also names the PR and its
+previous and new head SHAs. The report distinguishes retained observations
+from API reads. Run without a manifest to list missing evidence without
+contacting an instance.
+
 ## Acceptance before the PR workflow
 
 For each agent, Codex and Claude Code, on each setup, laptop and server:

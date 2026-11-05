@@ -25,7 +25,7 @@ from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.exc import StatementError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.gzip import GZipMiddleware
@@ -309,6 +309,7 @@ class ServerInfoResponse(BaseModel):
         "current_host", "current_host_or_new_sandbox", "any_host"
     ] = "any_host"
     server_version: str
+    source_commit: str | None = Field(default=None, exclude_if=lambda value: value is None)
     smart_routing_enabled: bool
     smart_routing_sources: SmartRoutingSourcesInfo
     features: dict[str, bool]
@@ -4103,6 +4104,7 @@ def create_app(
         automation_sharing = automations_enabled and scheduled_task_sharing_supported(
             app.state, permission_store
         )
+        source_commit = os.environ.get("OMNIGENT_BUILD_SOURCE_COMMIT", "")
         return ServerInfoResponse.model_validate(
             {
                 "accounts_enabled": accounts_enabled,
@@ -4122,6 +4124,11 @@ def create_app(
                 "public_sharing_max_level": app.state.public_sharing_max_level().value,
                 "sibling_session_destinations": app.state.sibling_session_destinations().value,
                 "server_version": _server_version(),
+                "source_commit": (
+                    source_commit
+                    if re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", source_commit)
+                    else None
+                ),
                 "smart_routing_enabled": smart_routing_enabled,
                 "smart_routing_sources": smart_routing_sources,
                 "features": frontend_features,
