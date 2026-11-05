@@ -226,6 +226,16 @@ export interface ReviewDiscussionComment {
   created_at: number;
 }
 
+export interface InlineDraft {
+  id: string;
+  thread: DiscussionAnchor;
+  anchor: Extract<DiscussionAnchor, { kind: "diff" }>;
+  body: string;
+  version: number;
+  created_at: number;
+  updated_at: number;
+}
+
 export type QuestionAction = "question" | "propose_fix";
 
 export interface AskReviewQuestion extends Pick<ReviewDiscussionComment, "id" | "anchor" | "body"> {
@@ -285,9 +295,11 @@ export interface ReviewDiscussion {
   }[];
   findings: { key: string; finding: ReviewFinding }[];
   comments: ReviewDiscussionComment[];
+  inline_drafts?: InlineDraft[];
   questions?: ReviewQuestion[];
   agent_answers?: SharedReviewAnswer[];
   can_comment: boolean;
+  can_draft_inline?: boolean;
   can_attach_evidence?: boolean;
   can_ask?: boolean;
   can_use_review_workspace?: boolean;
@@ -313,6 +325,37 @@ export function postReviewDiscussionComment(
     comment.id,
     comment,
   );
+}
+
+function inlineDraftsPath(runId: string) {
+  return `${reviewRunPath(runId)}/discussion/inline-drafts`;
+}
+
+export function createInlineDraft(
+  runId: string,
+  draft: Pick<ReviewDiscussionComment, "id" | "anchor" | "body">,
+) {
+  return postReview<InlineDraft>(inlineDraftsPath(runId), draft.id, draft);
+}
+
+export function editInlineDraft(runId: string, id: string, version: number, body: string) {
+  return reviewRequest<InlineDraft>(`${inlineDraftsPath(runId)}/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ version, body }),
+  });
+}
+
+export async function discardInlineDraft(runId: string, id: string, version: number) {
+  const response = await authenticatedFetch(
+    `${inlineDraftsPath(runId)}/${encodeURIComponent(id)}/discard`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ version }),
+    },
+  );
+  if (!response.ok) throw await apiErrorFromResponse(response);
 }
 
 function questionsPath(runId: string) {

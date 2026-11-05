@@ -442,6 +442,11 @@ the full captured diff. Click a line number or drag across one side of a hunk
 to select a range. Replies stay in Omnigent and remain attached to that saved
 revision.
 
+Select **Draft inline comment** to save feedback for the selected finding or
+line range. The draft records the path, side, and range on the captured PR.
+You can edit or discard your draft from the same thread. Each author sees
+their own drafts, including in a review shared with teammates.
+
 On a multi-user instance with sharing enabled, the run owner can open **Share
 this review**, grant access to an existing Omnigent account ID, and send the
 link using **Copy review link**. A collaborator can see this review's captured

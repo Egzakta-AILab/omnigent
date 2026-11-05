@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 from omnigent.db.account_authority import account_generation, require_active_account
 from omnigent.db.compression import encode
 from omnigent.db.db_models import (
+    SqlStudioInlineDraft,
     SqlStudioReviewCollaborator,
     SqlStudioReviewComment,
     SqlStudioReviewEvent,
@@ -38,7 +39,9 @@ from omnigent.db.utils import (
 )
 from omnigent.studio.reviews.discussion import (
     CreateReviewComment,
+    DiffDiscussionAnchor,
     DiscussionAnchor,
+    InlineDraft,
     QuestionAnswer,
     QuestionDispatch,
     QuestionInput,
@@ -127,6 +130,7 @@ _MAX_RECEIPTS_PER_FINDING = 4
 _MAX_COLLABORATORS = 32
 _MAX_DISCUSSION_COMMENTS = 200
 _MAX_DISCUSSION_QUESTIONS = 32
+_MAX_INLINE_DRAFTS = 128
 _DISCUSSION_ANCHOR = TypeAdapter(DiscussionAnchor)
 
 
@@ -991,6 +995,126 @@ class StudioReviewStore:
         generation = require_active_account(session, actor, related_accounts=related)
         self._require_discussion_access(session, run_id, actor, owner, lock=True)
         return generation
+
+    @staticmethod
+    def _inline_draft(row: SqlStudioInlineDraft) -> InlineDraft:
+        return InlineDraft(
+            id=row.id,
+            thread=_DISCUSSION_ANCHOR.validate_json(row.thread_json),
+            anchor=DiffDiscussionAnchor.model_validate_json(row.anchor_json),
+            body=row.body,
+            version=row.version,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+        )
+
+    def list_inline_drafts(
+        self, run_id: str, *, actor: str | None, owner: str | None
+    ) -> list[InlineDraft]:
+        with self._session("list_inline_review_drafts") as session:
+            self._require_discussion_access(session, run_id, actor, owner, lock=False)
+            generation = account_generation(actor) if actor is not None else None
+            rows = session.scalars(
+                select(SqlStudioInlineDraft)
+                .where(
+                    SqlStudioInlineDraft.workspace_id == current_workspace_id(),
+                    SqlStudioInlineDraft.run_id == run_id,
+                    SqlStudioInlineDraft.actor_scope == _owner_scope(actor),
+                    SqlStudioInlineDraft.actor_generation == generation,
+                    SqlStudioInlineDraft.discarded.is_(False),
+                )
+                .order_by(SqlStudioInlineDraft.created_at, SqlStudioInlineDraft.id)
+                .limit(_MAX_INLINE_DRAFTS)
+            )
+            return [self._inline_draft(row) for row in rows]
+
+    def create_inline_draft(
+        self,
+        run_id: str,
+        request: CreateReviewComment,
+        anchor: DiffDiscussionAnchor,
+        *,
+        actor: str | None,
+        owner: str | None,
+    ) -> InlineDraft:
+        intent = hashlib.sha256(request.model_dump_json().encode()).digest()
+        scope = _owner_scope(actor)
+
+        def write(session: Session) -> InlineDraft:
+            generation = self._lock_discussion_writer(session, run_id, actor, owner)
+            row = session.get(SqlStudioInlineDraft, (current_workspace_id(), run_id, request.id))
+            if row is not None:
+                if (row.actor_scope, row.actor_generation, row.intent_hash) != (
+                    scope,
+                    generation,
+                    intent,
+                ) or row.discarded:
+                    raise ReviewConflictError("This draft ID is unavailable")
+                return self._inline_draft(row)
+            count = session.scalar(
+                select(func.count())
+                .select_from(SqlStudioInlineDraft)
+                .where(
+                    SqlStudioInlineDraft.workspace_id == current_workspace_id(),
+                    SqlStudioInlineDraft.run_id == run_id,
+                )
+            )
+            if count is not None and count >= _MAX_INLINE_DRAFTS:
+                raise ReviewConflictError("This review has reached its inline draft limit")
+            now = time.time_ns() // 1_000_000
+            row = SqlStudioInlineDraft(
+                workspace_id=current_workspace_id(),
+                run_id=run_id,
+                id=request.id,
+                actor_scope=scope,
+                actor_generation=generation,
+                intent_hash=intent,
+                thread_json=request.anchor.model_dump_json(),
+                anchor_json=anchor.model_dump_json(),
+                body=request.body,
+                version=1,
+                discarded=False,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(row)
+            return self._inline_draft(row)
+
+        return run_write_transaction(self._write, "create_inline_review_draft", write)
+
+    def change_inline_draft(
+        self,
+        run_id: str,
+        draft_id: str,
+        *,
+        actor: str | None,
+        owner: str | None,
+        version: int,
+        body: str | None,
+    ) -> InlineDraft | None:
+        def write(session: Session) -> InlineDraft | None:
+            generation = self._lock_discussion_writer(session, run_id, actor, owner)
+            row = session.get(SqlStudioInlineDraft, (current_workspace_id(), run_id, draft_id))
+            if row is None or (row.actor_scope, row.actor_generation) != (
+                _owner_scope(actor),
+                generation,
+            ):
+                raise ReviewNotFoundError("Inline draft not found")
+            if row.discarded:
+                if body is None and row.version == version + 1:
+                    return None
+                raise ReviewNotFoundError("Inline draft not found")
+            if body is not None and row.version in (version, version + 1) and row.body == body:
+                return self._inline_draft(row)
+            if row.version != version:
+                raise ReviewConflictError("This draft changed. Reload it before saving.")
+            row.body = body or ""
+            row.discarded = body is None
+            row.version += 1
+            row.updated_at = time.time_ns() // 1_000_000
+            return None if row.discarded else self._inline_draft(row)
+
+        return run_write_transaction(self._write, "change_inline_review_draft", write)
 
     @staticmethod
     def _question_record(row: SqlStudioReviewQuestion) -> QuestionRecord:

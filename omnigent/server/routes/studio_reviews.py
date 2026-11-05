@@ -62,8 +62,12 @@ from omnigent.studio.reviews.discussion import (
     AccountId,
     AskReviewQuestion,
     CreateReviewComment,
+    DiffDiscussionAnchor,
     DiscussionAnchor,
+    EditInlineDraft,
     FindingDiscussionAnchor,
+    InlineDraft,
+    InlineDraftVersion,
     QuestionDispatch,
     QuestionExecution,
     QuestionInput,
@@ -1385,6 +1389,13 @@ def create_studio_reviews_router(
                 actor=access.actor,
                 owner=access.owner,
             )
+            inline_drafts = (
+                await asyncio.to_thread(
+                    review_store.list_inline_drafts, run.id, actor=access.actor, owner=access.owner
+                )
+                if target.candidate is None
+                else []
+            )
             questions, answers = await asyncio.to_thread(
                 review_store.list_discussion_questions,
                 run.id,
@@ -1419,9 +1430,11 @@ def create_studio_reviews_router(
                 if entry.finding_key is not None
             ],
             comments=comments,
+            inline_drafts=inline_drafts,
             questions=questions,
             agent_answers=answers,
             can_comment=access.can_comment,
+            can_draft_inline=access.can_comment and target.candidate is None,
             can_attach_evidence=access.actor == access.owner,
             can_ask=access.can_comment and create_reviewer is not None and send_review is not None,
             can_use_review_workspace=access.actor == access.owner,
@@ -1476,6 +1489,94 @@ def create_studio_reviews_router(
             raise HTTPException(404, str(exc)) from exc
         except ReviewConflictError as exc:
             raise HTTPException(409, str(exc)) from exc
+
+    async def require_inline_draft_access(request: Request, run_id: str) -> DiscussionAccess:
+        access = await discussion_access(request, run_id)
+        if not access.can_comment:
+            raise HTTPException(403, "This account cannot edit inline drafts")
+        if access.run.target.candidate is not None:
+            raise HTTPException(409, "Use the captured pull request for inline drafts")
+        return access
+
+    @router.post(
+        "/studio/review-runs/{run_id}/discussion/inline-drafts",
+        response_model=InlineDraft,
+        dependencies=_WRITE_GATES,
+        openapi_extra=_discussion_request_schema(CreateReviewComment),
+    )
+    async def create_inline_draft(request: Request, run_id: str) -> InlineDraft:
+        access = await require_inline_draft_access(request, run_id)
+        body = await _bounded_json(request, CreateReviewComment, limit=20 * 1024)
+        patch = await saved_run_patch(access.run.id, access.owner)
+        if patch is None:
+            raise HTTPException(404, "This review has no captured diff")
+        finding = await validate_discussion_anchor(access.run, body.anchor, patch)
+        anchor = body.anchor
+        if finding is not None:
+            anchor = DiffDiscussionAnchor(
+                kind="diff",
+                path=finding.path,
+                side=finding.side,
+                start=finding.line,
+                end=finding.line,
+            )
+        assert isinstance(anchor, DiffDiscussionAnchor)
+        try:
+            return await asyncio.to_thread(
+                review_store.create_inline_draft,
+                access.run.id,
+                body,
+                anchor,
+                actor=access.actor,
+                owner=access.owner,
+            )
+        except ReviewNotFoundError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ReviewConflictError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    async def change_inline_draft(
+        access: DiscussionAccess, draft_id: str, version: int, body: str | None
+    ) -> InlineDraft | None:
+        try:
+            return await asyncio.to_thread(
+                review_store.change_inline_draft,
+                access.run.id,
+                _identifier(draft_id),
+                actor=access.actor,
+                owner=access.owner,
+                version=version,
+                body=body,
+            )
+        except ReviewNotFoundError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ReviewConflictError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @router.put(
+        "/studio/review-runs/{run_id}/discussion/inline-drafts/{draft_id}",
+        response_model=InlineDraft,
+        dependencies=_WRITE_GATES,
+        openapi_extra=_discussion_request_schema(EditInlineDraft),
+    )
+    async def edit_inline_draft(request: Request, run_id: str, draft_id: str) -> InlineDraft:
+        access = await require_inline_draft_access(request, run_id)
+        body = await _bounded_json(request, EditInlineDraft, limit=20 * 1024)
+        draft = await change_inline_draft(access, draft_id, body.version, body.body)
+        assert draft is not None
+        return draft
+
+    @router.post(
+        "/studio/review-runs/{run_id}/discussion/inline-drafts/{draft_id}/discard",
+        status_code=204,
+        dependencies=_WRITE_GATES,
+        openapi_extra=_discussion_request_schema(InlineDraftVersion),
+    )
+    async def discard_inline_draft(request: Request, run_id: str, draft_id: str) -> Response:
+        access = await require_inline_draft_access(request, run_id)
+        body = await _bounded_json(request, InlineDraftVersion, limit=1024)
+        await change_inline_draft(access, draft_id, body.version, None)
+        return Response(status_code=204)
 
     async def question_execution(
         request: Request, access: DiscussionAccess, body: AskReviewQuestion

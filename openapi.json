@@ -4211,6 +4211,70 @@
         "title": "IncompleteEvent",
         "type": "object"
       },
+      "InlineDraft": {
+        "additionalProperties": false,
+        "properties": {
+          "anchor": {
+            "$ref": "#/components/schemas/DiffDiscussionAnchor"
+          },
+          "body": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Body",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "int64",
+            "title": "Created At",
+            "type": "integer"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "thread": {
+            "discriminator": {
+              "mapping": {
+                "diff": "#/components/schemas/DiffDiscussionAnchor",
+                "finding": "#/components/schemas/FindingDiscussionAnchor"
+              },
+              "propertyName": "kind"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/FindingDiscussionAnchor"
+              },
+              {
+                "$ref": "#/components/schemas/DiffDiscussionAnchor"
+              }
+            ],
+            "title": "Thread"
+          },
+          "updated_at": {
+            "format": "int64",
+            "title": "Updated At",
+            "type": "integer"
+          },
+          "version": {
+            "exclusiveMaximum": 2147483647.0,
+            "format": "int64",
+            "minimum": 1.0,
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "version",
+          "id",
+          "thread",
+          "anchor",
+          "body",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "InlineDraft",
+        "type": "object"
+      },
       "LaunchRunnerRequest": {
         "description": "Request body for `POST /v1/hosts/{host_id}/runners`.",
         "properties": {
@@ -6732,6 +6796,11 @@
             "title": "Can Comment",
             "type": "boolean"
           },
+          "can_draft_inline": {
+            "default": false,
+            "title": "Can Draft Inline",
+            "type": "boolean"
+          },
           "can_use_review_workspace": {
             "default": false,
             "title": "Can Use Review Workspace",
@@ -6783,6 +6852,13 @@
           "id": {
             "title": "Id",
             "type": "string"
+          },
+          "inline_drafts": {
+            "items": {
+              "$ref": "#/components/schemas/InlineDraft"
+            },
+            "title": "Inline Drafts",
+            "type": "array"
           },
           "patch": {
             "title": "Patch",
@@ -23647,6 +23723,243 @@
           }
         },
         "summary": "Create Review Discussion Comment",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/studio/review-runs/{run_id}/discussion/inline-drafts": {
+      "post": {
+        "operationId": "create_inline_draft_v1_studio_review_runs__run_id__discussion_inline_drafts_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "anchor": {
+                    "discriminator": {
+                      "mapping": {
+                        "diff": "#/components/schemas/DiffDiscussionAnchor",
+                        "finding": "#/components/schemas/FindingDiscussionAnchor"
+                      },
+                      "propertyName": "kind"
+                    },
+                    "oneOf": [
+                      {
+                        "$ref": "#/components/schemas/FindingDiscussionAnchor"
+                      },
+                      {
+                        "$ref": "#/components/schemas/DiffDiscussionAnchor"
+                      }
+                    ],
+                    "title": "Anchor"
+                  },
+                  "body": {
+                    "maxLength": 2000,
+                    "minLength": 1,
+                    "title": "Body",
+                    "type": "string"
+                  },
+                  "id": {
+                    "title": "Id",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "anchor",
+                  "body"
+                ],
+                "title": "CreateReviewComment",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InlineDraft"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Inline Draft",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/studio/review-runs/{run_id}/discussion/inline-drafts/{draft_id}": {
+      "put": {
+        "operationId": "edit_inline_draft_v1_studio_review_runs__run_id__discussion_inline_drafts__draft_id__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "draft_id",
+            "required": true,
+            "schema": {
+              "title": "Draft Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "body": {
+                    "maxLength": 2000,
+                    "minLength": 1,
+                    "title": "Body",
+                    "type": "string"
+                  },
+                  "version": {
+                    "exclusiveMaximum": 2147483647,
+                    "minimum": 1,
+                    "title": "Version",
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "version",
+                  "body"
+                ],
+                "title": "EditInlineDraft",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InlineDraft"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Edit Inline Draft",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/studio/review-runs/{run_id}/discussion/inline-drafts/{draft_id}/discard": {
+      "post": {
+        "operationId": "discard_inline_draft_v1_studio_review_runs__run_id__discussion_inline_drafts__draft_id__discard_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "draft_id",
+            "required": true,
+            "schema": {
+              "title": "Draft Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "version": {
+                    "exclusiveMaximum": 2147483647,
+                    "minimum": 1,
+                    "title": "Version",
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "version"
+                ],
+                "title": "InlineDraftVersion",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Discard Inline Draft",
         "tags": [
           "sessions"
         ]

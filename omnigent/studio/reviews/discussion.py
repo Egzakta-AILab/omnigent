@@ -55,12 +55,15 @@ class DiffDiscussionAnchor(FrozenModel):
 DiscussionAnchor = Annotated[
     FindingDiscussionAnchor | DiffDiscussionAnchor, Field(discriminator="kind")
 ]
+CommentBody = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)
+]
 
 
 class CreateReviewComment(FrozenModel):
     id: str
     anchor: DiscussionAnchor
-    body: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)]
+    body: CommentBody
 
     @field_validator("id")
     @classmethod
@@ -71,6 +74,23 @@ class CreateReviewComment(FrozenModel):
 class ReviewComment(CreateReviewComment):
     author: str | None
     created_at: int
+
+
+class InlineDraftVersion(FrozenModel):
+    version: int = Field(strict=True, ge=1, lt=2**31 - 1)
+
+
+class EditInlineDraft(InlineDraftVersion):
+    body: CommentBody
+
+
+class InlineDraft(InlineDraftVersion):
+    id: str
+    thread: DiscussionAnchor
+    anchor: DiffDiscussionAnchor
+    body: CommentBody
+    created_at: int
+    updated_at: int
 
 
 QuestionAction = Literal["question", "propose_fix"]
@@ -205,9 +225,11 @@ class ReviewDiscussionView(FrozenModel):
     reports: list[ReviewDiscussionReport]
     findings: list[ReviewDiscussionFinding]
     comments: list[ReviewComment]
+    inline_drafts: list[InlineDraft] = Field(default_factory=list)
     questions: list[ReviewQuestion] = Field(default_factory=list)
     agent_answers: list[SharedReviewAnswer] = Field(default_factory=list)
     can_comment: bool
+    can_draft_inline: bool = False
     can_attach_evidence: bool = False
     can_ask: bool = False
     can_use_review_workspace: bool = False
