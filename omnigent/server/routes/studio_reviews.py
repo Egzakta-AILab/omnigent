@@ -7,7 +7,7 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 
 from omnigent.db.utils import builtin_agent_id
 from omnigent.entities import Conversation
@@ -17,6 +17,11 @@ from omnigent.native.native_coding_agents import native_coding_agent_for_agent_n
 from omnigent.server.auth import AuthProvider
 from omnigent.server.routes._auth_helpers import require_user
 from omnigent.server.routes._content_type import require_json_content_type
+from omnigent.server.routes._host_filesystem import (
+    HostFsError,
+    HostFsUnavailableError,
+    read_workspace_from_host,
+)
 from omnigent.server.routes._host_launch import resolve_host_owner
 from omnigent.server.routes._origin import require_trusted_origin
 from omnigent.server.routes._session_create_validation import (
@@ -41,6 +46,7 @@ from omnigent.studio.reviews.models import (
     ReviewOperation,
     ReviewPass,
     ReviewProfile,
+    ReviewRole,
     ReviewTarget,
 )
 from omnigent.studio.reviews.report import ReviewReport, read_review_report, report_instructions
@@ -53,8 +59,10 @@ from omnigent.util.session_lifecycle import is_session_closed
 from omnigent.util.uuid import uuid_to_bytes
 
 if TYPE_CHECKING:
+    from omnigent.server.host_registry import HostConnection, HostRegistry
     from omnigent.server.routes.sessions.routes_core import ReviewCreate
     from omnigent.server.routes.sessions.routes_events import ReviewSend
+    from omnigent.stores.host_store import Host
 
 CaptureContext = Callable[[Request, str, str | None], Awaitable[ReviewTarget]]
 ReadPatch = Callable[[Request, ReviewTarget], Awaitable[str]]
@@ -76,6 +84,18 @@ class ReviewEventsResponse(BaseModel):
     object: Literal["list"] = "list"
     data: list[ReviewEvent]
     next_cursor: int | None
+
+
+class ReviewRolesResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    profiles: list[ReviewRole] = Field(max_length=64)
+
+
+class _WorkspaceRole(ReviewRole):
+    instructions: Annotated[str, StringConstraints(min_length=1, max_length=8192)]
+
+    def metadata(self) -> ReviewRole:
+        return ReviewRole.model_validate(self.model_dump(exclude={"instructions"}))
 
 
 class StartReviewRequest(BaseModel):
@@ -126,27 +146,96 @@ async def _owned_source(
     return conversation
 
 
-async def _qualify_skill(request: Request, review: ReviewPass) -> None:
-    """Check the connected owner host and its complete native skill catalog."""
+async def _connected_review_host(
+    request: Request, owner_id: str | None, host_id: str
+) -> tuple[Host, HostRegistry, HostConnection]:
     host_store = getattr(request.app.state, "host_store", None)
     registry = getattr(request.app.state, "host_registry", None)
     if host_store is None or registry is None:
         raise HTTPException(503, "Connected review hosts are unavailable")
     host = await asyncio.to_thread(
         resolve_host_owner,
-        user_id=review.owner_user_id,
-        host_id=review.target.host_id,
+        user_id=owner_id,
+        host_id=host_id,
         host_store=host_store,
     )
     conn = registry.get(host.host_id)
+    if conn is None or (owner_id is not None and conn.owner != owner_id):
+        raise HTTPException(503, "The review host is offline")
+    return host, registry, conn
+
+
+async def _read_review_profiles(
+    request: Request,
+    *,
+    owner_id: str | None,
+    host_id: str,
+    workspace: str,
+    session_id: str,
+    profile_id: str | None = None,
+) -> dict[str, Any]:
+    _, registry, conn = await _connected_review_host(request, owner_id, host_id)
+    try:
+        return await read_workspace_from_host(
+            host_registry=registry,
+            host_conn=conn,
+            op="studio_review_profiles",
+            workspace=workspace,
+            session_id=session_id,
+            params={"profile_id": profile_id} if profile_id is not None else {},
+        )
+    except HostFsError as exc:
+        if profile_id is not None and exc.status in (400, 404):
+            raise HTTPException(
+                409, "The workspace review profile is unavailable. Reload profiles."
+            ) from exc
+        if exc.status == 400:
+            raise HTTPException(
+                400, "The workspace review-profiles.yaml catalog is invalid"
+            ) from exc
+        raise HTTPException(503, "The review host could not read its workspace profiles") from exc
+    except HostFsUnavailableError as exc:
+        raise HTTPException(503, "The review host could not read its workspace profiles") from exc
+
+
+async def _read_selected_role(
+    request: Request,
+    owner_id: str | None,
+    target: ReviewTarget,
+    profile_id: str,
+    expected_digest: str,
+) -> _WorkspaceRole:
+    payload = await _read_review_profiles(
+        request,
+        owner_id=owner_id,
+        host_id=target.host_id,
+        workspace=target.workspace,
+        session_id=target.source_session_id,
+        profile_id=profile_id,
+    )
+    try:
+        role = _WorkspaceRole.model_validate(payload)
+    except ValidationError as exc:
+        raise HTTPException(503, "The review host returned an invalid workspace profile") from exc
+    if role.id != profile_id or role.digest != expected_digest:
+        raise HTTPException(409, "The workspace review profile changed. Reload profiles.")
+    return role
+
+
+async def _qualify_skill(request: Request, review: ReviewPass) -> None:
+    """Check the connected owner host, native harness and any selected skill."""
+    host, registry, conn = await _connected_review_host(
+        request, review.owner_user_id, review.target.host_id
+    )
     available, reason = reported_harness_availability(
         review.profile.harness, host.configured_harnesses
     )
-    if conn is None:
-        raise HTTPException(503, "The captured review host is offline")
     if available is not True:
         raise HTTPException(409, f"Review harness is unavailable: {reason or 'readiness unknown'}")
-    if SKILL_NAME.fullmatch(review.profile.skill) is None:
+    skill_name = review.profile.skill
+    if skill_name is None:
+        return
+    if SKILL_NAME.fullmatch(skill_name) is None:
         raise HTTPException(422, "Choose a skill with a supported native invocation name")
     try:
         result = await request_host_skills(
@@ -161,7 +250,7 @@ async def _qualify_skill(request: Request, review: ReviewPass) -> None:
         raise HTTPException(503, "The review host could not discover its skills") from exc
     if result.status != "ok" or result.warnings or result.agent_id != review.profile.agent_id:
         raise HTTPException(503, "The review host did not return a complete skill inventory")
-    if not any(skill.get("name") == review.profile.skill for skill in result.skills):
+    if not any(skill.get("name") == skill_name for skill in result.skills):
         raise HTTPException(409, "The captured skill is unavailable on the review host")
 
 
@@ -189,6 +278,38 @@ def create_studio_reviews_router(
         if review is None:
             raise HTTPException(404, "Review not found")
         return review
+
+    @router.get(
+        "/sessions/{source_session_id}/studio/review-profiles",
+        response_model=ReviewRolesResponse,
+    )
+    async def list_review_profiles(
+        request: Request, response: Response, source_session_id: str
+    ) -> ReviewRolesResponse:
+        user_id = require_user(request, auth_provider)
+        source = await _owned_source(
+            _identifier(source_session_id),
+            user_id,
+            conversation_store,
+            permission_store,
+            auth_provider,
+        )
+        response.headers["Cache-Control"] = "no-store"
+        if not source.host_id or not source.workspace:
+            return ReviewRolesResponse(profiles=[])
+        payload = await _read_review_profiles(
+            request,
+            owner_id=user_id,
+            host_id=source.host_id,
+            workspace=source.workspace,
+            session_id=source.id,
+        )
+        try:
+            return ReviewRolesResponse.model_validate(payload)
+        except ValidationError as exc:
+            raise HTTPException(
+                503, "The review host returned an invalid profile catalog"
+            ) from exc
 
     @router.post(
         "/sessions/{source_session_id}/studio/reviews",
@@ -230,10 +351,22 @@ def create_studio_reviews_router(
 
         async def target() -> ReviewTarget:
             captured = await capture_context(request, source_session_id, body.pr_url)
-            await _owned_source(
+            source = await _owned_source(
                 source_session_id, user_id, conversation_store, permission_store, auth_provider
             )
+            if body.profile_id and (source.host_id, source.workspace) != (
+                captured.host_id,
+                captured.workspace,
+            ):
+                raise HTTPException(409, "The review execution target changed")
             return captured
+
+        async def role(captured: ReviewTarget) -> ReviewRole:
+            assert body.profile_id is not None and body.profile_digest is not None
+            selected = await _read_selected_role(
+                request, user_id, captured, body.profile_id, body.profile_digest
+            )
+            return selected.metadata()
 
         try:
             result = await service.capture(
@@ -243,6 +376,7 @@ def create_studio_reviews_router(
                 body=body,
                 resolve_profile=profile,
                 resolve_target=target,
+                resolve_role=role,
             )
         except ReviewConflictError:
             raise HTTPException(
@@ -334,6 +468,16 @@ def create_studio_reviews_router(
             current = await capture_context(request, target.source_session_id, target.pr_url)
             if current != target:
                 raise HTTPException(409, "The pull request revision or execution target changed")
+            role_instructions = None
+            if (role := review.profile.role) is not None:
+                selected_role = await _read_selected_role(
+                    request, owner, target, role.id, role.digest
+                )
+                if selected_role.metadata() != role:
+                    raise HTTPException(
+                        409, "The workspace review profile changed. Reload profiles."
+                    )
+                role_instructions = selected_role.instructions
             patch = await read_patch(request, target)
             source = await _owned_source(
                 target.source_session_id,
@@ -345,7 +489,9 @@ def create_studio_reviews_router(
             if (source.host_id, source.workspace) != (target.host_id, target.workspace):
                 raise HTTPException(409, "The review execution target changed")
             try:
-                return review_prompt(review, patch, report_instructions(review))
+                return review_prompt(
+                    review, patch, report_instructions(review), role_instructions=role_instructions
+                )
             except ValueError as exc:
                 raise HTTPException(409, str(exc)) from None
 

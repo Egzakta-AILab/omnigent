@@ -126,11 +126,12 @@ pagination, old-side placement, revision, permission and failure matrices.
 
 `tests/e2e_ui/github/test_github_tab.py::test_studio_review_from_pr_panel`
 drives **Review** from the rail, both composer layouts and Canvas. It scripts
-GitHub and review responses to check the skill picker, a retry after a lost
-start response, report repair, and navigation to a captured line. The rail
-case selects a nested checkout, links its branch PR, and starts the review
-from the enclosing workspace. It also checks that an earlier report stays
-separate from the updated diff.
+GitHub, host catalogs and review responses to check model and reasoning
+selection, a retry after a lost start response, report repair, and navigation
+to a captured line. The rail case selects a nested checkout, links its branch
+PR, and starts a review with a workspace profile from the enclosing workspace.
+The other cases choose a native skill. The rail also checks that an earlier
+report stays separate from the updated diff.
 Use the [local review walkthrough](../docs/studio/README.md#run-a-review-locally)
 for the native skill, transcript and saved-report checks.
 

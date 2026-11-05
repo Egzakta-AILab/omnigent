@@ -10,6 +10,8 @@ from omnigent.util.uuid import normalize_uuid
 
 BoundedText = Annotated[str, StringConstraints(min_length=1, max_length=256)]
 Sha = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")]
+ReviewRoleId = Annotated[str, StringConstraints(pattern=r"^[a-z0-9][a-z0-9_-]{0,63}$")]
+ReviewRoleDigest = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 ReviewAction = Literal[
     "review.capture", "review.start", "review.continue", "review.cancel", "review.publish"
 ]
@@ -34,13 +36,21 @@ class FrozenModel(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
 
+class ReviewRole(FrozenModel):
+    id: ReviewRoleId
+    label: Annotated[str, StringConstraints(min_length=1, max_length=128)]
+    description: Annotated[str, StringConstraints(max_length=512)] = ""
+    digest: ReviewRoleDigest
+
+
 class ReviewProfile(FrozenModel):
     agent_id: str
     agent_version: BoundedText
     harness: Literal["codex-native", "claude-native"]
-    skill: BoundedText
+    skill: BoundedText | None = None
     model: BoundedText | None = None
     reasoning_effort: BoundedText | None = None
+    role: ReviewRole | None = None
 
     @field_validator("agent_id")
     @classmethod

@@ -9,13 +9,22 @@ from collections.abc import Awaitable, Callable
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, StringConstraints, field_validator
+from pydantic import BaseModel, ConfigDict, StringConstraints, field_validator, model_validator
 
 from omnigent.stores.studio_review_store import (
     ReviewConflictError,
     StudioReviewStore,
 )
-from omnigent.studio.reviews.models import CaptureResult, ReviewProfile, ReviewTarget, Sha
+from omnigent.studio.reviews.models import (
+    BoundedText,
+    CaptureResult,
+    ReviewProfile,
+    ReviewRole,
+    ReviewRoleDigest,
+    ReviewRoleId,
+    ReviewTarget,
+    Sha,
+)
 from omnigent.util.uuid import uuid_to_bytes
 
 
@@ -32,10 +41,20 @@ class CaptureReviewRequest(BaseModel):
     expected_head_sha: Sha
     agent_id: Annotated[str, StringConstraints(min_length=1, max_length=128)]
     harness: Literal["codex-native", "claude-native"]
-    skill: Annotated[str, StringConstraints(min_length=1, max_length=256)]
+    skill: BoundedText | None = None
     model: Annotated[str, StringConstraints(min_length=1, max_length=256)] | None = None
     reasoning_effort: Annotated[str, StringConstraints(min_length=1, max_length=256)] | None = None
     pr_url: Annotated[str, StringConstraints(min_length=1, max_length=2048)] | None = None
+    profile_id: ReviewRoleId | None = None
+    profile_digest: ReviewRoleDigest | None = None
+
+    @model_validator(mode="after")
+    def require_reviewer_guidance(self) -> CaptureReviewRequest:
+        if (self.profile_id is None) != (self.profile_digest is None):
+            raise ValueError("A review profile selection requires its ID and digest")
+        if self.skill is None and self.profile_id is None:
+            raise ValueError("Choose a review profile or a skill")
+        return self
 
     @field_validator("agent_id")
     @classmethod
@@ -71,7 +90,10 @@ def capture_fingerprint(source_session_id: str, body: CaptureReviewRequest) -> s
     payload = {
         "action": "review.capture",
         "source_session_id": source_session_id,
-        **body.model_dump(),
+        # Skill-only captures must continue to replay their original keys.
+        **body.model_dump(
+            exclude={"profile_id", "profile_digest"} if body.profile_id is None else None
+        ),
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
@@ -92,6 +114,7 @@ class ReviewService:
         body: CaptureReviewRequest,
         resolve_target: Callable[[], Awaitable[ReviewTarget]],
         resolve_profile: Callable[[], Awaitable[ReviewProfile]],
+        resolve_role: Callable[[ReviewTarget], Awaitable[ReviewRole]],
     ) -> CaptureResult:
         """Replay exact intent or freeze a fresh target and validated reviewer profile."""
         request_hash = capture_fingerprint(source_session_id, body)
@@ -119,6 +142,8 @@ class ReviewService:
             raise ReviewConflictError(
                 "PR revision changed; refresh the PR before capturing a review"
             )
+        if body.profile_id is not None:
+            profile = profile.model_copy(update={"role": await resolve_role(target)})
         return await asyncio.to_thread(
             self.store.capture,
             owner_user_id=owner_user_id,

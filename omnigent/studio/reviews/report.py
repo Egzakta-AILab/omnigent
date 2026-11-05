@@ -240,8 +240,10 @@ def read_review_report(conversation_store: ConversationStore, review: ReviewPass
         review.target.base_sha,
         review.target.head_sha,
     ):
-        if review.profile.harness == "claude-native" and not _has_claude_skill_launch(
-            conversation_store, session_id, latest, review.profile.skill
+        if (
+            review.profile.harness == "claude-native"
+            and (skill := review.profile.skill) is not None
+            and not _has_claude_skill_launch(conversation_store, session_id, latest, skill)
         ):
             return ReviewReport(state="incomplete", message_id=latest.id)
         return ReviewReport(

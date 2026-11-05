@@ -4053,6 +4053,10 @@ class HostProcess:
                 )
             elif frame.op == "workspace_repositories":
                 payload = read_workspace_repositories(Path(expanded), params.get("repository"))
+            elif frame.op == "studio_review_profiles":
+                from omnigent.studio.reviews.profiles import read_review_profiles
+
+                payload = read_review_profiles(Path(expanded), params.get("profile_id"))
             else:
                 reader = self._workspace_reader(expanded)
                 with pr_resource.server_tracking(

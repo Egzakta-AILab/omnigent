@@ -17,7 +17,7 @@ from omnigent.entities.conversation import (
 )
 from omnigent.entities.pagination import PagedList
 from omnigent.stores.conversation_store import ConversationStore
-from omnigent.studio.reviews.models import ReviewPass, ReviewProfile, ReviewTarget
+from omnigent.studio.reviews.models import ReviewPass, ReviewProfile, ReviewRole, ReviewTarget
 from omnigent.studio.reviews.report import read_review_report, report_instructions
 
 
@@ -217,6 +217,14 @@ def test_reads_a_claude_report_split_across_persisted_text_blocks(review: Review
         review.reviewer_session_id, order="desc", after="last-part", limit=64
     )
     store.append.assert_not_called()
+
+
+def test_reads_a_role_only_claude_report_without_skill_receipt(review: ReviewPass) -> None:
+    role = ReviewRole(id="security", label="Security", digest="a" * 64)
+    profile = review.profile.model_copy(update={"role": role, "skill": None})
+    review = review.model_copy(update={"profile": profile})
+    store = _transcript(review, _message(_report(review), phase="final_answer"))
+    assert read_review_report(store, review).state == "ready"
 
 
 def test_instructions_provide_a_valid_envelope_with_the_bound_revision(review: ReviewPass) -> None:

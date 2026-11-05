@@ -2,17 +2,23 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI, HTTPException, Request
 
+from omnigent.db.utils import builtin_agent_id
+from omnigent.host.frames import HostHelloFrame
+from omnigent.native.native_coding_agents import CODEX_NATIVE_AGENT_NAME
 from omnigent.runtime.agent_cache import AgentCache
 from omnigent.server.app import create_app
 from omnigent.server.auth import LEVEL_EDIT, LEVEL_OWNER, LEVEL_READ, UnifiedAuthProvider
@@ -21,6 +27,7 @@ from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
 from omnigent.stores.artifact_store.local import LocalArtifactStore
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
 from omnigent.stores.file_store.sqlalchemy_store import SqlAlchemyFileStore
+from omnigent.stores.host_store import HostStore
 from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
 from omnigent.stores.session_pull_request_store import PullRequestReport, SessionPullRequestStore
 from omnigent.stores.studio_review_store import StudioReviewStore
@@ -44,6 +51,8 @@ class ReviewHarness:
     app: FastAPI | None = None
     capture_error: HTTPException | None = None
     captured: list[tuple[str, str | None]] = field(default_factory=list)
+    read_patch: AsyncMock = field(default_factory=AsyncMock)
+    create_reviewer: AsyncMock = field(default_factory=AsyncMock)
 
 
 @pytest.fixture
@@ -92,6 +101,9 @@ def review_harness(
         conversations,
         agents,
         capture_context=capture_context,
+        read_patch=harness.read_patch,
+        create_reviewer=harness.create_reviewer,
+        send_review=AsyncMock(),
         auth_provider=auth,
         permission_store=permissions,
     )
@@ -212,6 +224,7 @@ async def test_shared_source_access_does_not_grant_review_access(
     assert (await _capture(review_client, review_harness, user=BOB)).status_code == 404
     for path in (
         f"/v1/sessions/{review_harness.source_id}/studio/reviews",
+        f"/v1/sessions/{review_harness.source_id}/studio/review-profiles",
         f"/v1/studio/reviews/{review_id}",
         f"/v1/studio/reviews/{review_id}/operations/{operation_id}",
         f"/v1/studio/reviews/{review_id}/events",
@@ -327,6 +340,11 @@ async def test_fresh_store_recovers_same_review(
         {"agent_id": "not-a-uuid"},
         {"harness": "other-native"},
         {"skill": "   "},
+        {"skill": None},
+        {"profile_id": "backend"},
+        {"profile_digest": "a" * 64},
+        {"profile_id": "../backend", "profile_digest": "a" * 64},
+        {"profile_id": "backend", "profile_digest": "bad"},
         {"pr_url": "https://user:secret@github.com/example/project/pull/42"},
         {"pr_url": "https://github.com/example/project/pull/42?token=secret"},
     ],
@@ -359,6 +377,110 @@ async def test_model_metadata_uses_existing_validation(
     response = await _capture(review_client, review_harness, model="--shell-shaped")
     assert response.status_code == 400
     assert review_harness.captured == []
+
+
+async def test_legacy_capture_fingerprint_still_replays(
+    review_harness: ReviewHarness, review_client: httpx.AsyncClient
+) -> None:
+    prior_request = {
+        "action": "review.capture",
+        "source_session_id": review_harness.source_id,
+        **_body(review_harness),
+        "model": None,
+        "reasoning_effort": None,
+        "pr_url": None,
+    }
+    prior_digest = hashlib.sha256(
+        json.dumps(prior_request, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    response = await _capture(review_client, review_harness)
+    assert response.status_code == 201
+    assert response.json()["operation"]["request_hash"] == prior_digest
+
+
+async def test_role_catalog_and_capture_use_bound_owner_workspace(
+    review_harness: ReviewHarness,
+    review_client: httpx.AsyncClient,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = review_harness.app
+    assert app is not None
+    target = review_harness.target
+    host_store = HostStore(db_uri)
+    app.state.host_store = host_store
+    host_store.upsert_on_connect(
+        target.host_id, "Review host", ALICE, configured_harnesses={"codex-native": True}
+    )
+    connection = app.state.host_registry.register(
+        target.host_id,
+        Mock(),
+        HostHelloFrame(version="0.1.0", frame_protocol_version=1, name="Review host"),
+        owner=ALICE,
+    )
+    role = {"id": "backend", "label": "Backend review", "description": "", "digest": "1" * 64}
+    calls = []
+    digest = role["digest"]
+
+    async def read_from_host(**kwargs):
+        assert kwargs["host_conn"] is connection
+        assert kwargs["op"] == "studio_review_profiles"
+        assert kwargs["session_id"] == target.source_session_id
+        assert kwargs["workspace"] == target.workspace
+        calls.append(kwargs["params"])
+        if kwargs["params"]:
+            assert kwargs["params"] == {"profile_id": role["id"]}
+            return {**role, "digest": digest, "instructions": "Check service boundaries."}
+        return {"profiles": [role]}
+
+    monkeypatch.setattr(
+        "omnigent.server.routes.studio_reviews.read_workspace_from_host", read_from_host
+    )
+    headers = {"X-Forwarded-Email": ALICE}
+    path = f"/v1/sessions/{target.source_session_id}/studio/review-profiles"
+    catalog = await review_client.get(path, headers=headers, params={"workspace": "/other"})
+    assert catalog.status_code == 200, catalog.text
+    assert catalog.json() == {"profiles": [role]}
+    assert catalog.headers["Cache-Control"] == "no-store"
+
+    reviewer = review_harness.agents.create(
+        builtin_agent_id(CODEX_NATIVE_AGENT_NAME), CODEX_NATIVE_AGENT_NAME, "reviewer-bundle"
+    )
+    choices = {
+        "agent_id": reviewer.id,
+        "profile_id": role["id"],
+        "profile_digest": role["digest"],
+        "skill": None,
+        "model": "review-model",
+        "reasoning_effort": "high",
+    }
+    stale = await _capture(
+        review_client, review_harness, **{**choices, "profile_digest": "2" * 64}
+    )
+    assert stale.status_code == 409, stale.text
+    captured = await _capture(review_client, review_harness, **choices)
+    assert captured.status_code == 201, captured.text
+    review = captured.json()["review"]
+    assert review["profile"]["role"] == role
+    assert review["profile"]["skill"] is None
+    assert review["profile"]["model"] == "review-model"
+    assert review["profile"]["reasoning_effort"] == "high"
+    assert calls == [{}, {"profile_id": "backend"}, {"profile_id": "backend"}]
+
+    digest = "3" * 64
+    replay = await _capture(review_client, review_harness, **choices)
+    assert replay.status_code == 200
+    assert replay.json()["review"] == review
+    start = await review_client.post(
+        f"/v1/studio/reviews/{review['id']}/start",
+        headers={**headers, "Idempotency-Key": "start-role"},
+        json={},
+    )
+    assert start.status_code == 409, start.text
+    assert "profile changed" in start.json()["detail"]
+    assert calls[-1] == {"profile_id": "backend"}
+    review_harness.read_patch.assert_not_awaited()
+    review_harness.create_reviewer.assert_not_awaited()
 
 
 async def test_source_identifier_is_canonicalized(

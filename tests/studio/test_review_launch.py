@@ -9,8 +9,13 @@ import uuid
 import pytest
 
 from omnigent.stores.studio_review_store import ReviewConflictError, StudioReviewStore
-from omnigent.studio.reviews.launch import MAX_REVIEW_PATCH_BYTES, run_review, verified_patch
-from omnigent.studio.reviews.models import ReviewPass, ReviewProfile, ReviewTarget
+from omnigent.studio.reviews.launch import (
+    MAX_REVIEW_PATCH_BYTES,
+    review_prompt,
+    run_review,
+    verified_patch,
+)
+from omnigent.studio.reviews.models import ReviewPass, ReviewProfile, ReviewRole, ReviewTarget
 
 
 @pytest.fixture
@@ -61,6 +66,29 @@ def captured(db_uri: str, target: ReviewTarget) -> tuple[StudioReviewStore, Revi
         ),
     )
     return store, result.review
+
+
+def test_workspace_role_guides_private_review_of_captured_diff(captured):
+    _, review = captured
+    role = ReviewRole(id="orchestrator", label="Orchestrator", digest="a" * 64)
+    review = review.model_copy(
+        update={"profile": review.profile.model_copy(update={"skill": None, "role": role})}
+    )
+    body = "Route backend changes to the backend lens."
+    prompt = review_prompt(
+        review,
+        "diff --git a/main.py b/main.py",
+        "Return structured findings.",
+        role_instructions=body,
+    )
+    assert "Apply its routing rules yourself" in prompt
+    assert "Do not spawn other reviewers" in prompt
+    assert prompt.index(body) < prompt.index("Return structured findings.")
+    assert '"untrusted_patch": "diff --git a/main.py b/main.py"' in prompt
+    assert review.target.head_sha in prompt
+    assert "$review" not in prompt
+    with pytest.raises(ValueError, match="captured review guidance"):
+        review_prompt(review, "diff --git a/main.py b/main.py", "Return structured findings.")
 
 
 @pytest.mark.parametrize("lose_ack", [False, True])
