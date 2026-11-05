@@ -1790,6 +1790,7 @@ class SqlStudioReviewRun(OmnigentBase):
     request_key: Mapped[bytes] = mapped_column(_CKSUM32, nullable=False)
     request_hash: Mapped[bytes] = mapped_column(_CKSUM32, nullable=False)
     target_json: Mapped[str] = mapped_column(CompressedText, nullable=False)
+    patch_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
     __table_args__ = (
         UniqueConstraint("workspace_id", "owner_scope", "request_key", name="uq_review_run_key"),
@@ -1802,6 +1803,19 @@ class SqlStudioReviewRun(OmnigentBase):
             "created_at",
             "id",
         ),
+    )
+
+
+class SqlStudioReviewPatchChunk(OmnigentBase):
+    """Byte-bounded patch parts, joined only when reading a captured diff."""
+
+    __tablename__ = "studio_review_patch_chunks"
+    workspace_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    run_id: Mapped[str] = mapped_column(Uuid16, primary_key=True)
+    position: Mapped[int] = mapped_column(SmallInteger, primary_key=True)
+    payload: Mapped[bytes] = mapped_column(LargeBinary(12288), nullable=False)
+    __table_args__ = (
+        CheckConstraint("position >= 0 AND position < 4", name="ck_review_patch_position"),
     )
 
 

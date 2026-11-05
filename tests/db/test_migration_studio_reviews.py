@@ -11,6 +11,7 @@ from omnigent.db.db_models import (
     SqlStudioReviewEvent,
     SqlStudioReviewOperation,
     SqlStudioReviewPass,
+    SqlStudioReviewPatchChunk,
     SqlStudioReviewRun,
 )
 from omnigent.db.utils import _build_alembic_config
@@ -19,7 +20,7 @@ _PREVIOUS = "d0a1f879a01d"
 _REVISION = "e6a2b4c8d013"
 _PROJECT_ORIGIN = "5f9ca09e07cd"
 _RUNS = "8f4b6c20a115"
-_RUN_REPORTS = "bd90f34ca312"
+_RUN_REPORTS = "2ba879ed4116"
 _TABLES = {"studio_review_passes", "studio_review_operations", "studio_review_events"}
 
 
@@ -70,6 +71,7 @@ def test_upgrade_and_downgrade_preserve_existing_database(tmp_path: Path) -> Non
             SqlStudioReviewOperation,
             SqlStudioReviewEvent,
             SqlStudioReviewRun,
+            SqlStudioReviewPatchChunk,
         ):
             inspected = sa.inspect(engine)
             actual = {c["name"] for c in inspected.get_columns(model.__tablename__)}
