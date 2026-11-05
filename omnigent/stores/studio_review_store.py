@@ -50,6 +50,7 @@ from omnigent.studio.reviews.discussion import (
     CreateReviewComment,
     DiffDiscussionAnchor,
     DiscussionAnchor,
+    FindingDiscussionAnchor,
     InlineDraft,
     InlineDraftSelection,
     InlinePublicationState,
@@ -885,6 +886,25 @@ class StudioReviewStore:
                 raise ReviewConflictError(
                     "The receipt does not match this saved PR revision and diff"
                 )
+            if isinstance(receipt, ReproductionReceipt) and receipt.proposal_id is not None:
+                self._require_discussion_access(
+                    session, run_id, owner_user_id, owner_user_id, lock=False
+                )
+                row = self._question_row(
+                    session, run_id, receipt.proposal_id, owner_user_id, run.owner_generation
+                )
+                proposal = self._question_record(row).view if row is not None else None
+                if (
+                    proposal is None
+                    or proposal.action != "propose_check"
+                    or proposal.anchor
+                    != FindingDiscussionAnchor(kind="finding", finding_key=finding_key)
+                    or proposal.proposed_check is None
+                    or not proposal.proposed_check.matches(receipt)
+                ):
+                    raise ReviewConflictError(
+                        "The receipt does not match the saved check proposal"
+                    )
             headers = list(
                 session.execute(
                     select(
@@ -1409,6 +1429,7 @@ class StudioReviewStore:
                 citations=answer.citations if answer else None,
                 action=snapshot.execution.action,
                 proposed_patch=answer.proposed_patch if answer else None,
+                proposed_check=answer.proposed_check if answer else None,
                 published_at=row.published_at,
                 updated_at=row.updated_at,
             ),
@@ -1524,11 +1545,11 @@ class StudioReviewStore:
             if answer is not None and row.answer_json is None:
                 row.answer_json = answer.model_dump_json()
             if publish and row.published_at is None:
-                if (
-                    QuestionInput.model_validate_json(row.input_json).execution.action
-                    == "propose_fix"
-                ):
+                action = QuestionInput.model_validate_json(row.input_json).execution.action
+                if action == "propose_fix":
                     raise ReviewConflictError("Attach a checked patch to share a fix proposal")
+                if action == "propose_check":
+                    raise ReviewConflictError("Attach the check receipt to share the result")
                 if row.answer_json is None:
                     raise ReviewConflictError("The question has no confirmed answer to share")
                 row.published_at = time.time_ns() // 1_000_000

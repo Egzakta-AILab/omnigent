@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shlex
 from base64 import b64decode
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -2178,8 +2179,32 @@ def test_studio_review_from_pr_panel(
         page.route(f"{discussion_path}/collaborators", grant_discussion_access)
         page.route(f"{discussion_path}/comments", reply_in_discussion)
 
+        sandbox_check = {
+            "command": ["python", "-c", "print('$(literal)')"],
+            "paths": ["src/app/main.py"],
+            "timeout_seconds": 15,
+            "evidence_files": [],
+        }
+
         def create_private_question(route: Route) -> None:
             payload = route.request.post_data_json
+            if payload.get("action") == "propose_check":
+                assert payload["anchor"] == {"kind": "finding", "finding_key": finding_key}
+                assert payload["reviewer_key"] == "6" * 64
+                proposed_check = {
+                    **payload,
+                    "session_id": "a" * 32,
+                    "harness": "codex-native",
+                    "status": "accepted",
+                    "answer_state": "ready",
+                    "answer": "Inspect the exported file on both revisions.",
+                    "proposed_check": sandbox_check,
+                    "published_at": None,
+                    "updated_at": review["created_at"],
+                }
+                questions.append(proposed_check)
+                route.fulfill(json=proposed_check)
+                return
             if payload.get("action") == "propose_fix":
                 assert payload["anchor"] == {"kind": "finding", "finding_key": finding_key}
                 assert payload["reviewer_key"] == "6" * 64
@@ -2285,6 +2310,7 @@ def test_studio_review_from_pr_panel(
                     "can_publish_inline": True,
                     "can_ask": True,
                     "can_use_review_workspace": True,
+                    "check_repository": workspace,
                     "review_workspace_host_id": host_id,
                     "collaborators": collaborators,
                     "sharing_available": True,
@@ -2387,6 +2413,22 @@ def test_studio_review_from_pr_panel(
             thread.get_by_role("button", name="Download patch", exact=True).click()
         assert download.value.path().read_bytes() == proposed_patch.encode()
         page.screenshot(path=str(tmp_path / "review-private-fix-proposal.png"))
+        page.context.grant_permissions(["clipboard-read", "clipboard-write"], origin=base_url)
+        thread.get_by_role("button", name="Draft sandbox check", exact=True).click()
+        thread.get_by_label("Answer with").select_option("reviewer:" + "6" * 64)
+        thread.get_by_role("button", name="Request private proposal", exact=True).click()
+        card = thread.get_by_role("region", name="Sandbox check proposal")
+        expect(card).to_be_visible()
+        command_button = card.get_by_role("button", name="Copy sandbox command", exact=True)
+        expect(command_button).to_be_disabled()
+        card.get_by_label("Local Docker image ID").fill("sha256:" + "c" * 64)
+        command_button.click()
+        expect(card.get_by_text("Command copied.")).to_be_visible()
+        tokens = shlex.split(page.evaluate("navigator.clipboard.readText()"))
+        assert tokens[tokens.index("--proposal-id") + 1] == questions[-1]["id"]
+        assert tokens[tokens.index("--") + 1 : tokens.index("&&")] == sandbox_check["command"]
+        assert tokens[tokens.index("--finding") + 1] == finding_key
+        page.screenshot(path=str(tmp_path / "review-sandbox-check-proposal.png"))
         return
 
     page.goto(f"{base_url}/{'canvas/' if entry == 'canvas' else ''}c/{session_id}")

@@ -7,6 +7,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field, StringConstraints, field_validator, model_validator
 
+from omnigent.studio.reviews.check_proposal import ProposedCheck
 from omnigent.studio.reviews.evidence import Anchor, Side
 from omnigent.studio.reviews.models import (
     BoundedText,
@@ -140,7 +141,7 @@ class InlinePublicationPreview(FrozenModel):
     drafts: list[InlineDraft]
 
 
-QuestionAction = Literal["question", "propose_fix"]
+QuestionAction = Literal["question", "propose_fix", "propose_check"]
 MAX_PROPOSED_PATCH_BYTES = 24 * 1024
 
 
@@ -160,8 +161,8 @@ class AskReviewQuestion(CreateReviewComment):
 
     @model_validator(mode="after")
     def validate_selection(self) -> AskReviewQuestion:
-        if self.action == "propose_fix" and not isinstance(self.anchor, FindingDiscussionAnchor):
-            raise ValueError("Choose a finding for the fix proposal")
+        if self.action != "question" and not isinstance(self.anchor, FindingDiscussionAnchor):
+            raise ValueError("Choose a finding for the proposal")
         if (self.agent_id is None) == (self.reviewer_key is None):
             raise ValueError("Choose an agent or a saved reviewer")
         if (self.host_id is None) != (self.workspace is None):
@@ -207,6 +208,9 @@ class QuestionAnswer(FrozenModel):
     proposed_patch: str | None = Field(
         default=None, min_length=1, max_length=MAX_PROPOSED_PATCH_BYTES
     )
+    proposed_check: ProposedCheck | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class ReviewQuestion(FrozenModel):
@@ -221,6 +225,7 @@ class ReviewQuestion(FrozenModel):
     citations: list[QuestionCitation] | None = None
     action: QuestionAction = "question"
     proposed_patch: str | None = None
+    proposed_check: ProposedCheck | None = None
     published_at: int | None = None
     updated_at: int
 
@@ -281,6 +286,7 @@ class ReviewDiscussionView(FrozenModel):
     can_attach_evidence: bool = False
     can_ask: bool = False
     can_use_review_workspace: bool = False
+    check_repository: str | None = None
     review_workspace_host_id: str | None = None
     collaborators: list[str] | None = None
     sharing_available: bool

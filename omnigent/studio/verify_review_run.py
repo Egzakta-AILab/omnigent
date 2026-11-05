@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 from pydantic import ValidationError
 
 from omnigent.runner.session_prs import PullRequestRef
 from omnigent.studio import setup
+from omnigent.studio.reviews.discussion import ReviewQuestion
 from omnigent.studio.reviews.evidence import changed_anchors, patch_digest
 from omnigent.studio.reviews.models import MAX_RUN_REVIEWERS, ReviewRun, require_uuid
 from omnigent.studio.reviews.report import (
@@ -19,6 +20,47 @@ from omnigent.studio.reviews.report import (
 )
 from omnigent.studio.reviews.reproduction import ReproductionError, ReproductionSource
 from omnigent.studio.reviews.service import CaptureReviewRequest
+
+if TYPE_CHECKING:
+    from omnigent.studio.reviews.check_proposal import ProposedCheck
+
+
+def read_check_proposal(
+    *,
+    mode: str,
+    server_url: str,
+    run_id: str,
+    proposal_id: str,
+    transport: httpx.BaseTransport | None = None,
+) -> ProposedCheck:
+    server_url = setup.validate_server_url(server_url, mode)
+    run_id, proposal_id = require_uuid(run_id), require_uuid(proposal_id)
+    try:
+        headers = setup._headers(server_url, None)
+    except Exception:  # noqa: BLE001 — credential errors may contain private values
+        raise ReproductionError("The instance credentials could not be loaded") from None
+    with httpx.Client(
+        base_url=f"{server_url}/",
+        headers=headers,
+        timeout=5,
+        follow_redirects=False,
+        trust_env=False,
+        transport=transport,
+    ) as client:
+        path = f"v1/studio/review-runs/{run_id}/discussion/questions/{proposal_id}"
+        raw = setup._Probe(client, []).get("check.proposal", path)
+    try:
+        proposal = ReviewQuestion.model_validate(raw)
+    except ValidationError:
+        raise ReproductionError("The saved sandbox proposal could not be read") from None
+    if (
+        proposal.id != proposal_id
+        or proposal.action != "propose_check"
+        or proposal.answer_state != "ready"
+        or proposal.proposed_check is None
+    ):
+        raise ReproductionError("The agent has no confirmed sandbox check proposal")
+    return proposal.proposed_check
 
 
 def _matches_pr_url(saved: str, expected: str | None) -> bool:

@@ -216,6 +216,8 @@ export interface AttachedReproduction {
         base: ReproductionSide;
         head: ReproductionSide;
         included_paths?: string[];
+        proposal_id?: string | null;
+        requested_evidence?: string[];
       })
     | FixCheckSummary;
 }
@@ -253,7 +255,14 @@ export interface InlinePublicationPreview {
   drafts: InlineDraft[];
 }
 
-export type QuestionAction = "question" | "propose_fix";
+export type QuestionAction = "question" | "propose_fix" | "propose_check";
+
+export interface ProposedCheck {
+  command: string[];
+  paths: string[];
+  timeout_seconds: number;
+  evidence_files: string[];
+}
 
 export interface AskReviewQuestion extends Pick<ReviewDiscussionComment, "id" | "anchor" | "body"> {
   action?: QuestionAction;
@@ -278,6 +287,7 @@ export interface ReviewQuestion extends Pick<ReviewDiscussionComment, "id" | "an
   answer_state: "pending" | "incomplete" | "ready";
   answer: string | null;
   proposed_patch?: string | null;
+  proposed_check?: ProposedCheck | null;
   citations?: QuestionCitation[] | null;
   published_at: number | null;
   updated_at: number;
@@ -321,6 +331,7 @@ export interface ReviewDiscussion {
   can_attach_evidence?: boolean;
   can_ask?: boolean;
   can_use_review_workspace?: boolean;
+  check_repository?: string | null;
   review_workspace_host_id?: string | null;
   collaborators: string[] | null;
   sharing_available: boolean;

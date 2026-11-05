@@ -435,6 +435,23 @@ reviewers. This run reviews the proposed delta from the captured PR head to
 the candidate snapshot. Open it from the fix attachment or the review run
 list. Its discussion links back to the original finding.
 
+### Draft a sandbox check with an agent
+
+Open a finding and choose **Draft sandbox check**. Pick a reviewer or native
+agent and describe what the check should prove. The private proposal shows the
+command, Git paths, timeout, and evidence filenames. Review those details
+before choosing the installed Docker image ID. The repository path can point
+to any checkout on the execution machine with both saved commits.
+
+Choose **Copy sandbox command** and run it from an Omnigent checkout. The
+verifier checks the saved proposal before Docker starts. It runs the command
+against both revisions and attaches the receipt and matching files to the
+finding. If an expected file is missing, the receipt is available locally
+for inspection and can be attached with `attach-proof`.
+
+The result shows the agent proposal ID alongside the reproduction receipt.
+Coworkers with review access can inspect the attached results.
+
 ### Attach media and measurements to a finding
 
 Open **Reproductions** under a finding. In **Screenshots, recordings, and

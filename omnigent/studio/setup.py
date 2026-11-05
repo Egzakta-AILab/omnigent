@@ -438,6 +438,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     reproduction.add_argument("--base", help="full base commit ID")
     reproduction.add_argument("--head", help="full head commit ID")
     reproduction.add_argument("--run-id", help="read both commits from a saved review run")
+    reproduction.add_argument(
+        "--proposal-id", help="use the exact command from a saved agent proposal"
+    )
     reproduction.add_argument("--mode", choices=("local", "server"))
     reproduction.add_argument("--server", help="trusted instance URL for --run-id")
     reproduction.add_argument("--pr", help="expected pull request URL for --run-id")
@@ -509,13 +512,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             reproduce,
             verify_fix,
         )
-        from omnigent.studio.verify_review_run import read_reproduction_source
+        from omnigent.studio.verify_review_run import read_check_proposal, read_reproduction_source
 
         command = args.argv[1:] if args.argv[:1] == ["--"] else args.argv
         if args.output.exists():
             parser.error("Choose a new file for the reproduction receipt")
         if args.capture_evidence and args.fix_patch is not None:
             parser.error("--capture-evidence currently supports base/head reproductions")
+        if args.proposal_id and (
+            not args.run_id
+            or args.fix_patch is not None
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", args.image)
+        ):
+            parser.error(
+                "A sandbox proposal needs a saved review and an immutable Docker image ID"
+            )
         try:
             source = None
             if any((args.run_id, args.mode, args.server, args.pr)):
@@ -531,6 +542,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if not args.base or not args.head:
                     parser.error("Use a saved review run or specify --base and --head")
                 base, head = args.base, args.head
+            if args.proposal_id:
+                proposal = read_check_proposal(
+                    mode=args.mode,
+                    server_url=args.server,
+                    run_id=args.run_id,
+                    proposal_id=args.proposal_id,
+                )
+                if not proposal.matches_intent(
+                    command=tuple(command),
+                    paths=tuple(args.include_path),
+                    timeout=args.timeout,
+                    evidence_files=tuple(args.capture_evidence),
+                ):
+                    raise ReproductionError("The command differs from the saved check proposal")
             options: dict[str, Any] = {
                 "repository": args.repository.expanduser().resolve(),
                 "image": args.image,
@@ -559,6 +584,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     source=source,
                     collection=collection,
                     paths=tuple(args.include_path),
+                    proposal_id=args.proposal_id,
                     **options,
                 )
             args.output.parent.mkdir(parents=True, exist_ok=True)
