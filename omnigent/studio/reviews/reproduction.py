@@ -148,7 +148,7 @@ class FixCheckEvidence(FixVerificationReceipt):
     @field_validator("patch")
     @classmethod
     def validate_patch(cls, patch: str) -> str:
-        _validate_fix_patch(patch.encode())
+        validate_fix_patch(patch.encode())
         return patch
 
     @model_validator(mode="after")
@@ -613,7 +613,7 @@ def reproduce(
     )
 
 
-def _validate_fix_patch(patch: bytes) -> None:
+def validate_fix_patch(patch: bytes) -> None:
     if not 0 < len(patch) <= MAX_FIX_PATCH_BYTES or b"\0" in patch:
         raise ValueError("Provide a Git text patch of at most 128 KiB")
     try:
@@ -649,7 +649,7 @@ def verify_fix(
     paths: tuple[str, ...] = (),
 ) -> FixVerificationReceipt:
     """Compare the captured head with the same head plus a proposed text patch."""
-    _validate_fix_patch(patch)
+    validate_fix_patch(patch)
     _validate_fix_paths(paths)
     image_id, before, after = _compare_revisions(
         repository=repository,

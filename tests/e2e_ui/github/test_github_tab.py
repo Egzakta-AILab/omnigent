@@ -2055,6 +2055,23 @@ def test_studio_review_from_pr_panel(
 
         def create_private_question(route: Route) -> None:
             payload = route.request.post_data_json
+            if payload.get("action") == "propose_fix":
+                assert payload["anchor"] == {"kind": "finding", "finding_key": finding_key}
+                assert payload["reviewer_key"] == "6" * 64
+                fixed = {
+                    **payload,
+                    "session_id": "7" * 32,
+                    "harness": "codex-native",
+                    "status": "accepted",
+                    "answer_state": "ready",
+                    "answer": "Validate the input before using it.",
+                    "proposed_patch": proposed_patch,
+                    "published_at": None,
+                    "updated_at": review["created_at"],
+                }
+                questions.append(fixed)
+                route.fulfill(json=fixed)
+                return
             assert payload["anchor"] == replies[-1]["anchor"]
             assert payload["agent_id"] == agent_id and "host_id" not in payload
             assert payload["model"] == model and payload["reasoning_effort"] == "high"
@@ -2199,6 +2216,18 @@ def test_studio_review_from_pr_panel(
         expect(excerpts.get_by_text("added line", exact=True)).to_be_visible()
         expect(thread.get_by_role("link", name="Open private session")).to_have_count(0)
         page.screenshot(path=str(tmp_path / "review-agent-answer.png"))
+        page.get_by_role("button", name=re.compile(r"Keep the input validation")).click()
+        thread.get_by_role("button", name="Propose a fix", exact=True).click()
+        thread.get_by_label("Answer with").select_option("reviewer:" + "6" * 64)
+        thread.get_by_role("button", name="Request private proposal", exact=True).click()
+        expect(thread.get_by_text("Private fix proposal · Codex")).to_be_visible()
+        thread.get_by_text("Preview proposed patch", exact=True).click()
+        expect(thread.locator("pre").filter(has_text="+verified input")).to_be_visible()
+        expect(thread.get_by_role("button", name="Share answer", exact=True)).to_have_count(0)
+        with page.expect_download() as download:
+            thread.get_by_role("button", name="Download patch", exact=True).click()
+        assert download.value.path().read_bytes() == proposed_patch.encode()
+        page.screenshot(path=str(tmp_path / "review-private-fix-proposal.png"))
         return
 
     page.goto(f"{base_url}/{'canvas/' if entry == 'canvas' else ''}c/{session_id}")

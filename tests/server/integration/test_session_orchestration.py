@@ -3614,20 +3614,20 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
         assert (
             await auth_client.post(reproduction_path, json=receipt, headers=foreign_headers)
         ).status_code == 404
-        proposal = "diff --git a/hello b/hello\n--- a/hello\n+++ b/hello\n"
-        proposal += "@@ -1 +1 @@\n-after\n+fixed\n"
+        checked_patch = "diff --git a/hello b/hello\n--- a/hello\n+++ b/hello\n"
+        checked_patch += "@@ -1 +1 @@\n-after\n+fixed\n"
         fix = {
             **{key: value for key, value in receipt.items() if key not in {"base", "head"}},
             "schema_version": "omnigent.studio.fix-verification.v1",
-            "proposed_patch_sha256": hashlib.sha256(proposal.encode()).hexdigest(),
+            "proposed_patch_sha256": hashlib.sha256(checked_patch.encode()).hexdigest(),
             "included_paths": ["hello"],
             "before": receipt["head"],
             "after": {**side, "commit": "f" * 40},
             "outcome": "fail_to_pass",
-            "patch": proposal,
+            "patch": checked_patch,
         }
         for forged in (
-            {**fix, "patch": proposal.replace("fixed", "changed")},
+            {**fix, "patch": checked_patch.replace("fixed", "changed")},
             {**fix, "outcome": "pass_to_pass"},
         ):
             assert (await auth_client.post(reproduction_path, json=forged)).status_code == 422
@@ -3641,7 +3641,7 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
         ).json() == fix_attachment.json()
         shared_checks = (await auth_client.get(reproduction_path, headers=foreign_headers)).json()
         shared_fix = next(item["receipt"] for item in shared_checks if "patch" in item["receipt"])
-        assert shared_fix["patch"] == proposal and shared_fix["outcome"] == "fail_to_pass"
+        assert shared_fix["patch"] == checked_patch and shared_fix["outcome"] == "fail_to_pass"
         assert {"command", "source"}.isdisjoint(shared_fix)
         message = {
             "id": uuid4().hex,
@@ -3853,9 +3853,9 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
         }
         reply = "```studio-review-answer-v2\n" + json.dumps(response_body) + "\n```"
 
-        def question_echo(text: str) -> None:
+        def question_echo(text: str, session_id: str = private_session_id) -> None:
             conversations.append(
-                private_session_id,
+                session_id,
                 [
                     NewConversationItem(
                         type="message",
@@ -3902,6 +3902,35 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
             await auth_client.post(questions_path, json=owner_question)
         ).json() == uncertain.json()
         assert send_review.await_count == 7
+        send_review.side_effect = None
+        proposal_request = {**owner_question, "id": uuid4().hex, "action": "propose_fix"}
+        invalid_anchor = {
+            **proposal_request,
+            "anchor": {"kind": "diff", "path": "hello", "side": "head", "start": 1, "end": 1},
+        }
+        assert (await auth_client.post(questions_path, json=invalid_anchor)).status_code == 422
+        proposed = await auth_client.post(questions_path, json=proposal_request)
+        assert proposed.status_code == 200 and proposed.json()["status"] == "accepted"
+        fix_session = proposed.json()["session_id"]
+        proposal_prompt = send_review.await_args.args[2].data["content"][0]["text"]
+        assert "studio-fix-proposal-v1" in proposal_prompt
+        assert proposed.json()["action"] == "propose_fix"
+        question_echo(proposal_prompt, fix_session)
+        proposal_response = {
+            **response_body,
+            "question_id": proposal_request["id"],
+            "answer": "Reject invalid input.",
+            "proposed_patch": checked_patch,
+        }
+        save_assistant_message(
+            fix_session, "```studio-fix-proposal-v1\n" + json.dumps(proposal_response) + "\n```"
+        )
+        fix_path = f"{questions_path}/{proposal_request['id']}"
+        saved_proposal = (await auth_client.get(fix_path)).json()
+        assert saved_proposal["proposed_patch"] == checked_patch
+        assert saved_proposal["answer_state"] == "ready"
+        assert (await auth_client.post(f"{fix_path}/share", json={})).status_code == 409
+        assert (await auth_client.get(fix_path, headers=foreign_headers)).status_code == 404
         return
 
     created = await create_reviewer(request, "alice", review, review.id)
