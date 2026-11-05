@@ -1603,6 +1603,7 @@ class SqlStudioReviewRun(OmnigentBase):
     request_hash: Mapped[bytes] = mapped_column(_CKSUM32, nullable=False)
     target_json: Mapped[str] = mapped_column(CompressedText, nullable=False)
     patch_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    plan_json: Mapped[str | None] = mapped_column(CompressedText, nullable=True)
     created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
     __table_args__ = (
         UniqueConstraint("workspace_id", "owner_scope", "request_key", name="uq_review_run_key"),
@@ -1642,6 +1643,7 @@ class SqlStudioReviewPass(OmnigentBase):
     owner_scope: Mapped[bytes] = mapped_column(_CKSUM32, nullable=False)
     owner_user_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
     run_id: Mapped[str | None] = mapped_column(Uuid16, nullable=True)
+    run_role: Mapped[str | None] = mapped_column(String(16), nullable=True)
     launch_error: Mapped[str | None] = mapped_column(String(512), nullable=True)
     report_json: Mapped[str | None] = mapped_column(CompressedText, nullable=True)
     source_session_id: Mapped[str | None] = mapped_column(Uuid16, nullable=True)
