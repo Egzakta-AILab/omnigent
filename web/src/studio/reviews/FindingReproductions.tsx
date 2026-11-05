@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { copyText } from "@/lib/clipboard";
@@ -16,6 +16,7 @@ import {
   type ReproductionSide,
   type ReviewRun,
 } from "./api";
+import type { ReviewProofTarget } from "./creatorReviewBridge";
 
 function rerunCommand(
   run: Pick<ReviewRun, "id" | "target">,
@@ -133,12 +134,14 @@ function Reproductions({
   viewerId,
   canAttach = !!run.target,
   canReReview = canAttach && !run.target?.candidate,
+  focusProof,
 }: {
   run: Pick<ReviewRun, "id"> & Partial<Pick<ReviewRun, "target" | "patch_sha256">>;
   findingKey: string;
   viewerId: string | null;
   canAttach?: boolean;
   canReReview?: boolean;
+  focusProof?: ReviewProofTarget;
 }) {
   const queryClient = useQueryClient();
   const queryKey = findingReproductionsKey(viewerId, run.id, findingKey);
@@ -147,6 +150,7 @@ function Reproductions({
   const [copyStatus, setCopyStatus] = useState("");
   const fileInput = useRef<HTMLInputElement>(null);
   const patchInput = useRef<HTMLInputElement>(null);
+  const focusedProof = useRef<ReviewProofTarget>(undefined);
   const receipts = useQuery({
     queryKey,
     queryFn: ({ signal }) => listFindingReproductions(run.id, findingKey, signal),
@@ -241,7 +245,21 @@ function Reproductions({
       {receipts.isSuccess &&
         !receipts.isFetching &&
         receipts.data.map(({ digest, receipt, candidate_run_id: candidateRunId }) => (
-          <article key={digest} className="space-y-2 rounded-md border border-border p-2">
+          <article
+            key={digest}
+            tabIndex={-1}
+            ref={
+              focusProof?.receiptDigest === digest
+                ? (article) => {
+                    if (article && focusProof !== focusedProof.current) {
+                      focusedProof.current = focusProof;
+                      article.focus();
+                    }
+                  }
+                : undefined
+            }
+            className="space-y-2 rounded-md border border-border p-2 focus-visible:ring-2"
+          >
             <div className="flex flex-wrap items-center justify-between gap-1">
               <span className="text-xs font-medium">
                 {"patch" in receipt ? "Uploaded fix check" : "Uploaded receipt"} ·{" "}
@@ -354,8 +372,14 @@ function Reproductions({
 
 export function FindingReproductions(props: Parameters<typeof Reproductions>[0]) {
   const [open, setOpen] = useState(false);
+  const details = useRef<HTMLDetailsElement>(null);
+  const focusProof = props.focusProof;
+  useEffect(() => {
+    if (focusProof && details.current) details.current.open = true;
+  }, [focusProof]);
   return (
     <details
+      ref={details}
       className="rounded-md border border-border px-2 py-1"
       onToggle={(event) => setOpen(event.currentTarget.open)}
     >

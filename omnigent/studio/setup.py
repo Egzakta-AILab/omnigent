@@ -415,6 +415,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     contracts = commands.add_parser("contracts", help="run deterministic local A2 contracts")
     contracts.add_argument("--output", type=Path, help="write a JSON receipt copy")
     contracts.add_argument("--json", action="store_true", help="print the JSON receipt")
+    creator = commands.add_parser("creator-contracts", help="inspect the review panel contract")
+    creator.add_argument("--manifest", type=Path, help="validate a review.panel manifest")
     review = commands.add_parser("review", help="verify a saved native review report")
     review.add_argument("--mode", choices=("local", "server"), required=True)
     review.add_argument("--server", required=True, help="explicit trusted instance URL")
@@ -491,6 +493,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     proof.add_argument("--finding", required=True, help="captured finding key")
     proof.add_argument("--receipt", type=Path, required=True)
     args = parser.parse_args(argv)
+    if args.command == "creator-contracts":
+        from pydantic import ValidationError
+
+        from omnigent.extensions.review_panel import ReviewPanelContribution, inspect_review_panel
+
+        catalog = inspect_review_panel()
+        if args.manifest is not None:
+            try:
+                manifest = ReviewPanelContribution.model_validate_json(args.manifest.read_bytes())
+            except (OSError, ValidationError):
+                parser.error("Invalid review.panel manifest. Check the installed manifest schema.")
+            catalog["validated_manifest"] = manifest.model_dump(mode="json")
+        print(json.dumps(catalog, indent=2))
+        return 0
     if args.command == "attach-proof":
         from omnigent.studio.attach_proof import attach_proof
 

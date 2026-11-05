@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from omnigent.extensions.review_panel import ReviewPanelContribution
+
 EXTENSION_API_VERSION = 1
 
 
@@ -77,6 +79,7 @@ class ExtensionManifest:
     pages: tuple[PageContribution, ...] = ()
     primary_navigation: tuple[PrimaryNavigationContribution, ...] = ()
     commands: tuple[CommandContribution, ...] = ()
+    review_panel: ReviewPanelContribution | None = None
 
 
 @dataclass(frozen=True)

@@ -1270,6 +1270,15 @@
         "additionalProperties": false,
         "description": "Each member uses the same project checkout and captured revision.",
         "properties": {
+          "collaborators": {
+            "items": {
+              "pattern": "^[^\\s\\x00-\\x1f\\x7f]{1,128}$",
+              "type": "string"
+            },
+            "maxItems": 32,
+            "title": "Collaborators",
+            "type": "array"
+          },
           "coordinator": {
             "anyOf": [
               {
@@ -1279,6 +1288,15 @@
                 "type": "null"
               }
             ]
+          },
+          "publishers": {
+            "items": {
+              "pattern": "^[^\\s\\x00-\\x1f\\x7f]{1,128}$",
+              "type": "string"
+            },
+            "maxItems": 32,
+            "title": "Publishers",
+            "type": "array"
           },
           "required_reviewer_indices": {
             "items": {
@@ -3328,6 +3346,16 @@
             "title": "Primary Navigation",
             "type": "array"
           },
+          "review_panel": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReviewPanelContribution"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "status": {
             "enum": [
               "enabled",
@@ -4509,6 +4537,29 @@
               }
             ],
             "title": "Provider Url"
+          },
+          "publication_confirmed_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Publication Confirmed By"
+          },
+          "publication_reference": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Publication Reference"
           },
           "publication_state": {
             "default": "draft",
@@ -6495,6 +6546,41 @@
         "title": "ReasoningTextDeltaEvent",
         "type": "object"
       },
+      "ReportDraftResult": {
+        "additionalProperties": false,
+        "properties": {
+          "created": {
+            "default": 0,
+            "format": "int64",
+            "maximum": 8.0,
+            "minimum": 0.0,
+            "title": "Created",
+            "type": "integer"
+          },
+          "eligible": {
+            "default": 0,
+            "format": "int64",
+            "maximum": 8.0,
+            "minimum": 0.0,
+            "title": "Eligible",
+            "type": "integer"
+          },
+          "state": {
+            "enum": [
+              "waiting",
+              "incomplete",
+              "prepared"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "state"
+        ],
+        "title": "ReportDraftResult",
+        "type": "object"
+      },
       "ReproductionReceipt": {
         "additionalProperties": false,
         "properties": {
@@ -7328,6 +7414,34 @@
             "title": "Project Name",
             "type": "string"
           },
+          "publication_drafts": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/InlineDraft"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Publication Drafts"
+          },
+          "publishers": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Publishers"
+          },
           "questions": {
             "items": {
               "$ref": "#/components/schemas/ReviewQuestion"
@@ -7618,6 +7732,57 @@
           "updated_at"
         ],
         "title": "ReviewOperation",
+        "type": "object"
+      },
+      "ReviewPanelContribution": {
+        "additionalProperties": false,
+        "description": "One panel backed by an operator-installed browser bundle.",
+        "properties": {
+          "capabilities": {
+            "items": {
+              "enum": [
+                "review.read",
+                "review.openProof",
+                "review.attachProof"
+              ],
+              "type": "string"
+            },
+            "maxItems": 3,
+            "minItems": 1,
+            "title": "Capabilities",
+            "type": "array",
+            "uniqueItems": true
+          },
+          "contract_version": {
+            "const": "1",
+            "title": "Contract Version",
+            "type": "string"
+          },
+          "slot": {
+            "const": "review.panel",
+            "title": "Slot",
+            "type": "string"
+          },
+          "title": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          },
+          "view": {
+            "pattern": "^[A-Za-z0-9._-]{1,80}$",
+            "title": "View",
+            "type": "string"
+          }
+        },
+        "required": [
+          "slot",
+          "contract_version",
+          "view",
+          "title",
+          "capabilities"
+        ],
+        "title": "ReviewPanelContribution",
         "type": "object"
       },
       "ReviewPass": {
@@ -8172,6 +8337,18 @@
           "id": {
             "title": "Id",
             "type": "string"
+          },
+          "proof_digest": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Proof Digest"
           },
           "proposed_check": {
             "anyOf": [
@@ -12987,6 +13164,18 @@
             "title": "Id",
             "type": "string"
           },
+          "proof_digest": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Proof Digest"
+          },
           "published_at": {
             "format": "int64",
             "title": "Published At",
@@ -13018,6 +13207,76 @@
           "published_at"
         ],
         "title": "SharedReviewAnswer",
+        "type": "object"
+      },
+      "SharedReviewEntry": {
+        "additionalProperties": false,
+        "properties": {
+          "created_at": {
+            "format": "int64",
+            "title": "Created At",
+            "type": "integer"
+          },
+          "head_sha": {
+            "pattern": "^[0-9a-f]{40}(?:[0-9a-f]{24})?$",
+            "title": "Head Sha",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "pr_number": {
+            "format": "int64",
+            "title": "Pr Number",
+            "type": "integer"
+          },
+          "project_name": {
+            "title": "Project Name",
+            "type": "string"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "project_name",
+          "repository",
+          "pr_number",
+          "head_sha",
+          "created_at"
+        ],
+        "title": "SharedReviewEntry",
+        "type": "object"
+      },
+      "SharedReviewPage": {
+        "additionalProperties": false,
+        "properties": {
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/SharedReviewEntry"
+            },
+            "title": "Entries",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "entries"
+        ],
+        "title": "SharedReviewPage",
         "type": "object"
       },
       "SkillContentResponse": {
@@ -24100,6 +24359,11 @@
               "schema": {
                 "additionalProperties": false,
                 "properties": {
+                  "can_publish": {
+                    "default": false,
+                    "title": "Can Publish",
+                    "type": "boolean"
+                  },
                   "user_id": {
                     "pattern": "^[^\\s\\x00-\\x1f\\x7f]{1,128}$",
                     "title": "User Id",
@@ -24315,6 +24579,48 @@
         ]
       }
     },
+    "/v1/studio/review-runs/{run_id}/discussion/inline-drafts/from-report": {
+      "post": {
+        "operationId": "prepare_report_drafts_v1_studio_review_runs__run_id__discussion_inline_drafts_from_report_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReportDraftResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Prepare Report Drafts",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
     "/v1/studio/review-runs/{run_id}/discussion/inline-drafts/{draft_id}": {
       "put": {
         "operationId": "edit_inline_draft_v1_studio_review_runs__run_id__discussion_inline_drafts__draft_id__put",
@@ -24458,6 +24764,87 @@
           }
         },
         "summary": "Discard Inline Draft",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/studio/review-runs/{run_id}/discussion/inline-drafts/{draft_id}/reconcile": {
+      "post": {
+        "operationId": "reconcile_inline_comment_v1_studio_review_runs__run_id__discussion_inline_drafts__draft_id__reconcile_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "draft_id",
+            "required": true,
+            "schema": {
+              "title": "Draft Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "provider_url": {
+                    "maxLength": 2048,
+                    "minLength": 1,
+                    "title": "Provider Url",
+                    "type": "string"
+                  },
+                  "version": {
+                    "exclusiveMaximum": 2147483647,
+                    "minimum": 1,
+                    "title": "Version",
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "version",
+                  "provider_url"
+                ],
+                "title": "ReconcileInlinePublication",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InlineDraft"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Reconcile Inline Comment",
         "tags": [
           "sessions"
         ]
@@ -24703,6 +25090,18 @@
                       }
                     ],
                     "title": "Model"
+                  },
+                  "proof_digest": {
+                    "anyOf": [
+                      {
+                        "pattern": "^[0-9a-f]{64}$",
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Proof Digest"
                   },
                   "reasoning_effort": {
                     "anyOf": [
@@ -25928,6 +26327,67 @@
           }
         },
         "summary": "Start Review",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/studio/shared-reviews": {
+      "get": {
+        "operationId": "list_shared_reviews_v1_studio_shared_reviews_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 15,
+              "maximum": 25,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "after_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "After Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SharedReviewPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Shared Reviews",
         "tags": [
           "sessions"
         ]

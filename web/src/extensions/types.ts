@@ -1,3 +1,5 @@
+import type { ReviewCapability } from "../../../sdks/web-extension/src/reviewPanel";
+
 export interface ExtensionPage {
   id: string;
   title: string;
@@ -68,6 +70,13 @@ export interface ExtensionCatalogItem {
   pages: ExtensionPage[];
   primary_navigation: ExtensionPrimaryNavigation[];
   browser: ExtensionBrowserBundle;
+  review_panel?: {
+    slot: "review.panel";
+    contract_version: "1";
+    view: string;
+    title: string;
+    capabilities: ReviewCapability[];
+  } | null;
 }
 
 export interface ExtensionCatalogResponse {

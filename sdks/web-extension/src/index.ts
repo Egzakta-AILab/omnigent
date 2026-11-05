@@ -18,6 +18,14 @@ import {
   validateSessionPageLimit,
   type ExtensionSessionSummary,
 } from "./sessions";
+import type { ReviewPanelApi, ReviewPanelPage } from "./reviewPanel";
+
+export type {
+  ReviewCapability,
+  ReviewPanelApi,
+  ReviewPanelPage,
+  ReviewProofTarget,
+} from "./reviewPanel";
 
 export interface Disposable {
   dispose(): void;
@@ -56,6 +64,7 @@ export interface ExtensionContext {
   view: string;
   apiVersion: number;
   capabilities: readonly string[];
+  review: ReviewPanelApi;
   navigation: {
     openPage(
       pageId: string,
@@ -208,6 +217,15 @@ export function defineExtension(lifecycle: ExtensionLifecycle): void {
     view: identity.view,
     apiVersion: identity.apiVersion,
     capabilities: [...grantedCapabilities].sort(),
+    review: {
+      read: (options = {}) => request<ReviewPanelPage>("review.read", options),
+      async openProof(target) {
+        await request("review.openProof", target);
+      },
+      async attachProof(target) {
+        await request("review.attachProof", target);
+      },
+    },
     navigation: {
       async openPage(pageId, params) {
         await request("navigation.openPage", { pageId, params });
