@@ -149,12 +149,15 @@ def test_review_discussion_access_does_not_survive_account_recreation(
             profiles=[_profile()],
             patch="diff --git a/file b/file\n",
             collaborators={OTHER: target_generation},
+            publishers=frozenset({OTHER}),
         )
         store.set_review_collaborator(
             run.id, OTHER, owner=OWNER, target_generation=target_generation
         )
     with account_authority_scope(OTHER, target_generation):
         assert store.discussion_owner(run.id, OTHER) == OWNER
+        assert store.can_publish_inline(second.id, actor=OTHER, owner=OWNER)
+        assert not store.can_publish_inline(run.id, actor=OTHER, owner=OWNER)
         assert store.list_discussion_comments(run.id, actor=OTHER, owner=OWNER) == []
         page = store.list_shared_reviews(OTHER, limit=1, after_id=None)
         assert page.next_cursor == page.entries[0].id
@@ -177,6 +180,7 @@ def test_review_discussion_access_does_not_survive_account_recreation(
             )
     with account_authority_scope(OTHER, target_generation):
         assert store.discussion_owner(run.id, OTHER) is None
+        assert not store.can_publish_inline(second.id, actor=OTHER, owner=OWNER)
         assert not store.list_shared_reviews(OTHER, limit=2, after_id=None).entries
 
 

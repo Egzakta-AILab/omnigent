@@ -1860,6 +1860,7 @@ class SqlStudioReviewCollaborator(OmnigentBase):
     owner_user_id: Mapped[str] = mapped_column(String(128), nullable=False)
     user_generation: Mapped[str | None] = mapped_column(Uuid16, nullable=True)
     owner_generation: Mapped[str | None] = mapped_column(Uuid16, nullable=True)
+    can_publish: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=false())
 
 
 class SqlStudioReviewComment(OmnigentBase):
@@ -1915,6 +1916,7 @@ class SqlStudioInlineDraft(OmnigentBase):
         String(16), nullable=False, server_default="draft"
     )
     publication_digest: Mapped[bytes | None] = mapped_column(_CKSUM32, nullable=True)
+    publication_confirmed_by: Mapped[str | None] = mapped_column(String(256), nullable=True)
     provider_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
     updated_at: Mapped[int] = mapped_column(BigInteger, nullable=False)

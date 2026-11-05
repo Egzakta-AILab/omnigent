@@ -244,6 +244,7 @@ export interface InlineDraft {
   updated_at: number;
   publication_state?: "draft" | "sending" | "posted" | "unknown";
   provider_url?: string | null;
+  publication_confirmed_by?: string | null;
 }
 
 export interface InlinePublicationPreview {
@@ -334,6 +335,7 @@ export interface ReviewDiscussion {
   findings: { key: string; finding: ReviewFinding }[];
   comments: ReviewDiscussionComment[];
   inline_drafts?: InlineDraft[];
+  publication_drafts?: InlineDraft[] | null;
   questions?: ReviewQuestion[];
   agent_answers?: SharedReviewAnswer[];
   can_comment: boolean;
@@ -345,6 +347,7 @@ export interface ReviewDiscussion {
   check_repository?: string | null;
   review_workspace_host_id?: string | null;
   collaborators: string[] | null;
+  publishers?: string[] | null;
   sharing_available: boolean;
 }
 
@@ -481,7 +484,12 @@ export function shareReviewAnswer(runId: string, questionId: string) {
   );
 }
 
-export async function changeReviewCollaborator(runId: string, userId: string, revoke: boolean) {
+export async function changeReviewCollaborator(
+  runId: string,
+  userId: string,
+  revoke: boolean,
+  canPublish?: boolean,
+) {
   const endpoint = `${reviewRunPath(runId)}/discussion/collaborators`;
   const response = await authenticatedFetch(
     revoke ? `${endpoint}?${new URLSearchParams({ user_id: userId })}` : endpoint,
@@ -490,7 +498,7 @@ export async function changeReviewCollaborator(runId: string, userId: string, re
       : {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ user_id: userId }),
+          body: JSON.stringify({ user_id: userId, can_publish: canPublish }),
         },
   );
   if (!response.ok) throw await apiErrorFromResponse(response);

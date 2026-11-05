@@ -176,7 +176,12 @@ async def test_worker_starts_once_and_recovers_a_lost_acknowledgment_read_only(
     if fault == "coordinator":
         route = route.model_copy(update={"coordinator": route.reviewers[0]})
     if fault == "none":
-        route = route.model_copy(update={"collaborators": ["reviewer@example.test"]})
+        route = route.model_copy(
+            update={
+                "collaborators": ["reviewer@example.test"],
+                "publishers": ["reviewer@example.test"],
+            }
+        )
     inbox = WebhookInbox(tmp_path / "reviews.db")
     request = route.capture(17, _BASE, _HEAD)
     key = route.revision_key(17, _BASE, _HEAD)
@@ -200,6 +205,7 @@ async def test_worker_starts_once_and_recovers_a_lost_acknowledgment_read_only(
             payload = json.loads(call.content)
             assert payload == request.model_dump(mode="json", exclude_defaults=True)
             assert payload.get("collaborators", []) == route.collaborators
+            assert payload.get("publishers", []) == route.publishers
             if fault == "stale":
                 return httpx.Response(409)
             if fault == "capture_retry" and len(observed) == 1:

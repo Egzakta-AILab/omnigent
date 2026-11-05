@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 
+from omnigent.db.account_authority import account_generation
 from omnigent.db.utils import builtin_agent_id
 from omnigent.entities import Conversation, Project
 from omnigent.errors import ErrorCode, OmnigentError
@@ -891,6 +892,7 @@ def create_studio_reviews_router(
                 coordinator=coordinator,
                 required_indices=frozenset(body.required_reviewer_indices),
                 collaborators=collaborators,
+                publishers=frozenset(body.publishers),
             )
         except ReviewConflictError as exc:
             raise HTTPException(409, str(exc)) from exc
@@ -1648,6 +1650,18 @@ def create_studio_reviews_router(
         project = await require_owned_project(project_store, run.target.source_project_id, owner)
         return DiscussionAccess(run, project, actor, owner, mode)
 
+    async def can_publish_inline(access: DiscussionAccess) -> bool:
+        return (
+            access.run.target.candidate is None
+            and access.can_comment
+            and await asyncio.to_thread(
+                review_store.can_publish_inline,
+                access.run.id,
+                actor=access.actor,
+                owner=access.owner,
+            )
+        )
+
     @router.get("/studio/review-runs/{run_id}/discussion", response_model=ReviewDiscussionView)
     async def get_review_discussion(
         request: Request, response: Response, run_id: str
@@ -1671,6 +1685,7 @@ def create_studio_reviews_router(
                 )
             )
         try:
+            can_publish = await can_publish_inline(access)
             comments = await asyncio.to_thread(
                 review_store.list_discussion_comments,
                 run.id,
@@ -1684,6 +1699,17 @@ def create_studio_reviews_router(
                 if target.candidate is None
                 else []
             )
+            publication_drafts = (
+                await asyncio.to_thread(
+                    review_store.list_inline_drafts,
+                    run.id,
+                    actor=access.actor,
+                    owner=access.owner,
+                    for_publication=True,
+                )
+                if can_publish and access.actor != access.owner
+                else None
+            )
             questions, answers = await asyncio.to_thread(
                 review_store.list_discussion_questions,
                 run.id,
@@ -1693,6 +1719,16 @@ def create_studio_reviews_router(
             collaborators = (
                 await asyncio.to_thread(
                     review_store.list_review_collaborators, run.id, owner=access.owner
+                )
+                if access.actor == access.owner and access.owner is not None
+                else None
+            )
+            publishers = (
+                await asyncio.to_thread(
+                    review_store.list_review_collaborators,
+                    run.id,
+                    owner=access.owner,
+                    publishers_only=True,
                 )
                 if access.actor == access.owner and access.owner is not None
                 else None
@@ -1719,11 +1755,12 @@ def create_studio_reviews_router(
             ],
             comments=comments,
             inline_drafts=inline_drafts,
+            publication_drafts=publication_drafts,
             questions=questions,
             agent_answers=answers,
             can_comment=access.can_comment,
             can_draft_inline=access.can_comment and target.candidate is None,
-            can_publish_inline=access.actor == access.owner and target.candidate is None,
+            can_publish_inline=can_publish,
             can_attach_evidence=access.actor == access.owner,
             can_ask=access.can_comment and create_reviewer is not None and send_review is not None,
             can_use_review_workspace=access.actor == access.owner,
@@ -1736,6 +1773,7 @@ def create_studio_reviews_router(
             ),
             review_workspace_host_id=target.host_id if access.actor == access.owner else None,
             collaborators=collaborators,
+            publishers=publishers,
             sharing_available=(
                 access.actor == access.owner
                 and access.owner not in (None, RESERVED_USER_LOCAL, RESERVED_USER_PUBLIC)
@@ -1880,14 +1918,18 @@ def create_studio_reviews_router(
         body: InlinePublicationRequest,
     ) -> tuple[DiscussionAccess, InlinePublicationPreview]:
         access = await require_inline_draft_access(request, run_id)
-        if access.actor != access.owner:
-            raise HTTPException(403, "Only the review owner can publish from this workspace")
+        if not await can_publish_inline(access):
+            raise HTTPException(403, "This account cannot publish inline comments")
         run, target = access.run, access.run.target
         if run.patch_sha256 is None:
             raise HTTPException(409, "This review has no captured diff")
         try:
             drafts = await asyncio.to_thread(
-                review_store.list_inline_drafts, run.id, actor=access.actor, owner=access.owner
+                review_store.list_inline_drafts,
+                run.id,
+                actor=access.actor,
+                owner=access.owner,
+                for_publication=True,
             )
         except ReviewNotFoundError as exc:
             raise HTTPException(404, str(exc)) from exc
@@ -1899,20 +1941,19 @@ def create_studio_reviews_router(
                 raise HTTPException(409, "The selected drafts changed. Create a new preview.")
             selected.append(draft)
         reference = PullRequestRef.from_url(target.pr_url)
+        intent: list[object] = [
+            run.id,
+            target.model_dump(mode="json"),
+            run.patch_sha256,
+            [
+                [draft.id, draft.version, draft.body, draft.anchor.model_dump(mode="json")]
+                for draft in selected
+            ],
+        ]
+        if access.actor is not None and access.actor != access.owner:
+            intent.append([access.actor, account_generation(access.actor)])
         digest = hashlib.sha256(
-            json.dumps(
-                [
-                    run.id,
-                    target.model_dump(mode="json"),
-                    run.patch_sha256,
-                    [
-                        [draft.id, draft.version, draft.body, draft.anchor.model_dump(mode="json")]
-                        for draft in selected
-                    ],
-                ],
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode()
+            json.dumps(intent, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
         return access, InlinePublicationPreview(
             run_id=run.id,
@@ -1972,6 +2013,7 @@ def create_studio_reviews_router(
             drafts, claimed = await asyncio.to_thread(
                 review_store.claim_inline_publication,
                 access.run.id,
+                actor=access.actor,
                 owner=access.owner,
                 selected=body.selected,
                 digest=preview.digest,
@@ -2407,6 +2449,7 @@ def create_studio_reviews_router(
                 body.user_id,
                 owner=owner,
                 target_generation=generations[body.user_id],
+                can_publish=body.can_publish if "can_publish" in body.model_fields_set else None,
             )
         except ReviewNotFoundError as exc:
             raise HTTPException(404, str(exc)) from exc

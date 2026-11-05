@@ -81,6 +81,9 @@ class WebhookRoute(FrozenModel):
     collaborators: Annotated[list[AccountId], Field(max_length=MAX_REVIEW_COLLABORATORS)] = Field(
         default_factory=list
     )
+    publishers: Annotated[list[AccountId], Field(max_length=MAX_REVIEW_COLLABORATORS)] = Field(
+        default_factory=list
+    )
 
     @field_validator("project_id", "host_id")
     @classmethod
@@ -98,7 +101,7 @@ class WebhookRoute(FrozenModel):
 
     @property
     def policy_digest(self) -> str:
-        excluded = {"collaborators"} if not self.collaborators else None
+        excluded = {field for field in ("collaborators", "publishers") if not getattr(self, field)}
         return hashlib.sha256(self.model_dump_json(exclude=excluded).encode()).hexdigest()
 
     def capture(self, number: int, base: str, head: str) -> CaptureReviewRunRequest:
@@ -118,6 +121,7 @@ class WebhookRoute(FrozenModel):
                 else None,
                 "required_reviewer_indices": self.required_reviewer_indices,
                 "collaborators": self.collaborators,
+                "publishers": self.publishers,
             }
         )
 

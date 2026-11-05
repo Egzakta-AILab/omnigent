@@ -55,8 +55,8 @@ export function InlineDrafts({
   });
   if (!canEdit && !drafts.length) return null;
   return (
-    <section aria-label="Private inline drafts" className="space-y-2 rounded-md border p-2">
-      <p className="text-xs font-medium">Private inline drafts</p>
+    <section aria-label="Your inline drafts" className="space-y-2 rounded-md border p-2">
+      <p className="text-xs font-medium">Your inline drafts</p>
       {drafts.map((draft) => (
         <article key={draft.id} className="space-y-2 rounded-md border p-2 text-sm">
           <p className="break-all text-xs text-muted-foreground">
