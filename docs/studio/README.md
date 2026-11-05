@@ -141,6 +141,78 @@ Connect the browser or desktop app to the server URL and choose this host.
 Closing the laptop should leave server execution running; verify that behavior
 with a real session before treating the setup as qualified.
 
+### Trigger a private review from GitHub
+
+Run the webhook receiver from this fork alongside the Omnigent server. Give
+its bot account a dedicated project and connected sandbox host with access to
+the approved checkouts. Native reviewers use that host's normal permissions,
+so use a sandbox with only the credentials the reviewers need.
+
+Each route pins a repository ID, allowed base branches, a project, a host
+directory, and a roster. Use the canonical absolute workspace path reported
+by that host. Add more routes for other repositories in a meta workspace.
+Keep drafts and fork PRs disabled unless you want that route to review them.
+
+```json
+{
+  "routes": [
+    {
+      "id": "kvark",
+      "github_repository": "Egzakta-AILab/KVARK",
+      "github_repository_id": 123456789,
+      "base_branches": ["main"],
+      "secret_env": "OMNIGENT_STUDIO_HOOK_KVARK",
+      "project_id": "11111111111111111111111111111111",
+      "host_id": "22222222222222222222222222222222",
+      "workspace": "/srv/egzakta-org",
+      "repository": "KVARK",
+      "reviewers": [
+        {
+          "agent_id": "33333333333333333333333333333333",
+          "harness": "codex-native",
+          "profile_id": "backend",
+          "profile_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ]
+    }
+  ]
+}
+```
+
+Set the configured webhook secret and `OMNIGENT_STUDIO_REVIEW_TOKEN` through
+the service's secret store. Use a first-party Omnigent bearer for the
+dedicated non-admin account that owns the project and host. Keep the inbox
+on a persistent volume.
+
+```sh
+uv run --no-sync python -m omnigent.studio.pr_webhook \
+  --server https://omnigent.example.com \
+  --config /etc/omnigent/studio-webhooks.json \
+  --database /var/lib/omnigent/studio-webhooks.sqlite
+```
+
+Route GitHub's JSON **Pull requests** webhook over HTTPS to
+`/webhooks/github/kvark`. Use the route's secret in GitHub. The receiver
+checks the HMAC-SHA256 signature on the original request body and acknowledges
+after saving the eligible delivery. [GitHub webhook validation](https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries)
+
+Opened, reopened, ready-for-review, and synchronized PRs create one private
+Studio run per base and head pair. A coordinator, if configured, starts a
+planning session and waits for roster approval in Studio. Find the run in
+the project's PR history. GitHub comment publication remains an explicit
+approval in Omnigent.
+
+```sh
+uv run --no-sync python -m omnigent.studio.pr_webhook \
+  --database /var/lib/omnigent/studio-webhooks.sqlite --status
+```
+
+A capture conflict is skipped because Studio could not confirm the delivered
+revision. If start delivery is uncertain, the receiver reads the saved run
+and records the result without issuing another start. Inspect the saved run
+before deciding how to proceed. Use `--mode local` with an isolated loopback
+Studio instance for a test fixture.
+
 ## Read only setup receipt
 
 Run the acceptance command against an explicit instance, owned host and
