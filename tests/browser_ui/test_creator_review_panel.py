@@ -203,6 +203,10 @@ def test_panel_opens_the_native_receipt_and_prefills_without_submitting(
         path = f"{review_path}/creator-preview"
         catalog = creator_panel_contract()
         contract.json(path, catalog.model_dump(mode="json"))
+        contract.json(
+            f"/v1/hosts/{review_shell.host_id}/filesystem",
+            {"path": "/", "entries": []},
+        )
 
         def build_preview(route: Route) -> None:
             if route.request.method != "POST":
@@ -219,6 +223,10 @@ def test_panel_opens_the_native_receipt_and_prefills_without_submitting(
                 route.fulfill(status=200, json=preview.model_dump(mode="json"))
 
         contract.route(f"{contract.base_url}{path}", build_preview)
+        page.get_by_test_id("new-chat-button").click()
+        composer = page.get_by_test_id("new-chat-landing-input")
+        composer.fill("My ordinary session draft")
+        page.go_back()
         page.get_by_text("Creator Mode", exact=True).click()
         page.get_by_role("button", name="Load QA template").click()
         editor = page.get_by_label("Panel definition (JSON)")
@@ -233,6 +241,22 @@ def test_panel_opens_the_native_receipt_and_prefills_without_submitting(
         prompt = page.evaluate("navigator.clipboard.readText()")
         assert "Installed schema:" in prompt and "Unknown action" in prompt
         assert "Captured check failure." not in prompt
+        brief = page.get_by_label("Describe the panel")
+        brief.fill("Group failures by directory for the QA team.")
+        page.get_by_role("button", name="Open authoring draft").click()
+        expect(page.get_by_text("Creator authoring draft", exact=True)).to_be_visible()
+        expect(composer).to_contain_text("Group failures by directory for the QA team.")
+        expect(composer).to_contain_text("Installed schema:")
+        expect(composer).not_to_contain_text("Captured check failure.")
+        assert page.url == f"{review_shell.base_url}/"
+        assert review_shell.event_posts == []
+        page.get_by_role("link", name="Back to Creator Mode").click()
+        expect(brief).to_have_value("Group failures by directory for the QA team.")
+        expect(editor).to_have_value(valid.replace('"open_and_discuss"', '"send"'))
+        page.get_by_test_id("new-chat-button").click()
+        expect(composer).to_contain_text("My ordinary session draft")
+        page.go_back()
+        expect(editor).to_be_visible()
         editor.fill(valid.replace('"file"', '"directory"').replace("QA checks", "QA by folder"))
         pending_receipts: list[Route] = []
         receipts_url = f"{contract.base_url}{receipts_path}"

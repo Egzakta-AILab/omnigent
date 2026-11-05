@@ -18,7 +18,9 @@ import {
   useRef,
   useState,
 } from "react";
-import { useLocation, useNavigate, useSearchParams } from "@/lib/routing";
+import { Link, useLocation, useNavigate, useSearchParams } from "@/lib/routing";
+import { useViewerId } from "@/hooks/useViewerId";
+import { readCreatorAuthoringDraft } from "@/lib/creatorAuthoringDraft";
 import { MAIN_CANVAS_ID } from "@/canvas/canvasLayout";
 import { CANVAS_QUERY_PARAM, canvasLocation } from "@/canvas/canvasNavigation";
 import {
@@ -2084,6 +2086,22 @@ export function resetLandingDraft(): void {
 }
 
 export function NewChatLandingScreen() {
+  const location = useLocation();
+  const id: unknown = location.state?.creatorAuthoringId;
+  return typeof id === "string" ? <CreatorAuthoringLanding id={id} /> : <NewChatLanding />;
+}
+
+function CreatorAuthoringLanding({ id }: { id: string }) {
+  const viewerId = useViewerId();
+  const creatorDraft = readCreatorAuthoringDraft(viewerId, id);
+  return <NewChatLanding key={creatorDraft?.id} creatorDraft={creatorDraft} />;
+}
+
+function NewChatLanding({
+  creatorDraft,
+}: {
+  creatorDraft?: ReturnType<typeof readCreatorAuthoringDraft>;
+}) {
   const navigate = useNavigate();
   const location = useLocation();
   const [searchParams] = useSearchParams();
@@ -2272,11 +2290,12 @@ export function NewChatLandingScreen() {
   // visit (or a plain one) must not beat THIS visit's project defaults —
   // strip them so the prefill machine (fill-empty-only) can seed. Read once
   // per mount; only the lazy state initializers below consume it.
+  const parkedDraft = creatorDraft ? null : landingDraft;
   const restoredDraft: LandingDraft | null =
-    landingDraft === null || landingDraft.project === projectParam
-      ? landingDraft
+    parkedDraft === null || parkedDraft.project === projectParam
+      ? parkedDraft
       : {
-          ...landingDraft,
+          ...parkedDraft,
           pickedAgentId: null,
           pickedHarness: null,
           selectedHostId: null,
@@ -2295,8 +2314,10 @@ export function NewChatLandingScreen() {
           autoSeededBranch: "",
         };
 
-  const [message, setMessage] = useState<string>(() =>
-    linkedPrompt?.trim() ? linkedPrompt : (restoredDraft?.message ?? ""),
+  const [message, setMessage] = useState<string>(
+    () =>
+      creatorDraft?.prompt ??
+      (linkedPrompt?.trim() ? linkedPrompt : (restoredDraft?.message ?? "")),
   );
   useEffect(() => {
     if (!searchParams.has("prompt")) return;
@@ -2711,13 +2732,14 @@ export function NewChatLandingScreen() {
     onScreenRef.current = true;
     return () => {
       onScreenRef.current = false;
+      if (creatorDraft) return;
       if (!submittedRef.current) {
         writeLandingDraft(draftRef.current);
       } else if (submittedDraftRevisionRef.current === landingDraftRevision) {
         writeLandingDraft(null);
       }
     };
-  }, []);
+  }, [creatorDraft]);
 
   const { recent, addRecent } = useRecentWorkspaces(selectedHostId);
   const { addRecentHarness } = useRecentHarnesses();
@@ -5602,7 +5624,7 @@ export function NewChatLandingScreen() {
       // The draft's files were validated when the user attached them, so
       // they come back verbatim rather than through a re-validating replace.
       restoreFiles(returnedDraft.files);
-    } else {
+    } else if (!creatorDraft) {
       writeLandingDraft(returnedDraft);
     }
   }
@@ -6242,7 +6264,7 @@ export function NewChatLandingScreen() {
       appendPromptHistoryEntry(initialPrompt, data.id);
       // The session was created — drop any draft a detour back to this
       // screen stashed, so the next visit starts clean.
-      if (submittedDraftRevisionRef.current === landingDraftRevision) {
+      if (!creatorDraft && submittedDraftRevisionRef.current === landingDraftRevision) {
         writeLandingDraft(null);
       }
 
@@ -6493,6 +6515,17 @@ export function NewChatLandingScreen() {
           )}
           data-testid="new-chat-landing-composer-surface"
         >
+          {creatorDraft && (
+            <div className="mb-3 space-y-1 rounded-md border px-3 py-2 text-sm">
+              <p className="font-medium">Creator authoring draft</p>
+              <p className="text-muted-foreground">
+                Review the prompt and choose an agent and an isolated workspace before sending.
+              </p>
+              <Link className="underline" to={creatorDraft.returnTo}>
+                Back to Creator Mode
+              </Link>
+            </div>
+          )}
           {/* Keep the tray mounted while the execution target changes. */}
           {sandboxSelected && (
             <ComposerWorkspaceBar

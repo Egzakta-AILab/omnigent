@@ -3,7 +3,8 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { triggerBrowserDownload } from "@/hooks/useFileContent";
 import { copyText } from "@/lib/clipboard";
-import { Link } from "@/lib/routing";
+import { readCreatorEditorDraft, stageCreatorAuthoringDraft } from "@/lib/creatorAuthoringDraft";
+import { useLocation, useNavigate } from "@/lib/routing";
 import {
   buildCreatorPanelPreview,
   getCreatorInstallation,
@@ -26,9 +27,12 @@ export function CreatorPanelStudio({
   viewerId: string | null;
   onProof: ShowCreatorProof;
 }) {
-  const [open, setOpen] = useState(false);
-  const [brief, setBrief] = useState(DEFAULT_BRIEF);
-  const [source, setSource] = useState("");
+  const navigate = useNavigate();
+  const location = useLocation();
+  const [restored] = useState(() => readCreatorEditorDraft(viewerId, discussion.id));
+  const [open, setOpen] = useState(Boolean(restored));
+  const [brief, setBrief] = useState(restored?.brief ?? DEFAULT_BRIEF);
+  const [source, setSource] = useState(restored?.source ?? "");
   const [status, setStatus] = useState("");
   const contract = useQuery({
     queryKey: ["studio-creator-contract", viewerId, discussion.id],
@@ -52,9 +56,9 @@ export function CreatorPanelStudio({
     preview.base_sha === discussion.base_sha &&
     preview.head_sha === discussion.head_sha;
 
-  async function copyPrompt() {
-    if (!contract.data) return;
-    const prompt = [
+  function authoringPrompt() {
+    if (!contract.data || !brief.trim()) return;
+    return [
       "You are creating an Omnigent Creator Mode review panel.",
       "Return exactly one JSON definition matching the installed schema, without a code fence.",
       "Use only the declared settings. The native host supplies review data and performs proof actions.",
@@ -67,12 +71,31 @@ export function CreatorPanelStudio({
     ]
       .filter(Boolean)
       .join("\n\n");
+  }
+
+  async function copyPrompt() {
+    const prompt = authoringPrompt();
+    if (!prompt) return;
     try {
       await copyText(prompt);
       setStatus("Authoring prompt copied. Paste it into your chosen agent session.");
     } catch {
       setStatus("Could not copy the prompt. Check clipboard access and try again.");
     }
+  }
+
+  function openAuthoringDraft() {
+    const prompt = authoringPrompt();
+    if (!viewerId || !prompt) return;
+    const creatorAuthoringId = stageCreatorAuthoringDraft({
+      viewerId,
+      reviewId: discussion.id,
+      returnTo: location.pathname + location.search + location.hash,
+      brief,
+      source,
+      prompt,
+    });
+    navigate("/", { state: { creatorAuthoringId } });
   }
 
   function validate() {
@@ -85,7 +108,11 @@ export function CreatorPanelStudio({
   }
 
   const editor = (
-    <details className="rounded-md border" onToggle={(event) => setOpen(event.currentTarget.open)}>
+    <details
+      className="rounded-md border"
+      open={open}
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+    >
       <summary className="cursor-pointer px-3 py-2 text-sm font-medium">Creator Mode</summary>
       {open && (
         <div className="space-y-4 border-t p-3 text-sm">
@@ -116,15 +143,19 @@ export function CreatorPanelStudio({
               <div className="flex flex-wrap items-center gap-2">
                 <Button
                   size="sm"
+                  onClick={openAuthoringDraft}
+                  disabled={!viewerId || !brief.trim()}
+                >
+                  Open authoring draft
+                </Button>
+                <Button
+                  size="sm"
                   variant="outline"
                   onClick={() => void copyPrompt()}
                   disabled={!brief.trim()}
                 >
                   Copy authoring prompt
                 </Button>
-                <Link className="underline" to="/" target="_blank" rel="noreferrer">
-                  Open agent composer
-                </Link>
               </div>
               <p className="text-xs text-muted-foreground">
                 Choose a local sandbox or a remote workspace for the authoring session. The prompt

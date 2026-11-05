@@ -41,12 +41,14 @@ Set `OMNIGENT_STUDIO_CREATOR_PILOT=1` on the server and restart. Open a saved
 review discussion and expand **Creator Mode**. For the Studio Compose overlay,
 set the same variable in its environment before recreating the service.
 
-1. Describe a panel and copy the authoring prompt. It includes the installed
-   schema, a QA template, and any draft or diagnostic currently in the editor.
-2. Open the agent composer in a separate tab, select Codex or Claude Code and
-   your isolated workspace, then send the prompt. Paste the resulting JSON
-   into **Panel definition**. Use **Load QA template** to try the preview
-   without an agent session.
+1. Describe a panel and select **Open authoring draft**. The native composer
+   opens with your brief, the installed schema, a QA template, and any draft
+   or diagnostic currently in the editor. You can also copy the prompt.
+2. Review the prompt, select Codex or Claude Code and an isolated workspace,
+   then send it. Return to the original review in the same app window and
+   paste the resulting JSON into **Panel definition**. The authoring handoff
+   keeps the brief and definition in memory until reload. Use **Load QA
+   template** to try the preview without an agent session.
 3. Select **Build preview**. The panel groups checks from findings on that
    saved revision. **Open and discuss** opens the selected receipt and
    preselects it in **Ask an agent**. You can review the context before
