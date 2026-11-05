@@ -59,6 +59,7 @@ function hasValidDefaults(defaults: ReviewProfileDefaults | null | undefined): b
 export interface ReviewPass {
   id: string;
   run_id?: string | null;
+  run_role?: "coordinator" | "candidate" | "required" | null;
   launch_error?: string | null;
   target: {
     pr_url: string;
@@ -132,12 +133,27 @@ export type ProjectReviewMember = CaptureReview & {
   repository: string;
 };
 
+export interface CaptureReviewRun {
+  reviewers: ProjectReviewMember[];
+  coordinator?: ProjectReviewMember;
+  required_reviewer_indices?: number[];
+}
+
+interface ReviewPlan {
+  coordinator_id: string;
+  base_sha: string;
+  head_sha: string;
+  decisions: { review_id: string; selected: boolean; reason: string }[];
+}
+
 export interface ReviewRun {
   id: string;
   target: ReviewPass["target"];
   reviewers: ReviewPass[];
   created_at: number;
   patch_sha256?: string | null;
+  coordinator?: ReviewPass | null;
+  plan?: ReviewPlan | null;
 }
 
 export interface ReviewRunPage {
@@ -148,6 +164,12 @@ export interface ReviewRunPage {
 export interface ReviewRunReport {
   reviewers: { review_id: string; report: ReviewReport }[];
   findings: { finding: ReviewFinding; review_ids: string[] }[];
+  proposal?: {
+    state: "pending" | "incomplete" | "ready";
+    plan: ReviewPlan | null;
+    digest: string | null;
+    error: string | null;
+  } | null;
 }
 
 function reviewRunPath(runId: string) {
@@ -158,15 +180,15 @@ function projectReviewRunsPath(projectId: string) {
   return `/v1/projects/${encodeURIComponent(projectId)}/studio/review-runs`;
 }
 
-export function captureReviewRun(projectId: string, members: ProjectReviewMember[], key: string) {
-  return postReview<ReviewRun>(projectReviewRunsPath(projectId), key, { reviewers: members });
+export function captureReviewRun(projectId: string, roster: CaptureReviewRun, key: string) {
+  return postReview<ReviewRun>(projectReviewRunsPath(projectId), key, roster);
 }
 
-export function startReviewRun(runId: string) {
+export function startReviewRun(runId: string, proposalDigest?: string) {
   return postReview<{ run: ReviewRun; errors: Record<string, string> }>(
     `${reviewRunPath(runId)}/start`,
     `studio-review-run-start-${runId}`,
-    {},
+    proposalDigest ? { proposal_digest: proposalDigest } : {},
   );
 }
 

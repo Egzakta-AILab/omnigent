@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from time import time_ns
-from typing import Annotated, Literal
+from typing import Annotated, Literal, TypeVar
 
 from pydantic import Field, StringConstraints, ValidationError, field_validator
 
@@ -18,7 +19,7 @@ from omnigent.entities.conversation import (
 from omnigent.errors import StaleCursorError
 from omnigent.stores.conversation_store import ConversationStore
 from omnigent.studio.reviews.evidence import Anchor
-from omnigent.studio.reviews.models import FrozenModel, ReviewPass, Sha
+from omnigent.studio.reviews.models import FrozenModel, ReviewPass, ReviewPlanProposal, Sha
 
 _REPORT_FENCE = "```studio-review-v1"
 _MAX_REPORT_BYTES = 48 * 1024
@@ -28,6 +29,8 @@ _RECENT_SKILL_ITEM_LIMIT = 64
 _EMPTY_REPLY_GRACE_MS = 5_000
 _PROGRESS_PHASES = {"commentary", "partial_answer"}
 _ACTIVE_STATUSES = {"running", "waiting"}
+_Envelope = TypeVar("_Envelope", bound=FrozenModel)
+ReportState = Literal["pending", "incomplete", "ready"]
 
 _Summary = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)]
 
@@ -66,7 +69,7 @@ class _ReportEnvelope(FrozenModel):
 class ReviewReport(FrozenModel):
     """View of the report as observed in the reviewer's durable transcript."""
 
-    state: Literal["pending", "incomplete", "ready"]
+    state: ReportState
     summary: str | None = None
     findings: list[ReviewFinding] = Field(default_factory=list)
     message_id: str | None = None
@@ -106,6 +109,7 @@ class ConsolidatedFinding(FrozenModel):
 class ConsolidatedReviewReport(FrozenModel):
     reviewers: list[ReviewerRunReport]
     findings: list[ConsolidatedFinding]
+    proposal: ReviewPlanProposal | None = None
 
 
 def consolidate_reports(reports: list[ReviewerRunReport]) -> ConsolidatedReviewReport:
@@ -169,7 +173,9 @@ def _assistant_response(
     return response, None
 
 
-def _report_payload(items: list[ConversationItem]) -> _ReportEnvelope | None:
+def _fenced_payload(
+    items: list[ConversationItem], fence: str, model: type[_Envelope]
+) -> _Envelope | None:
     """Read one terminal tagged fence without retaining an oversized reply."""
     parts: list[str] = []
     size = 0
@@ -194,13 +200,11 @@ def _report_payload(items: list[ConversationItem]) -> _ReportEnvelope | None:
         parts.append("".join(text_parts))
 
     lines = "\n".join(parts).strip().split("\n")
-    markers = [index for index, line in enumerate(lines) if line.rstrip("\r") == _REPORT_FENCE]
+    markers = [index for index, line in enumerate(lines) if line.rstrip("\r") == fence]
     if len(markers) != 1 or lines[-1] != "```":
         return None
     try:
-        return _ReportEnvelope.model_validate_json(
-            "\n".join(lines[markers[0] + 1 : -1]), strict=True
-        )
+        return model.model_validate_json("\n".join(lines[markers[0] + 1 : -1]), strict=True)
     except ValidationError:
         return None
 
@@ -251,11 +255,18 @@ def _has_claude_skill_launch(
     return False
 
 
-def read_review_report(conversation_store: ConversationStore, review: ReviewPass) -> ReviewReport:
-    """Read the latest in-scope report without writing transcript or review state."""
+def read_native_envelope(
+    conversation_store: ConversationStore,
+    review: ReviewPass,
+    fence: str,
+    model: type[_Envelope],
+    *,
+    accepts: Callable[[_Envelope], bool] | None = None,
+) -> tuple[ReportState, str | None, _Envelope | None]:
+    """Read a terminal native reply from the bound reviewer without changing its state."""
     session_id = review.reviewer_session_id
     if session_id is None or session_id == review.target.source_session_id:
-        return ReviewReport(state="pending")
+        return "pending", None, None
 
     recent = conversation_store.list_items(
         session_id, order="desc", type="message", limit=_RECENT_MESSAGE_LIMIT
@@ -273,13 +284,12 @@ def read_review_report(conversation_store: ConversationStore, review: ReviewPass
             and time_ns() // 1_000_000 - max(review.updated_at, input_created_at * 1_000)
             >= _EMPTY_REPLY_GRACE_MS
         )
-        return ReviewReport(
-            state="incomplete" if empty_reply or live_status == "failed" else "pending"
-        )
+        state = "incomplete" if empty_reply or live_status == "failed" else "pending"
+        return state, None, None
 
     latest = response[0]
     if latest.status == "in_progress" or live_status in _ACTIVE_STATUSES:
-        return ReviewReport(state="pending")
+        return "pending", None, None
 
     completed = [
         item
@@ -290,24 +300,17 @@ def read_review_report(conversation_store: ConversationStore, review: ReviewPass
         and item.status == "completed"
     ]
     # Do not fall back to earlier text after an interrupted or partial final item.
-    payload = _report_payload(completed) if completed and latest is completed[0] else None
-    if payload is not None and (payload.review_id, payload.base_sha, payload.head_sha) == (
-        review.id,
-        review.target.base_sha,
-        review.target.head_sha,
-    ):
+    payload = (
+        _fenced_payload(completed, fence, model) if completed and latest is completed[0] else None
+    )
+    if payload is not None and (accepts is None or accepts(payload)):
         if (
             review.profile.harness == "claude-native"
             and (skill := review.profile.skill) is not None
             and not _has_claude_skill_launch(conversation_store, session_id, latest, skill)
         ):
-            return ReviewReport(state="incomplete", message_id=latest.id)
-        return ReviewReport(
-            state="ready",
-            summary=payload.summary,
-            findings=payload.findings,
-            message_id=latest.id,
-        )
+            return "incomplete", latest.id, None
+        return "ready", latest.id, payload
 
     terminal = (
         live_status in {"idle", "failed"}
@@ -318,5 +321,23 @@ def read_review_report(conversation_store: ConversationStore, review: ReviewPass
         )
     )
     if terminal:
-        return ReviewReport(state="incomplete", message_id=latest.id)
-    return ReviewReport(state="pending")
+        return "incomplete", latest.id, None
+    return "pending", None, None
+
+
+def read_review_report(conversation_store: ConversationStore, review: ReviewPass) -> ReviewReport:
+    state, message_id, payload = read_native_envelope(
+        conversation_store,
+        review,
+        _REPORT_FENCE,
+        _ReportEnvelope,
+        accepts=lambda envelope: (
+            (envelope.review_id, envelope.base_sha, envelope.head_sha)
+            == (review.id, review.target.base_sha, review.target.head_sha)
+        ),
+    )
+    if payload is None:
+        return ReviewReport(state=state, message_id=message_id)
+    return ReviewReport(
+        state="ready", summary=payload.summary, findings=payload.findings, message_id=message_id
+    )

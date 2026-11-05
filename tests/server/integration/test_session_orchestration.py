@@ -3522,6 +3522,98 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
 
         private_run = await auth_client.get(run_path, headers={"X-Forwarded-Email": "bob"})
         assert private_run.status_code == 404, private_run.text
+
+        planned = await auth_client.post(
+            runs_path,
+            headers={"Idempotency-Key": "project-review-plan"},
+            json={
+                **roster,
+                "coordinator": {**reviewer_input, "model": "planning-model"},
+                "required_reviewer_indices": [0],
+            },
+        )
+        assert planned.status_code == 200, planned.text
+        planned_run = planned.json()
+        planning_id = planned_run["coordinator"]["id"]
+        planned_members = {entry["run_role"]: entry for entry in planned_run["reviewers"]}
+        required, optional = planned_members["required"], planned_members["candidate"]
+        plan_path = f"/v1/studio/review-runs/{planned_run['id']}"
+
+        async def start_directly(member_id: str) -> int:
+            started = await auth_client.post(
+                f"/v1/studio/reviews/{member_id}/start",
+                headers={"Idempotency-Key": f"manual-start-{member_id}"},
+                json={},
+            )
+            return started.status_code
+
+        assert await start_directly(required["id"]) == 409
+        planning = await auth_client.post(f"{plan_path}/start", json={})
+        assert planning.status_code == 200, planning.text
+        assert planning.json()["errors"] == {}
+        assert [frame.session_id for frame in launches[-1:]] == [planning_id]
+        assert send_review.await_count == 4
+        assert (await auth_client.post(f"{plan_path}/start", json={})).status_code == 200
+        assert send_review.await_count == 4
+        coordinator = conversations.get_conversation(planning_id)
+        assert coordinator is not None and coordinator.project_id == expected_project_id
+        proposal = {
+            "coordinator_id": planning_id,
+            "base_sha": base_sha,
+            "head_sha": current_head,
+            "decisions": [
+                {"review_id": required["id"], "selected": False, "reason": "No coverage needed"},
+                {"review_id": optional["id"], "selected": True, "reason": "Covers the change"},
+            ],
+        }
+
+        def save_proposal() -> None:
+            save_assistant_message(
+                planning_id, "```studio-review-plan-v1\n" + json.dumps(proposal) + "\n```"
+            )
+
+        save_proposal()
+        rejected = (await auth_client.get(f"{plan_path}/report")).json()
+        assert rejected["proposal"]["state"] == "incomplete"
+        assert rejected["proposal"]["error"] == "The plan must select every required reviewer"
+        assert rejected["reviewers"] == []
+        proposal["decisions"][0]["selected"] = True
+        proposal["decisions"][1]["selected"] = False
+        save_proposal()
+        proposed = (await auth_client.get(f"{plan_path}/report")).json()["proposal"]
+        assert proposed["state"] == "ready" and proposed["plan"] == proposal
+        stale_approval = await auth_client.post(
+            f"{plan_path}/start", json={"proposal_digest": "0" * 64}
+        )
+        assert stale_approval.status_code == 409
+        current_head = "c" * 40
+        stale_revision = await auth_client.post(
+            f"{plan_path}/start", json={"proposal_digest": proposed["digest"]}
+        )
+        assert stale_revision.status_code == 409
+        assert (await auth_client.get(plan_path)).json()["plan"] is None
+        current_head = "b" * 40
+        assert send_review.await_count == 4
+        approval = await auth_client.post(
+            f"{plan_path}/start", json={"proposal_digest": proposed["digest"]}
+        )
+        assert approval.status_code == 200, approval.text
+        assert approval.json()["errors"] == {}
+        assert approval.json()["run"]["plan"] == proposal
+        assert [frame.session_id for frame in launches[-2:]] == [planning_id, required["id"]]
+        assert await start_directly(optional["id"]) == 409
+        assert conversations.get_conversation(optional["id"]) is None
+        assert (
+            await auth_client.post(
+                f"{plan_path}/start", json={"proposal_digest": proposed["digest"]}
+            )
+        ).status_code == 200
+        assert send_review.await_count == 5
+        save_assistant_message(planning_id, "A later coordinator message.")
+        assert (await auth_client.get(plan_path)).json()["plan"] == proposal
+        report = (await auth_client.get(f"{plan_path}/report")).json()
+        assert [entry["review_id"] for entry in report["reviewers"]] == [required["id"]]
+        assert report["proposal"] is None
         return
 
     created = await create_reviewer(request, "alice", review, review.id)

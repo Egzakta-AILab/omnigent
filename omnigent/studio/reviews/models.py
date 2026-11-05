@@ -176,11 +176,41 @@ class ReviewTarget(FrozenModel):
 
 
 MAX_RUN_REVIEWERS = 16
+ReviewRunRole = Literal["coordinator", "candidate", "required"]
+
+
+class ReviewerDecision(FrozenModel):
+    review_id: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{32}$")]
+    selected: bool = Field(strict=True)
+    reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=160)]
+
+    @field_validator("reason")
+    @classmethod
+    def printable_reason(cls, value: str) -> str:
+        if not value.isprintable():
+            raise ValueError("Use a single line for the selection reason")
+        return value
+
+
+class ReviewPlan(FrozenModel):
+    coordinator_id: str
+    base_sha: Sha
+    head_sha: Sha
+    decisions: list[ReviewerDecision] = Field(min_length=1, max_length=MAX_RUN_REVIEWERS)
+
+
+class ReviewPlanProposal(FrozenModel):
+    state: Literal["pending", "incomplete", "ready"]
+    plan: ReviewPlan | None = None
+    message_id: str | None = None
+    digest: str | None = None
+    error: str | None = None
 
 
 class ReviewPass(FrozenModel):
     id: str
     run_id: str | None = None
+    run_role: ReviewRunRole | None = None
     launch_error: str | None = None
     owner_user_id: str | None
     target: ReviewTarget
@@ -201,6 +231,36 @@ class ReviewRun(FrozenModel):
     reviewers: list[ReviewPass]
     created_at: int
     patch_sha256: str | None = None
+    coordinator: ReviewPass | None = None
+    plan: ReviewPlan | None = None
+
+    def validate_plan(self, plan: ReviewPlan) -> None:
+        if self.coordinator is None or (plan.coordinator_id, plan.base_sha, plan.head_sha) != (
+            self.coordinator.id,
+            self.target.base_sha,
+            self.target.head_sha,
+        ):
+            raise ValueError("The plan does not match the coordinator and captured revision")
+        decisions = {decision.review_id: decision.selected for decision in plan.decisions}
+        if len(decisions) != len(plan.decisions) or decisions.keys() != {
+            reviewer.id for reviewer in self.reviewers
+        }:
+            raise ValueError("The plan must name every captured reviewer exactly once")
+        if any(
+            reviewer.run_role == "required" and not decisions[reviewer.id]
+            for reviewer in self.reviewers
+        ):
+            raise ValueError("The plan must select every required reviewer")
+        if not any(decisions.values()):
+            raise ValueError("The plan must select at least one reviewer")
+
+    def selected_reviewers(self) -> list[ReviewPass]:
+        if self.coordinator is None:
+            return self.reviewers
+        if self.plan is None:
+            return []
+        selected = {decision.review_id for decision in self.plan.decisions if decision.selected}
+        return [reviewer for reviewer in self.reviewers if reviewer.id in selected]
 
 
 class ReviewRunPage(FrozenModel):

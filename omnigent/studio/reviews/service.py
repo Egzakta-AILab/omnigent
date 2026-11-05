@@ -116,10 +116,14 @@ class CaptureReviewRunRequest(BaseModel):
     reviewers: Annotated[
         list[CaptureProjectReviewRequest], Field(min_length=1, max_length=MAX_RUN_REVIEWERS)
     ]
+    coordinator: CaptureProjectReviewRequest | None = None
+    required_reviewer_indices: list[Annotated[int, Field(strict=True, ge=0)]] = Field(
+        default_factory=list, max_length=MAX_RUN_REVIEWERS
+    )
 
     @model_validator(mode="after")
     def validate_roster(self) -> CaptureReviewRunRequest:
-        members = self.reviewers
+        members = [*self.reviewers, self.coordinator] if self.coordinator else self.reviewers
         target_fields = {
             "pr_url",
             "expected_base_sha",
@@ -131,14 +135,22 @@ class CaptureReviewRunRequest(BaseModel):
         expected = members[0].model_dump(include=target_fields)
         if any(member.model_dump(include=target_fields) != expected for member in members[1:]):
             raise ValueError("All reviewers must use the same checkout and revision")
-        if len({member.model_dump_json() for member in members}) != len(members):
+        if len({member.model_dump_json() for member in self.reviewers}) != len(self.reviewers):
             raise ValueError("Choose distinct reviewer configurations")
+        required = self.required_reviewer_indices
+        if required and (
+            self.coordinator is None
+            or max(required) >= len(self.reviewers)
+            or len(set(required)) != len(required)
+        ):
+            raise ValueError("Required reviewers must be distinct entries in an orchestrated run")
         return self
 
 
 def review_run_fingerprint(project_id: str, body: CaptureReviewRunRequest) -> str:
+    excluded = {"coordinator", "required_reviewer_indices"} if body.coordinator is None else None
     payload = json.dumps(
-        ["review.run.capture", project_id, body.model_dump(mode="json")],
+        ["review.run.capture", project_id, body.model_dump(mode="json", exclude=excluded)],
         sort_keys=True,
         separators=(",", ":"),
     )

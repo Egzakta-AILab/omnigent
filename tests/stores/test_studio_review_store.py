@@ -19,7 +19,13 @@ from omnigent.stores.studio_review_store import (
     ReviewTransitionError,
     StudioReviewStore,
 )
-from omnigent.studio.reviews.models import CaptureResult, ReviewProfile, ReviewTarget
+from omnigent.studio.reviews.models import (
+    CaptureResult,
+    ReviewerDecision,
+    ReviewPlan,
+    ReviewProfile,
+    ReviewTarget,
+)
 
 OWNER = "owner@example.test"
 OTHER = "other@example.test"
@@ -99,6 +105,72 @@ def test_capture_is_frozen_replayable_and_not_execution(store: StudioReviewStore
         first.review.target.workspace = "/changed"
     with pytest.raises(ValidationError, match="frozen"):
         first.review.profile.skill = "changed"
+
+
+def test_orchestrated_roster_stays_safe_for_older_dispatchers(
+    store: StudioReviewStore, db_uri: str
+) -> None:
+    run = store.capture_run(
+        owner_user_id=OWNER,
+        idempotency_key="plan",
+        request_hash="e" * 64,
+        target=_target(source_session_id=None, source_project_id=SESSION, repository_path="."),
+        profiles=[_profile(), _profile(skill="security")],
+        patch="diff --git a/file b/file\n",
+        coordinator=_profile(skill="planning"),
+        required_indices=frozenset({0}),
+    )
+    assert run.coordinator is not None
+    coordinator_id = run.coordinator.id
+    by_role = {member.run_role: member.id for member in run.reviewers}
+
+    def legacy_launchable_members() -> list[bytes]:
+        with get_or_create_engine(db_uri).connect() as connection:
+            # The previous application launches only persisted not_requested (1) rows.
+            return list(
+                connection.scalars(
+                    sa.text(
+                        "SELECT id FROM studio_review_passes "
+                        "WHERE run_id = :run AND dispatch_status = 1"
+                    ),
+                    {"run": bytes.fromhex(run.id)},
+                )
+            )
+
+    assert legacy_launchable_members() == []
+    with pytest.raises(ReviewConflictError, match="held for planning"):
+        _reserve(store, by_role["candidate"])
+
+    def claim():
+        return store.reserve_operation(
+            coordinator_id,
+            owner_user_id=OWNER,
+            action="review.start",
+            idempotency_key="coordinate",
+            request_hash="d" * 64,
+            claim_coordinator=True,
+        )
+
+    claimed = claim()
+    assert claimed.created and claimed.operation.state == "dispatching"
+    assert not claim().created
+    assert legacy_launchable_members() == []
+    plan = ReviewPlan(
+        coordinator_id=run.coordinator.id,
+        base_sha=run.target.base_sha,
+        head_sha=run.target.head_sha,
+        decisions=[
+            ReviewerDecision(
+                review_id=member.id, selected=member.run_role == "required", reason="Scope"
+            )
+            for member in run.reviewers
+        ],
+    )
+    approved = store.approve_run_plan(run.id, plan, owner_user_id=OWNER)
+    assert [member.id for member in approved.selected_reviewers()] == [by_role["required"]]
+    assert legacy_launchable_members() == [bytes.fromhex(by_role["required"])]
+    with pytest.raises(ReviewConflictError, match="held for planning"):
+        _reserve(store, by_role["candidate"])
 
 
 def test_conflicting_key_does_not_modify_capture(store: StudioReviewStore) -> None:
