@@ -1976,6 +1976,82 @@ def test_studio_review_from_pr_panel(
         assert run_posts == ["capture", "start"]
         assert len(capture_keys) == len(start_keys) == 1
         assert not ordinary_creates and not review_events
+        collaborators: list[str] = []
+        replies: list[dict] = []
+        discussion_path = f"**/v1/studio/review-runs/{run_id}/discussion"
+
+        def grant_discussion_access(route: Route) -> None:
+            assert route.request.post_data_json == {"user_id": "reviewer@example.test"}
+            collaborators.append("reviewer@example.test")
+            route.fulfill(status=204)
+
+        def reply_in_discussion(route: Route) -> None:
+            message = route.request.post_data_json
+            expected_anchor = (
+                {"kind": "finding", "finding_key": finding_key}
+                if not replies
+                else {
+                    "kind": "diff",
+                    "path": "src/app/main.py",
+                    "side": "head",
+                    "start": 2,
+                    "end": 2,
+                }
+            )
+            assert message["anchor"] == expected_anchor
+            saved = {**message, "author": "fixture-owner", "created_at": review["created_at"]}
+            replies.append(saved)
+            route.fulfill(json=saved)
+
+        page.route(f"{discussion_path}/collaborators", grant_discussion_access)
+        page.route(f"{discussion_path}/comments", reply_in_discussion)
+        page.route(
+            discussion_path,
+            lambda route: route.fulfill(
+                json={
+                    "id": run_id,
+                    **revision,
+                    "project_name": project_name,
+                    "repository": repository,
+                    "pr_url": pr_url,
+                    "pr_number": _PR_NUMBER,
+                    "patch": _PR_DIFF["patch"],
+                    "reports": [
+                        {
+                            "key": "6" * 64,
+                            "label": "Backend review",
+                            "state": "ready",
+                            "summary": report["summary"],
+                        }
+                    ],
+                    "findings": [{"key": finding_key, "finding": report["findings"][0]}],
+                    "comments": replies,
+                    "can_comment": True,
+                    "collaborators": collaborators,
+                    "sharing_available": True,
+                }
+            ),
+        )
+        runs_panel.get_by_role("link", name="Discuss finding", exact=True).click()
+        expect(page.get_by_role("heading", name="Review discussion")).to_be_visible()
+        page.get_by_text("Share this review", exact=True).click()
+        page.get_by_label("Omnigent account ID").fill("reviewer@example.test")
+        page.get_by_role("button", name="Grant access", exact=True).click()
+        expect(page.get_by_text("reviewer@example.test", exact=True)).to_be_visible()
+        page.get_by_role("textbox", name="Internal reply").fill(
+            "Can we reproduce with empty input?"
+        )
+        page.get_by_role("button", name="Post internal reply", exact=True).click()
+        expect(page.get_by_text("Can we reproduce with empty input?", exact=True)).to_be_visible()
+        page.screenshot(path=str(tmp_path / "review-discussion.png"))
+        page.get_by_role("region", name="Review context").locator(
+            '[data-column-number="2"][data-line-type="change-addition"]'
+        ).click()
+        thread = page.get_by_role("region", name="Selected thread")
+        expect(thread.get_by_role("heading", name="src/app/main.py:2 · Head")).to_be_visible()
+        thread.get_by_role("textbox", name="Internal reply").fill("Check this changed line.")
+        thread.get_by_role("button", name="Post internal reply", exact=True).click()
+        expect(thread.get_by_text("Check this changed line.", exact=True)).to_be_visible()
         return
 
     page.goto(f"{base_url}/{'canvas/' if entry == 'canvas' else ''}c/{session_id}")

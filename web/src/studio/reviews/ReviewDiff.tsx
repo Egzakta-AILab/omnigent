@@ -2,9 +2,9 @@ import { useCallback, useMemo, useRef, useState } from "react";
 import { parsePatchFiles } from "@pierre/diffs";
 import { FileDiff } from "@pierre/diffs/react";
 import { useResolvedThemeMode } from "@/components/theme/useResolvedThemeMode";
-import { PULL_REQUEST_DIFF_THEME } from "@/lib/pullRequestReviewThreads";
+import { PULL_REQUEST_DIFF_THEME, reviewSelection } from "@/lib/pullRequestReviewThreads";
 import { findDiffRow, findingLine } from "@/shell/pullRequestReview";
-import type { ReviewSource } from "./api";
+import type { DiscussionAnchor, ReviewSource } from "./api";
 
 export function ReviewDiff({
   patch,
@@ -12,12 +12,16 @@ export function ReviewDiff({
   source,
   sourceLine,
   onClearSource,
+  discussionRange,
+  onSelectRange,
 }: {
   patch: string;
   truncated: boolean;
   source: ReviewSource | null;
   sourceLine?: string | null;
   onClearSource: () => void;
+  discussionRange?: Extract<DiscussionAnchor, { kind: "diff" }>;
+  onSelectRange?: (range: Extract<DiscussionAnchor, { kind: "diff" }> | null) => void;
 }) {
   const themeMode = useResolvedThemeMode();
   const [selectedPath, setSelectedPath] = useState("");
@@ -35,6 +39,17 @@ export function ReviewDiff({
       )
     : undefined;
   const selected = anchoredFile ?? files.find((file) => file.name === selectedPath) ?? files[0];
+  const selectedRange =
+    discussionRange &&
+    selected &&
+    (discussionRange.side === "base" ? (selected.prevName ?? selected.name) : selected.name) ===
+      discussionRange.path
+      ? {
+          start: discussionRange.start,
+          end: discussionRange.end,
+          side: discussionRange.side === "base" ? ("deletions" as const) : ("additions" as const),
+        }
+      : null;
   const anchor = useMemo(
     () => (anchoredFile && source ? findingLine(anchoredFile, source, "unified") : null),
     [anchoredFile, source],
@@ -54,7 +69,7 @@ export function ReviewDiff({
       {source && (
         <p role="status" className="wrap-break-word text-xs text-muted-foreground">
           {anchor || sourceLine != null
-            ? `Review finding · ${source.path}:${source.line}`
+            ? `${discussionRange ? "Discussion range" : "Review finding"} · ${source.path}:${source.line}`
             : "The finding’s cited line is unavailable in this diff preview."}
         </p>
       )}
@@ -93,10 +108,30 @@ export function ReviewDiff({
                 diffStyle: "unified",
                 theme: PULL_REQUEST_DIFF_THEME,
                 themeType: themeMode,
+                enableLineSelection: !!onSelectRange,
+                onLineSelectionEnd: onSelectRange
+                  ? (range) => {
+                      const lines = range && reviewSelection(range, selected);
+                      if (!lines) return onSelectRange(null);
+                      onSelectRange({
+                        kind: "diff",
+                        path:
+                          lines.side === "LEFT"
+                            ? (selected.prevName ?? selected.name)
+                            : selected.name,
+                        side: lines.side === "LEFT" ? "base" : "head",
+                        start: lines.start_line ?? lines.line,
+                        end: lines.line,
+                      });
+                    }
+                  : undefined,
                 onPostRender: revealSource,
               }}
               selectedLines={
-                anchor ? { start: anchor.line, end: anchor.line, side: anchor.side } : null
+                selectedRange ??
+                (anchor && !onSelectRange
+                  ? { start: anchor.line, end: anchor.line, side: anchor.side }
+                  : null)
               }
               disableWorkerPool
             />

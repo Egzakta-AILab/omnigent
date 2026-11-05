@@ -11,7 +11,8 @@ import pytest
 import sqlalchemy as sa
 from pydantic import ValidationError
 
-from omnigent.db.db_models import workspace_scope
+from omnigent.db.account_authority import account_authority_scope
+from omnigent.db.db_models import SqlUser, workspace_scope
 from omnigent.db.utils import get_or_create_engine
 from omnigent.stores.studio_review_store import (
     ReviewConflictError,
@@ -105,6 +106,51 @@ def test_capture_is_frozen_replayable_and_not_execution(store: StudioReviewStore
         first.review.target.workspace = "/changed"
     with pytest.raises(ValidationError, match="frozen"):
         first.review.profile.skill = "changed"
+
+
+def test_review_discussion_access_does_not_survive_account_recreation(
+    store: StudioReviewStore, db_uri: str
+) -> None:
+    owner_generation, target_generation, new_generation = "a" * 32, "b" * 32, "c" * 32
+    engine = get_or_create_engine(db_uri)
+    with engine.begin() as connection:
+        connection.execute(
+            sa.insert(SqlUser),
+            [
+                {"workspace_id": 0, "id": OWNER, "account_generation": owner_generation},
+                {"workspace_id": 0, "id": OTHER, "account_generation": target_generation},
+            ],
+        )
+    with account_authority_scope(OWNER, owner_generation):
+        run = store.capture_run(
+            owner_user_id=OWNER,
+            idempotency_key="discussion",
+            request_hash="a" * 64,
+            target=_target(source_session_id=None, source_project_id=SESSION, repository_path="."),
+            profiles=[_profile()],
+            patch="diff --git a/file b/file\n",
+        )
+        assert store.review_discussion_owner_current(run.id, OWNER)
+        store.set_review_collaborator(
+            run.id, OTHER, owner=OWNER, target_generation=target_generation
+        )
+    with account_authority_scope(OTHER, target_generation):
+        assert store.discussion_owner(run.id, OTHER) == OWNER
+        assert store.list_discussion_comments(run.id, actor=OTHER, owner=OWNER) == []
+    with engine.begin() as connection:
+        connection.execute(
+            sa.update(SqlUser).where(SqlUser.id == OWNER).values(account_generation=new_generation)
+        )
+    with account_authority_scope(OWNER, new_generation):
+        assert not store.review_discussion_owner_current(run.id, OWNER)
+        with pytest.raises(ReviewNotFoundError):
+            store.list_discussion_comments(run.id, actor=OWNER, owner=OWNER)
+        with pytest.raises(ReviewNotFoundError):
+            store.set_review_collaborator(
+                run.id, OTHER, owner=OWNER, target_generation=target_generation
+            )
+    with account_authority_scope(OTHER, target_generation):
+        assert store.discussion_owner(run.id, OTHER) is None
 
 
 def test_orchestrated_roster_stays_safe_for_older_dispatchers(

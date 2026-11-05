@@ -101,6 +101,36 @@ class AttachedReproduction(FrozenModel):
     receipt: ReproductionReceipt
 
 
+class SharedReproductionReceipt(FrozenModel):
+    observed_at: AwareDatetime
+    image_id: str
+    timeout_seconds: int
+    base: ReproductionSide
+    head: ReproductionSide
+
+
+class SharedAttachedReproduction(FrozenModel):
+    digest: ReviewRoleDigest
+    attached_at: int
+    provenance: Literal["uploaded"] = "uploaded"
+    receipt: SharedReproductionReceipt
+
+    @classmethod
+    def from_attachment(cls, entry: AttachedReproduction) -> SharedAttachedReproduction:
+        receipt = entry.receipt
+        return cls(
+            digest=entry.digest,
+            attached_at=entry.attached_at,
+            receipt=SharedReproductionReceipt(
+                observed_at=receipt.observed_at,
+                image_id=receipt.image_id,
+                timeout_seconds=receipt.timeout_seconds,
+                base=receipt.base,
+                head=receipt.head,
+            ),
+        )
+
+
 @dataclass(frozen=True)
 class _Capture:
     status: int | None

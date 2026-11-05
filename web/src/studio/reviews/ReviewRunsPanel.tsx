@@ -199,12 +199,21 @@ export function ReviewRunsPanel({
   function reproductions(findingKey: string | null | undefined) {
     if (!findingKey || !run?.patch_sha256) return null;
     return (
-      <FindingReproductions
-        key={JSON.stringify([viewerId, run.id, findingKey])}
-        run={run}
-        findingKey={findingKey}
-        viewerId={viewerId}
-      />
+      <>
+        <Button asChild size="sm" variant="outline">
+          <Link
+            to={`/reviews/${encodeURIComponent(run.id)}/discussion?finding=${encodeURIComponent(findingKey)}`}
+          >
+            Discuss finding
+          </Link>
+        </Button>
+        <FindingReproductions
+          key={JSON.stringify([viewerId, run.id, findingKey])}
+          run={run}
+          findingKey={findingKey}
+          viewerId={viewerId}
+        />
+      </>
     );
   }
 
@@ -342,6 +351,11 @@ export function ReviewRunsPanel({
         })}
       </ul>
       <div className="flex flex-wrap gap-2">
+        {run.patch_sha256 && (
+          <Button asChild size="sm" variant="outline">
+            <Link to={`/reviews/${encodeURIComponent(run.id)}/discussion`}>Discuss review</Link>
+          </Button>
+        )}
         {current && proposal?.digest && proposal.state === "ready" && (
           <Button
             size="sm"

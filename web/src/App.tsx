@@ -77,6 +77,11 @@ const WorkflowDetailPage = withPageView(
 const SettingsPage = lazy(() =>
   import("@/pages/SettingsPage").then((m) => ({ default: m.SettingsPage })),
 );
+const ReviewDiscussionPage = lazy(() =>
+  import("@/studio/reviews/ReviewDiscussionPage").then((m) => ({
+    default: m.ReviewDiscussionPage,
+  })),
+);
 
 // A release-feature route stays registered so a hard load never falls through
 // to the catch-all "Page not found" while the /v1/info probe is in flight; the
@@ -189,6 +194,7 @@ function AppRoutes({ basename }: AppProps) {
         <Route element={<AppShell />}>
           <Route path={prefix || "/"} element={<ChatPage />} />
           <Route path={`${prefix}/c/:conversationId`} element={<ChatPage />} />
+          <Route path={`${prefix}/reviews/:runId/discussion`} element={<ReviewDiscussionPage />} />
           <Route
             path={`${prefix}/grid/:gridId`}
             element={
