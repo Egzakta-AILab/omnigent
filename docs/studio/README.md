@@ -168,6 +168,7 @@ Keep drafts and fork PRs disabled unless you want that route to review them.
       "repository": "KVARK",
       "collaborators": ["reviewer@example.com"],
       "publishers": ["reviewer@example.com"],
+      "prepare_inline_drafts": true,
       "reviewers": [
         {
           "agent_id": "33333333333333333333333333333333",
@@ -219,6 +220,17 @@ Each comment is sent separately to its code range through the review workspace's
 configured provider account. Omnigent checks the revision and records the
 account that confirmed the delivery. The owner can remove publishing access
 while keeping the collaborator's discussion access.
+
+Enable `prepare_inline_drafts` to have the receiver wait for all selected
+reviewers. With a coordinator, it also waits for roster approval. It checks
+that the PR revision still matches and saves up to eight critical or high
+findings with checked line citations. The owner can edit the drafts. A
+publisher finds them in **Publish inline drafts** and sends selected drafts
+with **Confirm publication**.
+The status command shows `drafting` while reports are pending, `drafted`
+when preparation finishes, and `draft_skipped` for incomplete reports or
+revision conflicts. Exhausted polling or a permanent API error shows
+`draft_failed`. A run with no qualifying findings produces zero drafts.
 
 ```sh
 uv run --no-sync python -m omnigent.studio.pr_webhook \

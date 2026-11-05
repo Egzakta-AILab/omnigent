@@ -24,6 +24,7 @@ from omnigent.studio.reviews.report import ReportState, ReviewFinding
 
 AccountId = Annotated[str, StringConstraints(pattern=r"^[^\s\x00-\x1f\x7f]{1,128}$")]
 MAX_REVIEW_COLLABORATORS = 32
+MAX_INLINE_PUBLICATION_DRAFTS = 8
 
 
 class FindingDiscussionAnchor(FrozenModel):
@@ -102,6 +103,12 @@ class InlineDraft(InlineDraftVersion):
     publication_confirmed_by: str | None = None
 
 
+class ReportDraftResult(FrozenModel):
+    state: Literal["waiting", "incomplete", "prepared"]
+    eligible: int = Field(default=0, ge=0, le=MAX_INLINE_PUBLICATION_DRAFTS)
+    created: int = Field(default=0, ge=0, le=MAX_INLINE_PUBLICATION_DRAFTS)
+
+
 class InlineDraftSelection(InlineDraftVersion):
     id: str
 
@@ -112,7 +119,9 @@ class InlineDraftSelection(InlineDraftVersion):
 
 
 class InlinePublicationRequest(FrozenModel):
-    selected: list[InlineDraftSelection] = Field(min_length=1, max_length=8)
+    selected: list[InlineDraftSelection] = Field(
+        min_length=1, max_length=MAX_INLINE_PUBLICATION_DRAFTS
+    )
 
     @model_validator(mode="after")
     def unique_selection(self) -> InlinePublicationRequest:

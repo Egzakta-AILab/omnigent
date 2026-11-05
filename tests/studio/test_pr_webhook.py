@@ -110,11 +110,31 @@ def _run(
         "updated_at": 1,
         "version": 1,
     }
+    reviewers = [
+        {
+            **member,
+            "id": f"{index + 10:032x}",
+            "run_role": ("required" if index in route.required_reviewer_indices else "candidate")
+            if coordinated
+            else None,
+            "profile": {
+                **member["profile"],
+                "agent_id": settings.agent_id,
+                "harness": settings.harness,
+                "skill": settings.skill,
+                "model": settings.model,
+                "reasoning_effort": settings.reasoning_effort,
+            },
+        }
+        for index, settings in enumerate(route.reviewers)
+    ]
     return {
         "id": run_id,
         "target": target,
-        "reviewers": [member],
-        "coordinator": {**member, "id": "6" * 32} if coordinated else None,
+        "reviewers": reviewers[::-1],
+        "coordinator": {**member, "id": "6" * 32, "run_role": "coordinator"}
+        if coordinated
+        else None,
         "patch_sha256": "f" * 64,
         "created_at": 1,
     }
@@ -154,6 +174,67 @@ async def test_only_signed_in_scope_revisions_enter_the_durable_inbox(
     assert {
         json.loads(job.payload)["reviewers"][0]["expected_head_sha"] for job in (first, competing)
     } == {_HEAD, _NEXT}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "receipt", "expected"),
+    [
+        (200, {"state": "prepared", "eligible": 1, "created": 0}, "drafted"),
+        (200, {"state": "incomplete"}, "draft_skipped"),
+        (409, {}, "draft_skipped"),
+    ],
+)
+async def test_draft_polling_survives_restart_without_start_or_publication_replay(
+    tmp_path: Path, route: WebhookRoute, status: int, receipt: dict, expected: str
+) -> None:
+    reviewers = [
+        route.reviewers[0].model_copy(update={"model": "review-model"}),
+        route.reviewers[0].model_copy(update={"model": "second-model"}),
+    ]
+    route = route.model_copy(update={"prepare_inline_drafts": True, "reviewers": reviewers})
+    database = tmp_path / "reviews.db"
+    inbox = WebhookInbox(database)
+    key = route.revision_key(17, _BASE, _HEAD)
+    assert inbox.enqueue(
+        key, route.id, route.policy_digest, route.capture(17, _BASE, _HEAD).model_dump_json()
+    )
+    calls = []
+    capture_path = f"/v1/projects/{route.project_id}/studio/review-runs"
+    run_path = f"/v1/studio/review-runs/{'4' * 32}"
+    draft_path = f"{run_path}/discussion/inline-drafts/from-report"
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if request.url.path == capture_path:
+            return httpx.Response(200, json=_run(route))
+        if request.url.path == f"{run_path}/start":
+            return httpx.Response(200, json={"run": _run(route, launched=True)})
+        assert request.url.path == draft_path and request.method == "POST"
+        if calls.count(draft_path) == 1:
+            return httpx.Response(200, json={"state": "waiting"})
+        if calls.count(draft_path) == 2:
+            raise httpx.ReadTimeout("lost draft acknowledgement")
+        return httpx.Response(status, json=receipt)
+
+    async with httpx.AsyncClient(
+        base_url="http://studio", transport=httpx.MockTransport(handle)
+    ) as studio:
+        worker = WebhookWorker(inbox, {route.id: route}, studio)
+        claimed = inbox.claim()
+        assert claimed is not None
+        await worker.dispatch(claimed)
+        assert inbox.recent()[0]["state"] == "drafting"
+        for _ in range(3):
+            inbox = WebhookInbox(database)
+            with sqlite3.connect(database) as connection:
+                connection.execute("UPDATE deliveries SET available_at = 0")
+            claimed = inbox.claim()
+            assert claimed is not None and claimed.state == "drafting"
+            await WebhookWorker(inbox, {route.id: route}, studio).dispatch(claimed)
+    assert calls == [capture_path, f"{run_path}/start", draft_path, draft_path, draft_path]
+    assert inbox.recent()[0]["state"] == expected
+    assert inbox.claim() is None
 
 
 @pytest.mark.asyncio

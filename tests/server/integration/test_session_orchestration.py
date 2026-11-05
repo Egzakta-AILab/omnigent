@@ -3561,6 +3561,8 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
         assert consolidation.status_code == 200, consolidation.text
         assert {entry["review_id"] for entry in consolidation.json()["reviewers"]} == members
         assert consolidation.json()["findings"] == []
+        auto_drafts = f"{run_path}/discussion/inline-drafts/from-report"
+        assert (await auth_client.post(auto_drafts, json={})).json()["state"] == "waiting"
         finding = {
             "title": "Validate the input",
             "detail": "The new branch accepts invalid values.",
@@ -3612,6 +3614,27 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
             f"{run_path}/report", params={"include_finding_keys": True}
         )
         finding_key = keyed_report.json()["findings"][0]["finding_key"]
+        assert (
+            await auth_client.post(auto_drafts, json={}, headers={"X-Forwarded-Email": "bob"})
+        ).status_code == 404
+        captured_head = current_head
+        current_head = "c" * 40
+        assert (await auth_client.post(auto_drafts, json={})).status_code == 409
+        current_head = captured_head
+        prepared = await auth_client.post(auto_drafts, json={})
+        assert prepared.json() == {"state": "prepared", "eligible": 1, "created": 1}
+        assert (await auth_client.post(auto_drafts, json={})).json()["created"] == 0
+        [auto_draft] = (await auth_client.get(f"{run_path}/discussion")).json()["inline_drafts"]
+        assert auto_draft["thread"] == {"kind": "finding", "finding_key": finding_key}
+        assert auto_draft["anchor"]["start"] == 1
+        assert auto_draft["body"] == finding["detail"]
+        assert auto_draft["publication_state"] == "draft" and inline_writes == []
+        auto_draft_path = f"{run_path}/discussion/inline-drafts/{auto_draft['id']}"
+        assert (
+            await auth_client.post(f"{auto_draft_path}/discard", json={"version": 1})
+        ).status_code == 204
+        assert (await auth_client.post(auto_drafts, json={})).json()["created"] == 0
+        assert (await auth_client.get(f"{run_path}/discussion")).json()["inline_drafts"] == []
         reproduction_path = f"{run_path}/findings/{finding_key}/reproductions"
         assert (await auth_client.get(reproduction_path)).json() == []
         side = {
