@@ -1702,6 +1702,7 @@ class SqlStudioReviewQuestion(OmnigentBase):
     input_json: Mapped[str] = mapped_column(CompressedText, nullable=False)
     state: Mapped[str] = mapped_column(String(16), nullable=False)
     answer_json: Mapped[str | None] = mapped_column(CompressedText, nullable=True)
+    check_job_json: Mapped[str | None] = mapped_column(CompressedText, nullable=True)
     published_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
     updated_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
