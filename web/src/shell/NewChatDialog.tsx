@@ -429,13 +429,14 @@ import { CreateAgentDialog } from "./CreateAgentDialog";
 import { buildAgentBundle, type AgentBundleInput } from "@/lib/agentBundle";
 import { installAgentBundle } from "@/lib/agentsApi";
 import { createBundledSession, getSessionSlim, launchRunner } from "@/lib/sessionsApi";
-import { promoteSessionDraft, recoverFailedSessionDraft } from "@/lib/sessionDrafts";
+import { promoteSessionDraft, recoverFailedSessionDraft, setSessionDraft } from "@/lib/sessionDrafts";
 import {
   NEW_SESSION_HANDOFF_PARAM,
   forgetNewSessionHandoff,
   newSessionLocation,
   peekNewSessionHandoff,
 } from "@/lib/newSessionHandoff";
+import { writeSessionWorkspaceState } from "@/lib/sessionWorkspaceState";
 
 // Short picker-row blurbs — the spec descriptions are long paragraphs that
 // truncate badly in the dropdown; other dialogs keep the server values.
@@ -2311,34 +2312,6 @@ function NewChatWorkspaceControls({
   );
 }
 
-function ProjectWorkspaceBrowser({ hostId, workspace }: { hostId: string; workspace: string }) {
-  const [open, setOpen] = useState(false);
-  return (
-    <>
-      <Button
-        type="button"
-        variant="outline"
-        size="sm"
-        className="mb-3 shrink-0"
-        onClick={() => setOpen(true)}
-        aria-haspopup="dialog"
-      >
-        <FolderOpenIcon aria-hidden />
-        Open project workspace
-      </Button>
-      <WorkspacePickerDialog
-        open={open}
-        onOpenChange={setOpen}
-        hostId={hostId}
-        initialPath={workspace}
-        workspacePath={workspace}
-        title="Project workspace"
-        description="Browse this working directory without changing the new session’s settings."
-      />
-    </>
-  );
-}
-
 export function NewChatLandingScreen() {
   const [params] = useSearchParams();
   const navigate = useNavigate();
@@ -2460,9 +2433,6 @@ function NewChatLandingContent({
   );
   const { data: storedProjectConfig, isLoading: projectConfigLoading } =
     useProjectConfig(configProjectId);
-  const projectWorkspaceHostId = storedProjectConfig?.host_id;
-  const projectWorkspace =
-    typeof storedProjectConfig?.workspace === "string" ? storedProjectConfig.workspace.trim() : "";
   // The project's last start wins until its stored defaults are saved after it;
   // a Project settings save clears it, so re-read it then.
   const [launchClears, setLaunchClears] = useState(0);
@@ -5616,6 +5586,8 @@ function NewChatLandingContent({
   draftRef.current.mentions = { files: mentionedItems, sessions: mentionedSessions };
   const mentionTokensShown = findMentionTokens(message, mentionTokens).length > 0;
   useComposerMirrorAlignment(mirrorRef, textareaRef, mentionTokensShown);
+  const mentionedItemsRef = useRef(mentionedItems);
+  mentionedItemsRef.current = mentionedItems;
 
   const workspaceTarget = JSON.stringify([projectParam, selectedHostId, sandboxSelected]);
   const [workspaceReadyTarget, setWorkspaceReadyTarget] = useState<string | null>(null);
@@ -5695,21 +5667,6 @@ function NewChatLandingContent({
       : null;
   const visibleWorkspace = cachedWorkspace?.workspace ?? workspaceTrimmed;
   const visibleWorktreeHeader = cachedWorkspace ?? worktreeHeader;
-  // Prefer the project's own location. Without one, use the active composer
-  // pair, not the display cache, which can still show a previous selection.
-  const workspaceSeededForAnotherHost =
-    workspaceFromConfigRef.current &&
-    !!prefillConfig?.hostId &&
-    prefillConfig.hostId !== selectedHostId;
-  const projectWorkspaceTarget =
-    typeof projectWorkspaceHostId === "string" &&
-    projectWorkspaceHostId !== "" &&
-    projectWorkspaceHostId !== SANDBOX_HOST_CHOICE &&
-    isNavigablePath(projectWorkspace)
-      ? { hostId: projectWorkspaceHostId, workspace: projectWorkspace }
-      : prefillSettled && prefill.project === projectParam && !workspaceSeededForAnotherHost
-        ? workspacePreview
-        : null;
 
   const pickerSelectionError =
     sandboxDefaultModelsEnabled &&
@@ -5734,7 +5691,7 @@ function NewChatLandingContent({
   }, [pickerLoading, pickerSelectionError, pickerEdits]);
 
   // Keep the disabled reason and its recovery target in the same priority order.
-  const submitBlocker = ((): {
+  const launchBlocker = ((): {
     field: "sandboxRepo" | "other";
     message: string | null;
   } | null => {
@@ -5809,14 +5766,35 @@ function NewChatLandingContent({
         message: "This project's configured agent is unavailable — pick an agent to continue",
       };
     }
-    if (message.trim().length === 0 && files.length === 0) {
-      return { field: "other", message: "Enter a message to get started" };
-    }
-    if (selectedAgent == null || creating) return { field: "other", message: null };
     return null;
   })();
+  const submitBlocker: typeof launchBlocker =
+    launchBlocker ??
+    (message.trim().length === 0 && files.length === 0
+      ? { field: "other", message: "Enter a message to get started" }
+      : selectedAgent == null || creating
+        ? { field: "other", message: null }
+        : null);
   const canSubmit = submitBlocker === null;
   const submitDisabledReason = submitBlocker?.message ?? null;
+  const showOpenWorkspace =
+    projectParam !== "" && selectedProject === projectParam && !sandboxSelected;
+  const workspaceSeededForAnotherHost =
+    workspaceFromConfigRef.current &&
+    !!prefillConfig?.hostId &&
+    prefillConfig.hostId !== selectedHostId;
+  const workspaceLaunchDisabledReason = smartRoutingHarnessSelected
+    ? "Choose a harness to open the workspace without a prompt."
+    : workspaceSeededForAnotherHost
+      ? "Choose a working directory on the selected host."
+      : launchBlocker?.message;
+  const canOpenWorkspace =
+    showOpenWorkspace &&
+    launchBlocker === null &&
+    selectedAgent != null &&
+    !creating &&
+    !smartRoutingHarnessSelected &&
+    !workspaceSeededForAnotherHost;
   useLayoutEffect(() => {
     if (submitDisabledReason !== null) return;
     setSubmitTooltipState("closed");
@@ -6179,15 +6157,11 @@ function NewChatLandingContent({
     }
   }
 
-  async function handleCreate() {
-    // Captured before any await: a newer prompt link can replace the kept record
-    // while an earlier submit is still waiting on a pre-create check.
+  async function handleCreate(mode: "message" | "workspace" = "message") {
+    const opensWorkspace = mode === "workspace";
     const submittedLinkedPrompt = keptLinkedRef.current;
-    // Mirror the Send button's disabled condition (canSubmit) so the Enter-key
-    // and form-submit paths that call this directly can't create a session with
-    // a blank message, host, agent, or workspace.
-    if (!canSubmit) {
-      handleBlockedSubmit();
+    if (opensWorkspace ? !canOpenWorkspace : !canSubmit) {
+      if (!opensWorkspace) handleBlockedSubmit();
       return;
     }
     if (createAttemptRef.current !== null) return;
@@ -6199,7 +6173,8 @@ function NewChatLandingContent({
     // mounted in the outgoing transition tree.
     const createLocation = window.location.href;
     if (siblingSourceId && (!siblingSource || info === "loading" || !info.sibling_sessions)) return;
-    const returnToCanvas = searchParams.has(CANVAS_QUERY_PARAM) && isFeatureEnabled(info, "canvas");
+    const returnToCanvas =
+      !opensWorkspace && searchParams.has(CANVAS_QUERY_PARAM) && isFeatureEnabled(info, "canvas");
     let createdCanvasId = selectedProject
       ? (configProjectId ?? `name:${selectedProject}`)
       : MAIN_CANVAS_ID;
@@ -6275,6 +6250,7 @@ function NewChatLandingContent({
         if (needsDbcert) return;
       }
       // Spend the draft only once provisioning starts, after the laptop credential check.
+      if (!opensWorkspace) {
       // A composer remounted in this commit would otherwise restore the submitted text.
       if (draftState.draft !== null) writeLandingDraft(draftState, null);
       submittedDraftRevisionRef.current = draftState.revision;
@@ -6282,6 +6258,7 @@ function NewChatLandingContent({
       submittedLinkedPromptRef.current = submittedLinkedPrompt;
       if (submittedLinkedPrompt !== null) submittedKeptPromptIds.add(submittedLinkedPrompt.id);
       if (siblingSource) updateNestedSessionDraft(queryClient, nestedProvisional.id);
+      }
       trackClick("new_chat.start_session", "button");
       if (sandboxRepoSelections.length > 0) {
         writeLastSandboxRepos(sandboxRepoSelections);
@@ -6381,7 +6358,7 @@ function NewChatLandingContent({
         composerInlineMentions(mentionedItems, mentionedSessions, selectedAgent?.harness ?? null),
         [message],
       );
-      const initialPrompt = withSessionMentionHint(
+      const initialPrompt = opensWorkspace ? "" : withSessionMentionHint(
         expandMentionTokens(sanitizeInitialPrompt(message), liveMentions),
         liveMentions.some((m) => m.marker.startsWith("[Session: ")),
       );
@@ -6417,11 +6394,13 @@ function NewChatLandingContent({
       // (the server treats it as authoritative and only warns on mismatch).
       // The value-equality guard checks the server's config, so it also sends last-start seeds.
       const agentFromProjectConfig =
+        !opensWorkspace &&
         createProjectId !== null &&
         agentFromConfigRef.current &&
         storedProjectConfig?.agent_id != null &&
         effectiveAgentId === storedProjectConfig.agent_id;
       const workspaceFromProjectConfig =
+        !opensWorkspace &&
         createProjectId !== null &&
         workspaceFromConfigRef.current &&
         storedProjectConfig?.workspace != null &&
@@ -6444,12 +6423,12 @@ function NewChatLandingContent({
           : { ...(baseLabels ?? {}), ...composerContextLabels };
 
       if (siblingSource) createLabels[CLIENT_CREATE_TOKEN_LABEL] = nestedProvisional.token;
-      const skill = isNativeTerminalAgent
+      const skill = opensWorkspace || isNativeTerminalAgent
         ? null
         : matchSkillInvocation(initialPrompt, availableSkills);
       const serverOwnsInitialInput =
-        sandboxSelected && info !== "loading" && info.durable_initial_input === true;
-      if (!serverOwnsInitialInput) undeliveredPrompt = { text: initialPrompt, skill, files };
+        !opensWorkspace && sandboxSelected && info !== "loading" && info.durable_initial_input === true;
+      if (!opensWorkspace && !serverOwnsInitialInput) undeliveredPrompt = { text: initialPrompt, skill, files };
       const initialInput =
         skill !== null
           ? {
@@ -6543,32 +6522,34 @@ function NewChatLandingContent({
       } else {
         // Normal path: bind to an existing registered agent.
         const provisional = siblingSource ? nestedProvisional : newTempConversation();
-        try {
-          localConv = beginLocalConversation(initialPrompt, files, provisional, localProject, {
-            // Seed the temp session with the NORMALIZED create identity so the
-            // optimistic composer shows the model/effort/harness/routing being
-            // created, not state projected from the previously active session.
-            modelOverride: normalizedModelOverride,
-            llmModel: resolvedDefaultModel,
-            reasoningEffort: normalizedReasoningEffort,
-            // The RESOLVED native wrapper harness (e.g. "codex-native"), not the
-            // usually-null pickedHarness for a native agent — so the temp page
-            // adapter can re-derive the native model/effort/permission identity.
-            harness: smartRoutingHarnessSelected
-              ? null
-              : (selectedNativeHarness ?? pickedHarness ?? null),
-            costControlModeOverride: costControlOverride ?? null,
-            boundAgentId: effectiveAgentId,
-            // Name (not just id) so the in-session temp composer can evaluate
-            // routing eligibility (isCostRoutingSession needs a bound agent).
-            boundAgentName: agent?.display_name ?? agent?.name ?? null,
-            // Chosen host so temp routing's per-family gateway guard uses the
-            // real host (null for a sandbox create).
-            hostId: sandboxSelected ? null : selectedHostId,
-          });
-          if (localConv !== null) navigate(sessionLocation(localConv.tempConvId));
-        } catch {
-          /* non-fatal: the response still opens the server session */
+        if (!opensWorkspace) {
+          try {
+            localConv = beginLocalConversation(initialPrompt, files, provisional, localProject, {
+              // Seed the temp session with the NORMALIZED create identity so the
+              // optimistic composer shows the model/effort/harness/routing being
+              // created, not state projected from the previously active session.
+              modelOverride: normalizedModelOverride,
+              llmModel: resolvedDefaultModel,
+              reasoningEffort: normalizedReasoningEffort,
+              // The RESOLVED native wrapper harness (e.g. "codex-native"), not the
+              // usually-null pickedHarness for a native agent — so the temp page
+              // adapter can re-derive the native model/effort/permission identity.
+              harness: smartRoutingHarnessSelected
+                ? null
+                : (selectedNativeHarness ?? pickedHarness ?? null),
+              costControlModeOverride: costControlOverride ?? null,
+              boundAgentId: effectiveAgentId,
+              // Name (not just id) so the in-session temp composer can evaluate
+              // routing eligibility (isCostRoutingSession needs a bound agent).
+              boundAgentName: agent?.display_name ?? agent?.name ?? null,
+              // Chosen host so temp routing's per-family gateway guard uses the
+              // real host (null for a sandbox create).
+              hostId: sandboxSelected ? null : selectedHostId,
+            });
+            if (localConv !== null) navigate(sessionLocation(localConv.tempConvId));
+          } catch {
+            /* non-fatal: the response still opens the server session */
+          }
         }
         const createToken = localConv?.createToken ?? provisional.token;
         const matchOwnCreate = (item: SessionListWireItem) =>
@@ -6675,7 +6656,9 @@ function NewChatLandingContent({
             ? AUTO_HARNESS_ID
             : (pickedHarness ?? undefined),
           smart_routing_message:
-            smartRoutingHarnessSelected || pinnedNativeRoutes ? initialPrompt : undefined,
+            !opensWorkspace && (smartRoutingHarnessSelected || pinnedNativeRoutes)
+              ? initialPrompt
+              : undefined,
         });
         const createForm = serverOwnsInitialInput && files.length > 0 ? new FormData() : null;
         if (createForm !== null) {
@@ -6713,12 +6696,21 @@ function NewChatLandingContent({
                 ),
               });
             }
-            return { error: await describeCreateError(response) };
+            const error = await describeCreateError(response);
+            return {
+              error:
+                opensWorkspace && response.status >= 500
+                  ? `${error} Check the project's sessions before trying again.`
+                  : error,
+            };
           }
           const created = (await response.json()) as {
             id: string;
             labels?: Record<string, string>;
           };
+          if (opensWorkspace && (typeof created.id !== "string" || !created.id)) {
+            throw new Error("The session create response did not confirm the session.");
+          }
           // Route the new session's first requests by its chosen host id
           // before any snapshot of it loads. Only seeds: a null here would
           // erase a host the session's snapshot already recorded.
@@ -6729,19 +6721,28 @@ function NewChatLandingContent({
         // Once the create answers, its id is authoritative — stop listening.
         void confirmed.finally(() => abortPush.abort()).catch(() => {});
         const created = await new Promise<{ id: string } | { error: string }>((resolve, reject) => {
-          // Only a match settles this; an abort resolves null and leaves the
-          // response to decide.
+          let pushedSessionId: string | undefined;
           void pushedRow.then((row) => {
-            if (row !== null) resolve({ id: row.id });
+            if (row === null) return;
+            pushedSessionId = row.id;
+            // An explicit workspace launch waits for host launch confirmation.
+            if (!opensWorkspace) resolve({ id: row.id });
           });
-          confirmed.then(resolve, reject);
+          confirmed.then(resolve, (error: unknown) => {
+            if (opensWorkspace && pushedSessionId !== undefined) {
+              if (selectedHostId !== null) setSessionHost(pushedSessionId, selectedHostId);
+              resolve({ id: pushedSessionId });
+            } else {
+              reject(error);
+            }
+          });
         });
         abortPush.abort();
         // A row is only written (and announced) after the create has validated
         // the workspace and agent, so winning on the push can't skip past an
         // error the user needed to see on this screen.
         if ("error" in created) {
-          returnDraftToUser(localConv?.tempConvId);
+          if (!opensWorkspace) returnDraftToUser(localConv?.tempConvId);
           // On the navigate-first path the landing screen is unmounted, so tear
           // down the phantom chat, return to landing, and surface the error as a
           // toast (survives the remount); inline error only when still on landing.
@@ -6862,6 +6863,23 @@ function NewChatLandingContent({
       // next time. Recorded only on a successful create, so a harness the user
       // merely browsed past never earns a primary slot.
       if (selectedNativeHarness !== null) addRecentHarness(selectedNativeHarness);
+      if (opensWorkspace) {
+        writeSessionWorkspaceState(data.id, { open: true });
+        void queryClient.refetchQueries({ queryKey: ["conversations"] });
+        if (onScreenRef.current && window.location.href === createLocation) {
+          const draft = draftRef.current;
+          const text =
+            buildMentionPreamble(mentionedItemsRef.current, selectedAgent?.harness ?? null) +
+            draft.message;
+          const hasDraft = text.trim() !== "" || draft.files.length > 0;
+          if (hasDraft) setSessionDraft(data.id, { text, files: draft.files });
+          submittedDraftRevisionRef.current = landingDraftRevision;
+          submittedRef.current = true;
+          const view = isNativeTerminalAgent ? `?view=${hasDraft ? "chat" : "terminal"}` : "";
+          navigate(`/c/${data.id}${view}`);
+        }
+        return;
+      }
       // SDK invocations resolve on the runner after create; native CLIs receive plain text.
       // Scope the recall entry to the new session id so ArrowUp surfaces it in
       // the freshly-opened chat. Sanitized text so recall reproduces what was sent.
@@ -6928,8 +6946,10 @@ function NewChatLandingContent({
         }
         return;
       }
-      const msg = "Couldn't reach the server. Check your connection and try again.";
-      returnDraftToUser(localConv?.tempConvId);
+      const msg = opensWorkspace
+        ? "Couldn't confirm the workspace opened. Check the project's sessions before trying again."
+        : "Couldn't reach the server. Check your connection and try again.";
+      if (!opensWorkspace) returnDraftToUser(localConv?.tempConvId);
       tearDownLocalConversation();
       // Toast when the landing screen is gone (navigate-first); inline otherwise.
       if (localConv !== null) showToast(msg);
@@ -7508,21 +7528,21 @@ function NewChatLandingContent({
           )}
           {isMobileViewport && workspaceControls}
         </div>
-        {projectParam !== "" &&
-          selectedProject === projectParam &&
-          !projectListLoading &&
-          !projectConfigLoading &&
-          projectWorkspaceTarget && (
-            <ProjectWorkspaceBrowser
-              key={JSON.stringify([
-                projectParam,
-                projectWorkspaceTarget.hostId,
-                projectWorkspaceTarget.workspace,
-              ])}
-              hostId={projectWorkspaceTarget.hostId}
-              workspace={projectWorkspaceTarget.workspace}
-            />
-          )}
+        {showOpenWorkspace && (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="mb-3 shrink-0"
+            disabled={!canOpenWorkspace}
+            loading={creating}
+            title={workspaceLaunchDisabledReason ?? "Start a session without sending a message"}
+            onClick={() => void handleCreate("workspace")}
+          >
+            <FolderOpenIcon aria-hidden />
+            Open workspace
+          </Button>
+        )}
         {/* Drop cue, spanning the landing surface. */}
         {isDragActive && landingSurface ? <FileDropOverlay container={landingSurface} /> : null}
         <fieldset

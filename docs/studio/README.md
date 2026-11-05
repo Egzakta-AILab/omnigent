@@ -308,10 +308,16 @@ In the project settings for your Egzakta sessions, select your Mac and set
 Leave **Random worktree** off so new sessions open the root that contains your
 nested clones.
 
-From **New session in project**, use **Open project workspace** to browse the
-saved directory before sending. If the project has no saved location, the
-button opens the working directory shown in the composer. A review launched
-from a project session appears as a separate private session in that project.
+From **New session in project**, choose **Open workspace** to start an empty
+session using the host, working directory and agent shown in the composer.
+The Workspace panel opens with Files, Pull Requests and Agents available.
+Use **+ → Reviewer profiles** to manage profiles before linking a PR. With a
+native harness and an empty draft, the session opens in Terminal. An existing
+draft carries into Chat for you to send when ready.
+
+To start with a review, open **Pull Requests**, find the nested checkout’s
+branch PR or link a known PR URL, then use **Review → Run review**. The
+reviewer appears as a separate private session in the same project.
 
 For any workspace, open **Project settings → Repositories**, or open
 **Manage repositories** from the PR panel. The managers run on the connected

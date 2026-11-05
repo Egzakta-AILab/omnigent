@@ -10,6 +10,8 @@ import {
   MessagesSquareIcon,
   MinimizeIcon,
   PlusIcon,
+  SearchIcon,
+  SlidersHorizontalIcon,
   TerminalIcon,
   XIcon,
 } from "lucide-react";
@@ -45,7 +47,7 @@ import {
   readDefaultWorkspaceTab,
   readPinnedWorkspaceTabs,
 } from "@/lib/workspaceTabPreferences";
-import { isEditorLevel, isOwnerLevel } from "@/lib/permissionsApi";
+import { isEditorLevel, isOwnerLevel, LEVEL_OWNER } from "@/lib/permissionsApi";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -79,6 +81,9 @@ import { supportsSideChat } from "@/lib/sideChat";
 import { startSideChat, stopSideChat } from "./sideChatLifecycle";
 import { subagentSessionIdFromTab } from "@/lib/subagentTabs";
 import { useSessionAgent } from "@/hooks/useAgents";
+import { useSession } from "@/hooks/useSession";
+import { useServerInfo } from "@/lib/CapabilitiesContext";
+import { ProfileEditorDialog } from "@/studio/reviews/ProfileEditorDialog";
 import type { SessionLiveness } from "@/hooks/useSessionLiveness";
 import {
   terminalDisplayLabel,
@@ -198,6 +203,7 @@ function NewTabMenu({
   onOpenBrowser,
   onOpen,
   onOpenSideChat,
+  onOpenReviewerProfiles,
   onCreateStart,
   onCreateError,
   liveness,
@@ -214,6 +220,7 @@ function NewTabMenu({
   /** Open a new side chat (a fork of this conversation) as a rail tab. Absent
    *  when the session can't host one (e.g. Codex uses its typed `/side`). */
   onOpenSideChat?: () => void;
+  onOpenReviewerProfiles?: () => void;
   /** Called when a shell create is initiated (before the POST resolves), so
    *  the shell can be focused as soon as its tab appears in the list. */
   onCreateStart?: () => void;
@@ -243,7 +250,14 @@ function NewTabMenu({
   // declare a non-empty ``terminals:`` block.
   const declaredTerminals = agent?.terminals ?? [];
   const canOpenShell = declaredTerminals.length > 0;
-  if (!canOpenShell && !onOpenBrowser && !onOpenSideChat && panels.length === 0) return null;
+  if (
+    !canOpenShell &&
+    !onOpenBrowser &&
+    !onOpenSideChat &&
+    !onOpenReviewerProfiles &&
+    panels.length === 0
+  )
+    return null;
 
   // The remembered shell, or the first declared type. Used only when shell
   // access is available; the menu can also contain just built-in pages.
@@ -346,8 +360,15 @@ function NewTabMenu({
             </DropdownMenuItem>
           );
         })}
-        {panels.length > 0 && (onOpenBrowser || onOpenSideChat || canOpenShell) && (
-          <DropdownMenuSeparator />
+        {panels.length > 0 &&
+          (onOpenBrowser || onOpenSideChat || onOpenReviewerProfiles || canOpenShell) && (
+            <DropdownMenuSeparator />
+          )}
+        {onOpenReviewerProfiles && (
+          <DropdownMenuItem onSelect={onOpenReviewerProfiles} className="cursor-pointer">
+            <SlidersHorizontalIcon className="size-4" />
+            Reviewer profiles
+          </DropdownMenuItem>
         )}
         {onOpenBrowser && (
           <DropdownMenuItem onSelect={onOpenBrowser} className="cursor-pointer">
@@ -940,6 +961,20 @@ function WorkspacePanelImpl({
   onHasSideChatTabsChange,
   subagentPanelOpener,
 }: WorkspacePanelProps) {
+  const serverInfo = useServerInfo();
+  const profilesEnabled =
+    !pending && serverInfo !== "loading" && serverInfo.studio_workspace_settings;
+  const { session } = useSession(profilesEnabled ? conversationId : null);
+  const canManageProfiles =
+    profilesEnabled &&
+    !!session?.hostId &&
+    !!session.workspace &&
+    (serverInfo.single_user || session.permissionLevel === LEVEL_OWNER);
+  const [profileEditorSessionId, setProfileEditorSessionId] = useState<string | null>(null);
+  if (profileEditorSessionId !== null && profileEditorSessionId !== conversationId) {
+    setProfileEditorSessionId(null);
+  }
+  const terminalShown = selectedTerminalKey !== null && openTerminals.includes(selectedTerminalKey);
   const contentSearchInputRef = useRef<HTMLInputElement>(null);
   const [contentSearchFocusSession, setContentSearchFocusSession] = useState<string | null>(null);
   const railRef = useRef<HTMLElement | null>(null);
@@ -1377,6 +1412,9 @@ function WorkspacePanelImpl({
       onOpenBrowser={showBrowserTab ? addBrowserFromMenu : undefined}
       onOpen={noteMenuOrigin}
       onOpenSideChat={onNewSideChat}
+      onOpenReviewerProfiles={
+        canManageProfiles ? () => setProfileEditorSessionId(conversationId) : undefined
+      }
       onOpenTerminal={openTerminalTab}
       onCreateStart={onShellCreateStart}
       onCreateError={onShellCreateFailed}
@@ -2182,6 +2220,15 @@ function WorkspacePanelImpl({
   return (
     <>
       {rail}
+      {canManageProfiles && (
+        <ProfileEditorDialog
+          open={profileEditorSessionId === conversationId}
+          onOpenChange={(nextOpen) => setProfileEditorSessionId(nextOpen ? conversationId : null)}
+          endpoint={`/v1/sessions/${encodeURIComponent(conversationId)}/studio/review-profiles/editor`}
+          hostId={session.hostId ?? undefined}
+          workspace={session.workspace ?? undefined}
+        />
+      )}
       {/* The rail is `hidden` on phones, so the drawer renders beside it. A
         portal to the body would escape the embed's scoped styles. */}
       {isMobile && (

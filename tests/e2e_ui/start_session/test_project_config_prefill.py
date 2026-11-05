@@ -26,9 +26,7 @@ from __future__ import annotations
 
 import json
 import re
-from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
 
 import pytest
 from playwright.async_api import Route, async_playwright, expect
@@ -107,21 +105,19 @@ def _project_config_body() -> str:
     ids=["desktop", "mobile", "remembered-workspace"],
 )
 def test_composer_prefills_from_project_config(
-    seeded_session: tuple[str, str], tmp_path: Path, mobile: bool, remembered: bool
+    seeded_session: tuple[str, str], mobile: bool, remembered: bool
 ) -> None:
-    """A project visit can browse and launch with saved or remembered settings.
+    """Saved defaults launch normally and remembered settings can open an empty workspace.
 
     The pinned agent (``ag_pinned_e2e``) and workspace (``/work/configured-repo``)
     come from ``config`` — NOT from the default-ranked Claude Code or a recent
     workspace — and ride along to ``POST /v1/sessions``.
     """
     base_url, session_id = seeded_session
-    _run_in_fresh_loop(_drive_prefill(base_url, session_id, tmp_path, mobile, remembered))
+    _run_in_fresh_loop(_drive_prefill(base_url, session_id, mobile, remembered))
 
 
-async def _drive_prefill(
-    base_url: str, session_id: str, tmp_path: Path, mobile: bool, remembered: bool
-) -> None:
+async def _drive_prefill(base_url: str, session_id: str, mobile: bool, remembered: bool) -> None:
     async with async_playwright() as pw:
         browser = await pw.chromium.launch()
         page = await browser.new_page(viewport={"width": 390, "height": 540} if mobile else None)
@@ -140,7 +136,7 @@ async def _drive_prefill(
                     f"JSON.stringify({json.dumps(last_start)}));"
                 )
             create_bodies: list[dict[str, Any]] = []
-            workspace_reads: list[str] = []
+            events_sent: list[str] = []
 
             async def handle_hosts(route: Route) -> None:
                 await route.fulfill(
@@ -163,23 +159,9 @@ async def _drive_prefill(
                     project["config"] = {}
                 await route.fulfill(json=project)
 
-            async def handle_filesystem(route: Route) -> None:
-                path = urlsplit(route.request.url).path
-                workspace_reads.append(path)
-                data = (
-                    [
-                        {
-                            "name": "README.md",
-                            "path": f"{_CONFIG_WORKSPACE}/README.md",
-                            "type": "file",
-                        }
-                    ]
-                    if path.endswith(_CONFIG_WORKSPACE)
-                    else []
-                )
-                await route.fulfill(json={"object": "list", "data": data, "has_more": False})
-
             async def handle_events(route: Route) -> None:
+                if route.request.method == "POST":
+                    events_sent.append(route.request.method)
                 await route.fulfill(
                     status=200,
                     content_type="application/json",
@@ -206,9 +188,6 @@ async def _drive_prefill(
 
             await page.route("**/v1/hosts", handle_hosts)
             await stub_empty_host_picker_data(page, _HOST_ID)
-            await page.route(
-                re.compile(rf"/v1/hosts/{_HOST_ID}/filesystem(?:/|\?|$)"), handle_filesystem
-            )
             await page.route("**/v1/agents", handle_agents)
             await page.route("**/v1/sessions/projects", handle_projects_list)
             await page.route(_PROJECT_CFG_RE, handle_project_config)
@@ -231,27 +210,24 @@ async def _drive_prefill(
 
             composer = page.get_by_test_id("new-chat-landing-input")
             await composer.fill("start here")
-            await page.get_by_role("button", name="Open project workspace", exact=True).click(
-                timeout=5_000
-            )
-            workspace_picker = page.get_by_test_id("workspace-picker")
-            await expect(workspace_picker.get_by_text("README.md", exact=True)).to_be_visible()
-            await expect(page.get_by_test_id("workspace-picker-select")).to_have_count(0)
-            await expect(page.get_by_test_id("workspace-picker-new-folder")).to_have_count(0)
-            assert f"/v1/hosts/{_HOST_ID}/filesystem{_CONFIG_WORKSPACE}" in workspace_reads
-            assert create_bodies == []
-            await page.screenshot(path=str(tmp_path / "project-workspace-before-send.png"))
-            await page.get_by_test_id("workspace-picker-close").click()
-            await expect(workspace_picker).to_be_hidden()
-
-            await expect(composer).to_have_text("start here")
-            await page.get_by_test_id("new-chat-landing-submit").click()
+            if remembered:
+                await page.get_by_role("button", name="Open workspace", exact=True).click()
+                await page.wait_for_url(re.compile(rf"/c/{session_id}(?:\?|$)"))
+                await page.wait_for_function(
+                    "id => JSON.parse(sessionStorage.getItem('omnigent.sessionDrafts') || '{}')"
+                    "[id] === 'start here'",
+                    arg=session_id,
+                )
+                assert not events_sent
+            else:
+                await page.get_by_test_id("new-chat-landing-submit").click()
 
             await poll_until_async(lambda: len(create_bodies) == 1)
             body = create_bodies[0]
             assert body["host_id"] == _HOST_ID, body
             assert body["project_id"] == _PROJECT_ID, body
             if remembered:
+                assert "initial_input" not in body and not body.get("initial_items"), body
                 assert body["agent_id"] == "ag_pinned_e2e", body
                 assert body["workspace"] == _CONFIG_WORKSPACE, body
             else:

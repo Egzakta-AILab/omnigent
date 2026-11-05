@@ -1278,6 +1278,8 @@ def test_studio_review_from_pr_panel(
     base_sha, head_sha = "1" * 40, "2" * 40
     revision = {"base_sha": base_sha, "head_sha": head_sha}
     workspace = "/work/acme/egzakta-org" if rail else "/work/acme/app"
+    project_id = "f" * 32
+    project_name = "Workspace Review"
     role = {
         "id": "backend",
         "label": "Backend QA",
@@ -1344,6 +1346,8 @@ def test_studio_review_from_pr_panel(
     branch_reads: list[str] = []
     promoted = False
     profile_saved = False
+    source_creates = 0
+    source_events: list[str] = []
     nested_path = "worktrees/services"
     reference_path = "references/upstream"
     role_instructions = "Review **API boundaries** in the captured PR."
@@ -1540,9 +1544,37 @@ def test_studio_review_from_pr_panel(
 
     def session_metadata(route: Route) -> None:
         response = route.fetch()
-        route.fulfill(
-            response=response, json={**response.json(), "host_id": host_id, "workspace": workspace}
-        )
+        snapshot = {**response.json(), "host_id": host_id, "workspace": workspace}
+        if rail:
+            snapshot.update(
+                harness="codex-native",
+                labels={
+                    **(snapshot.get("labels") or {}),
+                    "omnigent.ui": "terminal",
+                    "omnigent.wrapper": "codex-native-ui",
+                },
+            )
+        route.fulfill(response=response, json=snapshot)
+
+    def create_source(route: Route) -> None:
+        nonlocal source_creates
+        if route.request.method != "POST":
+            route.continue_()
+            return
+        source_creates += 1
+        body = route.request.post_data_json
+        assert body["project_id"] == project_id
+        assert body["host_id"] == host_id
+        assert body.get("workspace", workspace) == workspace
+        assert body.get("agent_id", agent_id) == agent_id
+        assert "initial_input" not in body
+        assert not body.get("initial_items")
+        route.fulfill(status=201, json={"id": session_id})
+
+    def source_event(route: Route) -> None:
+        if route.request.method == "POST":
+            source_events.append(route.request.method)
+        route.continue_()
 
     stub_session_pull_requests(page, lambda: [association] if attached else [], lambda _url: None)
     page.route(
@@ -1552,6 +1584,66 @@ def test_studio_review_from_pr_panel(
         ),
     )
     if rail:
+        page.route(re.compile(r"/v1/sessions(?:\?|$)"), create_source)
+        page.route(
+            "**/v1/sessions/projects",
+            lambda r: r.fulfill(json=[{"id": project_id, "name": project_name}]),
+        )
+        page.route(
+            f"**/v1/projects/{project_id}",
+            lambda r: r.fulfill(
+                json={
+                    "id": project_id,
+                    "name": project_name,
+                    "config": {
+                        "host_id": host_id,
+                        "workspace": workspace,
+                        "agent_id": agent_id,
+                        "use_worktree": False,
+                    },
+                }
+            ),
+        )
+        page.route(
+            re.compile(r"/v1/hosts(?:\?|$)"),
+            lambda r: r.fulfill(
+                json={
+                    "hosts": [
+                        {
+                            "host_id": host_id,
+                            "name": "Test host",
+                            "status": "online",
+                            "configured_harnesses": {"codex": True, "codex-native": True},
+                        }
+                    ]
+                }
+            ),
+        )
+        page.route(
+            re.compile(rf"/v1/hosts/{host_id}/worktrees(?:\?|$)"),
+            lambda r: r.fulfill(json={"data": []}),
+        )
+        page.route(re.compile(rf"/v1/sessions/{session_id}/events(?:\?|$)"), source_event)
+        page.route(
+            f"**/v1/sessions/{session_id}/resources/environments/default",
+            lambda r: r.fulfill(json={"metadata": {"root": workspace}}),
+        )
+        page.route(
+            re.compile(rf"/v1/sessions/{session_id}/resources/environments/default/filesystem"),
+            lambda r: r.fulfill(
+                json={
+                    "object": "list",
+                    "has_more": False,
+                    "data": [
+                        {
+                            "name": "workspace-readme.md",
+                            "path": "workspace-readme.md",
+                            "type": "file",
+                        },
+                    ],
+                }
+            ),
+        )
         page.route(
             re.compile(r"/resources/workspace-repositories(?:\?|$)"), workspace_repositories
         )
@@ -1588,8 +1680,10 @@ def test_studio_review_from_pr_panel(
                     {
                         "id": agent_id,
                         "name": "codex-native-ui",
+                        "display_name": "Codex",
                         "harness": "codex-native",
                         "builtin": True,
+                        "skills": [],
                     }
                 ]
             }
@@ -1630,14 +1724,29 @@ def test_studio_review_from_pr_panel(
     mobile = entry == "composer-mobile"
     page.emulate_media(color_scheme="dark" if mobile else "light")
     page.set_viewport_size({"width": 390 if mobile else 1440, "height": 900})
-    page.goto(f"{base_url}/{'canvas/' if entry == 'canvas' else ''}c/{session_id}")
+    if rail:
+        page.goto(f"{base_url}/?project=Workspace%20Review")
+        expect(page.get_by_role("heading", name=project_name)).to_be_visible()
+        assert source_creates == 0
+        page.get_by_role("button", name="Open workspace", exact=True).click(timeout=15_000)
+        page.wait_for_url(re.compile(rf"/c/{session_id}(?:\?|$)"))
+    else:
+        page.goto(f"{base_url}/{'canvas/' if entry == 'canvas' else ''}c/{session_id}")
     panel = (
         page.get_by_test_id("github-panel-drawer")
         if mobile
         else page.get_by_role("complementary", name="Workspace")
     )
     if rail:
-        open_right_rail(page)
+        expect(page.get_by_test_id("view-mode-terminal")).to_have_attribute("aria-pressed", "true")
+        expect(panel.get_by_role("tab", name=re.compile(r"^Agents(?: \d+)?$"))).to_be_visible()
+        expect(panel.get_by_text("workspace-readme.md", exact=True)).to_be_visible()
+        page.screenshot(path=str(tmp_path / "empty-project-workspace.png"))
+        panel.get_by_role("button", name="Open new", exact=True).click()
+        page.get_by_role("menuitem", name="Reviewer profiles", exact=True).click()
+        profiles = page.get_by_role("dialog", name="Reviewer profiles", exact=True)
+        expect(profiles.get_by_role("button", name="New profile")).to_be_enabled()
+        profiles.get_by_role("button", name="Close", exact=True).click()
         panel.get_by_role("tab", name="Pull Requests", exact=True).click()
         panel.get_by_text("Workspace repositories", exact=True).click()
         picker = panel.get_by_role("combobox", name="Workspace repository", exact=True)
@@ -1792,6 +1901,8 @@ def test_studio_review_from_pr_panel(
     if rail:
         assert attached
         assert branch_reads == [nested_path]
+        assert source_creates == 1
+        assert source_events == []
 
 
 # Two additions match "added": the first on line 2, the second on line 4.

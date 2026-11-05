@@ -28,6 +28,9 @@ import { useCreateTerminal, useTerminals } from "@/hooks/useTerminals";
 import { readSessionWorkspaceState, writeSessionWorkspaceState } from "@/lib/sessionWorkspaceState";
 import { AGENT_BROWSER_TAB_ID, browserViewId } from "@/lib/browserTabs";
 import { emitBrowserActionRequest } from "@/lib/browserActionBus";
+import { LEVEL_EDIT, LEVEL_OWNER } from "@/lib/permissionsApi";
+import { CapabilitiesProvider } from "@/lib/CapabilitiesContext";
+import { FALLBACK_SERVER_INFO, type ServerInfo } from "@/lib/capabilities";
 import { subagentTabId } from "@/lib/subagentTabs";
 import type { Session } from "@/lib/types";
 import { type FileNavigationGuard, FileViewerContext } from "./FileViewerContext";
@@ -75,6 +78,24 @@ vi.mock("./FilesPanel", () => ({
 }));
 vi.mock("./SubagentsPanel", () => ({
   SubagentsPanel: () => <div data-testid="subagents-stub" />,
+}));
+vi.mock("@/studio/reviews/ProfileEditorDialog", () => ({
+  ProfileEditorDialog: ({
+    open,
+    endpoint,
+    hostId,
+    workspace,
+  }: {
+    open: boolean;
+    endpoint: string;
+    hostId: string;
+    workspace: string;
+  }) =>
+    open && (
+      <div role="dialog" aria-label="Reviewer profiles">
+        {endpoint} {hostId} {workspace}
+      </div>
+    ),
 }));
 vi.mock("./ContentSearchPanel", () => ({
   ContentSearchPanel: ({ inputRef }: { inputRef: RefObject<HTMLInputElement | null> }) => (
@@ -239,6 +260,7 @@ function renderWorkspace(
     inert?: boolean;
     mobileSideChatsOpen?: boolean;
     queryClient?: QueryClient;
+    serverInfo?: ServerInfo;
     initialPath?: string;
     withHide?: boolean;
     permissionLevel?: number | null;
@@ -321,6 +343,7 @@ function renderWorkspace(
   // The panel reads session snapshots and renders router links.
   const Providers = ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={queryClient}>
+      <CapabilitiesProvider info={initialOverrides.serverInfo ?? "loading"}>
       <MemoryRouter initialEntries={[initialOverrides.initialPath ?? "/"]}>
         {fileViewerContext ? (
           <FileViewerContext.Provider value={fileViewerContext}>
@@ -330,6 +353,7 @@ function renderWorkspace(
           children
         )}
       </MemoryRouter>
+      </CapabilitiesProvider>
     </QueryClientProvider>
   );
   const view = render(tree(), { wrapper: Providers });
@@ -354,6 +378,51 @@ function renderWorkspace(
 }
 
 describe("WorkspacePanel surface presentation", () => {
+  it.each([
+    { permissionLevel: LEVEL_OWNER, singleUser: false, mayOpen: true },
+    { permissionLevel: null, singleUser: true, mayOpen: true },
+    { permissionLevel: LEVEL_EDIT, singleUser: false, mayOpen: false },
+    { permissionLevel: null, singleUser: false, mayOpen: false },
+  ])(
+    "gates the reviewer profiles action with permission $permissionLevel and single-user mode $singleUser",
+    ({ permissionLevel, singleUser, mayOpen }) => {
+      const queryClient = new QueryClient();
+      for (const id of ["conv_ws", "conv_other"]) {
+        queryClient.setQueryData(["session", id], {
+          id,
+          hostId: "host_local",
+          workspace: "/work/project",
+          permissionLevel,
+        } as Session);
+      }
+      const { rerender } = renderWorkspace({
+        queryClient,
+        serverInfo: {
+          ...FALLBACK_SERVER_INFO,
+          single_user: singleUser,
+          studio_workspace_settings: true,
+        },
+        showBrowserTab: true,
+      });
+
+      fireEvent.pointerDown(screen.getByRole("button", { name: "Open new" }), { button: 0 });
+      const item = screen.queryByRole("menuitem", { name: "Reviewer profiles" });
+      if (!mayOpen) {
+        expect(item).toBeNull();
+        return;
+      }
+      expect(item).toBeInTheDocument();
+      fireEvent.click(item!);
+      expect(screen.getByRole("dialog", { name: "Reviewer profiles" })).toHaveTextContent(
+        "/v1/sessions/conv_ws/studio/review-profiles/editor host_local /work/project",
+      );
+      rerender({ conversationId: "conv_other" });
+      expect(screen.queryByRole("dialog", { name: "Reviewer profiles" })).toBeNull();
+      rerender({ conversationId: "conv_ws" });
+      expect(screen.queryByRole("dialog", { name: "Reviewer profiles" })).toBeNull();
+    },
+  );
+
   it("offers unpinned pages in + without requiring shell or browser support", () => {
     writePinnedWorkspaceTabs(["files", "subagents"]);
     const { onRightRailTabChange } = renderWorkspace({ showGithubTab: true });
