@@ -314,11 +314,12 @@ an agent, or manage reviewer profiles under **Profiles**. Use **Add file to
 prompt** or **Add PR to prompt** to carry a reference into your first message.
 
 To start with a review, select a repository under **Pull Requests**, then
-choose an open PR or paste its GitHub URL. Inspect the overview or diff, then
-choose **Review → Run review**. This creates one private reviewer session in
-the project. It opens on a report with the captured revision, reviewer
-settings, summary, and findings. **Open transcript** shows the original
-review prompt and agent response.
+choose an open PR or paste its GitHub URL. The **Diff** tab opens first. Inspect
+a changed file, then choose **Review → Run review**. The private reviewer
+session opens on a report with the captured revision, reviewer settings,
+summary, and findings. **Open transcript** shows the original exchange. In
+the PR’s **Review** tab, use **Show in diff** to jump to the cited file and
+line for a saved finding on the current revision.
 
 For any workspace, open **Project settings → Repositories**, or open
 **Manage repositories** from the PR panel. The managers run on the connected
