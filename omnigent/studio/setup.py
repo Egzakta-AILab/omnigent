@@ -426,6 +426,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     creator_preview.add_argument(
         "--definition", type=Path, help="JSON definition, or use the template"
     )
+    creator_release = commands.add_parser("release-b", help="read back a Creator installation")
+    creator_release.add_argument("--mode", choices=("local", "server"), required=True)
+    creator_release.add_argument("--server", required=True, help="explicit trusted instance URL")
+    creator_release.add_argument("--review", required=True, help="saved review run ID")
+    creator_release.add_argument("--package", type=Path, required=True, help="JSON definition")
+    creator_release.add_argument("--expect", choices=("enabled", "disabled"), default="enabled")
+    creator_release.add_argument("--version", type=int, help="expected selected version")
     review = commands.add_parser("review", help="verify a saved native review report")
     review.add_argument("--mode", choices=("local", "server"), required=True)
     review.add_argument("--server", required=True, help="explicit trusted instance URL")
@@ -531,6 +538,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         except ValueError as exc:
             parser.error(str(exc))
         print(preview.model_dump_json(indent=2))
+        return 0
+    if args.command == "release-b":
+        from omnigent.studio.verify_creator import verify_creator_installation
+
+        try:
+            installation = verify_creator_installation(
+                mode=args.mode,
+                server_url=args.server,
+                run_id=args.review,
+                package=args.package,
+                expect=args.expect,
+                version=args.version,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+        print(installation.model_dump_json(indent=2))
         return 0
     if args.command == "attach-proof":
         from omnigent.studio.attach_proof import attach_proof

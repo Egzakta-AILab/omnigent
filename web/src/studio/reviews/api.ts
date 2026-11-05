@@ -382,6 +382,41 @@ export interface CreatorPanelPreview {
   panel: CreatorPanelDefinition;
 }
 
+export type CreatorPanelCapability = "review.read" | "review.openProof" | "review.attachProof";
+
+export interface CreatorPanelInstallation {
+  revision: number;
+  enabled: boolean;
+  selected_version: number | null;
+  active_panel: CreatorPanelDefinition | null;
+  history: {
+    version: number;
+    digest: string | null;
+    title: string | null;
+    contract_version: string | null;
+    capabilities: CreatorPanelCapability[] | null;
+  }[];
+}
+
+export type CreatorPanelChange = {
+  expected_revision: number;
+  approved_capabilities?: CreatorPanelCapability[];
+} & ({ panel: CreatorPanelDefinition; digest: string } | { version: number | null });
+
+export function getCreatorInstallation(runId: string, signal: AbortSignal) {
+  return reviewRequest<CreatorPanelInstallation>(`${reviewRunPath(runId)}/creator-installation`, {
+    signal,
+  });
+}
+
+export function changeCreatorInstallation(runId: string, change: CreatorPanelChange) {
+  return reviewRequest<CreatorPanelInstallation>(`${reviewRunPath(runId)}/creator-installation`, {
+    method: "panel" in change ? "PUT" : "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(change),
+  });
+}
+
 export function getCreatorPanelContract(runId: string, signal: AbortSignal) {
   return reviewRequest<{
     definition_schema: Record<string, unknown>;

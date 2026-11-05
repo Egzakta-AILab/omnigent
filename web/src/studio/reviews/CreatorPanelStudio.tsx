@@ -4,7 +4,13 @@ import { Button } from "@/components/ui/button";
 import { triggerBrowserDownload } from "@/hooks/useFileContent";
 import { copyText } from "@/lib/clipboard";
 import { Link } from "@/lib/routing";
-import { buildCreatorPanelPreview, getCreatorPanelContract, type ReviewDiscussion } from "./api";
+import {
+  buildCreatorPanelPreview,
+  getCreatorInstallation,
+  getCreatorPanelContract,
+  type ReviewDiscussion,
+} from "./api";
+import { CreatorInstallationControls, useCreatorInstallation } from "./CreatorInstallationControls";
 import { CreatorPanelPreview, type ShowCreatorProof } from "./CreatorPanelPreview";
 
 const MAX_PANEL_BYTES = 8 * 1024;
@@ -34,6 +40,9 @@ export function CreatorPanelStudio({
   const build = useMutation({
     mutationFn: (definition: string) => buildCreatorPanelPreview(discussion.id, definition),
   });
+  const installationState = useCreatorInstallation(discussion.id, viewerId, build.reset);
+  const { installation } = installationState;
+  const installed = installation.isSuccess ? installation.data : undefined;
   const preview = build.data;
   const current =
     contract.isSuccess &&
@@ -75,7 +84,7 @@ export function CreatorPanelStudio({
     build.mutate(source);
   }
 
-  return (
+  const editor = (
     <details className="rounded-md border" onToggle={(event) => setOpen(event.currentTarget.open)}>
       <summary className="cursor-pointer px-3 py-2 text-sm font-medium">Creator Mode</summary>
       {open && (
@@ -198,8 +207,35 @@ export function CreatorPanelStudio({
               onProof={onProof}
             />
           )}
+          <CreatorInstallationControls
+            state={installationState}
+            preview={current ? preview : undefined}
+            onEdit={setSource}
+          />
         </div>
       )}
     </details>
+  );
+  return (
+    <div className="space-y-3">
+      {editor}
+      {installed?.active_panel && (
+        <CreatorPanelPreview
+          key={installed.revision}
+          label="Installed Creator panel"
+          panel={installed.active_panel}
+          discussion={discussion}
+          viewerId={viewerId}
+          onProof={onProof}
+          checkCurrent={async (signal) => {
+            const latest = await getCreatorInstallation(discussion.id, signal);
+            if (!latest.active_panel || latest.revision !== installed.revision) {
+              void installation.refetch();
+              throw new Error("The installed panel changed. Open the current version.");
+            }
+          }}
+        />
+      )}
+    </div>
   );
 }

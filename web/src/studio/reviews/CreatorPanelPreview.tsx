@@ -35,11 +35,15 @@ export function CreatorPanelPreview({
   discussion,
   viewerId,
   onProof,
+  label = "Generated panel preview",
+  checkCurrent,
 }: {
   panel: CreatorPanelDefinition;
   discussion: ReviewDiscussion;
   viewerId: string | null;
   onProof: ShowCreatorProof;
+  label?: string;
+  checkCurrent?: (signal: AbortSignal) => Promise<void>;
 }) {
   const [page, setPage] = useState(0);
   const [busy, setBusy] = useState(false);
@@ -92,6 +96,8 @@ export function CreatorPanelPreview({
     setBusy(true);
     setActionError("");
     try {
+      await checkCurrent?.(controller.signal);
+      controller.signal.throwIfAborted();
       const methods = createReviewPanelMethods(discussion.id, [capability], {
         openProof: (proof) => showProof.current(proof, false),
         attachProof: (proof) => showProof.current(proof, true, true),
@@ -106,10 +112,7 @@ export function CreatorPanelPreview({
     }
   }
   return (
-    <section
-      aria-label="Generated panel preview"
-      className="min-w-0 space-y-3 rounded-md border p-3"
-    >
+    <section aria-label={label} className="min-w-0 space-y-3 rounded-md border p-3">
       <div>
         <h3 className="break-words font-semibold">{panel.title}</h3>
         {panel.description && (

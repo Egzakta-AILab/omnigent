@@ -1339,6 +1339,58 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
                     creator_path, json=definition, headers={"X-Forwarded-Email": "eve"}
                 )
             ).status_code == 404
+            installation = f"{run_path}/creator-installation"
+            grants = ["review.read", "review.openProof", "review.attachProof"]
+            install = {"expected_revision": 0, "panel": definition, "digest": built["digest"]}
+            assert (await auth_client.put(installation, json=install)).status_code == 409
+            first = await auth_client.put(
+                installation, json={**install, "approved_capabilities": grants}
+            )
+            assert first.status_code == 200, first.text
+            first_state = first.json()
+            assert (
+                first_state["selected_version"] == 1 and first_state["active_panel"] == definition
+            )
+            assert (await auth_client.get(installation, headers=foreign_headers)).json()[
+                "history"
+            ] == []
+            assert (
+                await auth_client.get(installation, headers={"X-Forwarded-Email": "eve"})
+            ).status_code == 404
+            updated = {**definition, "title": "Open receipts", "proof_action": "open"}
+            next_preview = (await auth_client.post(creator_path, json=updated)).json()
+            update_install = {
+                "expected_revision": first_state["revision"],
+                "panel": updated,
+                "digest": next_preview["digest"],
+            }
+            assert (await auth_client.put(installation, json=update_install)).status_code == 409
+            second = await auth_client.put(
+                installation, json={**update_install, "approved_capabilities": grants[:2]}
+            )
+            assert second.status_code == 200, second.text
+            second_state = second.json()
+            assert second_state["selected_version"] == 2
+            assert [entry["version"] for entry in second_state["history"]] == [2, 1]
+            assert (await auth_client.put(installation, json=update_install)).status_code == 409
+            rolled_back = await auth_client.patch(
+                installation,
+                json={
+                    "expected_revision": second_state["revision"],
+                    "version": 1,
+                    "approved_capabilities": grants,
+                },
+            )
+            assert rolled_back.status_code == 200, rolled_back.text
+            restored = rolled_back.json()
+            assert restored["selected_version"] == 1 and restored["active_panel"] == definition
+            disabled = await auth_client.patch(
+                installation, json={"expected_revision": restored["revision"], "version": None}
+            )
+            assert disabled.status_code == 200, disabled.text
+            assert disabled.json()["active_panel"] is None
+            assert (await auth_client.get(installation)).json() == disabled.json()
+            assert (await auth_client.get(discussion_path)).status_code == 200
         assert (view["base_sha"], view["head_sha"], view["patch"]) == (
             base_sha,
             current_head,

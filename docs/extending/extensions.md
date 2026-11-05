@@ -73,6 +73,32 @@ Omit `--definition` to use the installed template. For a remote instance,
 use `--mode server` and its HTTPS URL. The command checks the API binding and
 digest. Use the review discussion to verify receipt navigation and prefill.
 
+### Install, update, and roll back
+
+Build a preview, inspect its behavior, and select **Enable preview** in
+**Project panel installation**. Approve the displayed capabilities on the first
+installation and whenever a version changes them. The active panel appears
+in saved review discussions for your account in the same project.
+
+To update, choose **Edit installed definition**, revise the JSON, and build
+and install the update. The server retains up to 32 versions. **Version
+history** shows the version and package digest. Choose an older version and
+select **Roll back**, or use **Disable panel** to retain history while removing
+the active panel. If a saved version becomes incompatible, select a compatible
+version from history.
+
+After an instance restart, verify the installed version against its downloaded
+definition with:
+
+```bash
+python scripts/verify_studio.py release-b --mode local \
+  --server http://127.0.0.1:6767 --review <run-id> \
+  --package review-panel.json --version 1
+```
+
+For a disabled selection, add `--expect disabled`. For an HTTPS deployment use
+`--mode server` and its URL. Each instance stores its own installations.
+
 ### Operator-installed browser panels
 
 On the server, set `OMNIGENT_STUDIO_CREATOR_PILOT=1` and restart with a reviewed

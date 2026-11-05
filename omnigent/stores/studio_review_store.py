@@ -40,6 +40,16 @@ from omnigent.db.utils import (
     run_write_transaction,
 )
 from omnigent.stores.artifact_store import ArtifactStore
+from omnigent.stores.studio_creator_installation import (
+    creator_scope,
+    mutate_creator_installation,
+    read_creator_installation,
+)
+from omnigent.studio.creator_panel import (
+    CreatorActivationRequest,
+    CreatorInstallation,
+    CreatorInstallRequest,
+)
 from omnigent.studio.reviews.artifacts import (
     EvidenceCheck,
     EvidenceCheckSelection,
@@ -1293,6 +1303,38 @@ class StudioReviewStore:
     def can_publish_inline(self, run_id: str, *, actor: str | None, owner: str | None) -> bool:
         with self._session("read_inline_publication_authority") as session:
             return self._publication_allowed(session, run_id, actor, owner)
+
+    def creator_installation(
+        self, run_id: str, *, actor: str | None, owner: str | None
+    ) -> CreatorInstallation:
+        with self._session("read_creator_installation") as session:
+            run = self._require_discussion_access(session, run_id, actor, owner, lock=False)
+            generation = account_generation(actor) if actor is not None else None
+            return read_creator_installation(
+                session, creator_scope(run.project_id, actor, generation)
+            )
+
+    def change_creator_installation(
+        self,
+        run_id: str,
+        request: CreatorInstallRequest | CreatorActivationRequest,
+        *,
+        actor: str | None,
+        owner: str | None,
+    ) -> CreatorInstallation:
+        def write(session: Session) -> CreatorInstallation:
+            generation = self._lock_discussion_writer(session, run_id, actor, owner)
+            run = self._require_discussion_access(session, run_id, actor, owner, lock=False)
+            project = session.get(
+                SqlProject, (current_workspace_id(), run.project_id), with_for_update=True
+            )
+            if project is None or project.user_id != owner:
+                raise ReviewNotFoundError("Project not found")
+            return mutate_creator_installation(
+                session, creator_scope(run.project_id, actor, generation), request
+            )
+
+        return run_write_transaction(self._write, "change_creator_installation", write)
 
     def list_discussion_comments(
         self, run_id: str, *, actor: str | None, owner: str | None

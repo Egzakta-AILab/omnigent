@@ -2433,6 +2433,123 @@
         "title": "CreatedEvent",
         "type": "object"
       },
+      "CreatorInstallation": {
+        "properties": {
+          "active_panel": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReviewPanelDefinition"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "enabled": {
+            "default": false,
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "history": {
+            "items": {
+              "$ref": "#/components/schemas/CreatorPackageVersion"
+            },
+            "title": "History",
+            "type": "array"
+          },
+          "revision": {
+            "default": 0,
+            "format": "int64",
+            "title": "Revision",
+            "type": "integer"
+          },
+          "selected_version": {
+            "anyOf": [
+              {
+                "format": "int64",
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Selected Version"
+          }
+        },
+        "title": "CreatorInstallation",
+        "type": "object"
+      },
+      "CreatorPackageVersion": {
+        "properties": {
+          "capabilities": {
+            "anyOf": [
+              {
+                "items": {
+                  "enum": [
+                    "review.read",
+                    "review.openProof",
+                    "review.attachProof"
+                  ],
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Capabilities"
+          },
+          "contract_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Contract Version"
+          },
+          "digest": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Digest"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "version": {
+            "format": "int64",
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "version",
+          "digest",
+          "title",
+          "contract_version",
+          "capabilities"
+        ],
+        "title": "CreatorPackageVersion",
+        "type": "object"
+      },
       "CreatorPanelContract": {
         "properties": {
           "definition_schema": {
@@ -24369,6 +24486,236 @@
           }
         },
         "summary": "Get Project Review Run",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/studio/review-runs/{run_id}/creator-installation": {
+      "get": {
+        "operationId": "get_creator_installation_v1_studio_review_runs__run_id__creator_installation_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatorInstallation"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Creator Installation",
+        "tags": [
+          "sessions"
+        ]
+      },
+      "patch": {
+        "operationId": "activate_creator_package_v1_studio_review_runs__run_id__creator_installation_patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "approved_capabilities": {
+                    "anyOf": [
+                      {
+                        "items": {
+                          "enum": [
+                            "review.read",
+                            "review.openProof",
+                            "review.attachProof"
+                          ],
+                          "type": "string"
+                        },
+                        "maxItems": 3,
+                        "type": "array"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Approved Capabilities"
+                  },
+                  "expected_revision": {
+                    "minimum": 0,
+                    "title": "Expected Revision",
+                    "type": "integer"
+                  },
+                  "version": {
+                    "anyOf": [
+                      {
+                        "maximum": 32,
+                        "minimum": 1,
+                        "type": "integer"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Version"
+                  }
+                },
+                "required": [
+                  "expected_revision",
+                  "version"
+                ],
+                "title": "CreatorActivationRequest",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatorInstallation"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Activate Creator Package",
+        "tags": [
+          "sessions"
+        ]
+      },
+      "put": {
+        "operationId": "install_creator_package_v1_studio_review_runs__run_id__creator_installation_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "approved_capabilities": {
+                    "anyOf": [
+                      {
+                        "items": {
+                          "enum": [
+                            "review.read",
+                            "review.openProof",
+                            "review.attachProof"
+                          ],
+                          "type": "string"
+                        },
+                        "maxItems": 3,
+                        "type": "array"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Approved Capabilities"
+                  },
+                  "digest": {
+                    "pattern": "^[0-9a-f]{64}$",
+                    "title": "Digest",
+                    "type": "string"
+                  },
+                  "expected_revision": {
+                    "minimum": 0,
+                    "title": "Expected Revision",
+                    "type": "integer"
+                  },
+                  "panel": {
+                    "$ref": "#/components/schemas/ReviewPanelDefinition"
+                  }
+                },
+                "required": [
+                  "expected_revision",
+                  "panel",
+                  "digest"
+                ],
+                "title": "CreatorInstallRequest",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatorInstallation"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Install Creator Package",
         "tags": [
           "sessions"
         ]
