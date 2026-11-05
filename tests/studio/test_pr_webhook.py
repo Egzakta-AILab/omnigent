@@ -10,6 +10,7 @@ import httpx
 import pytest
 
 from omnigent.studio.pr_webhook import (
+    StoredReviewAuth,
     WebhookConfig,
     WebhookRoute,
     WebhookWorker,
@@ -151,6 +152,7 @@ async def test_only_signed_in_scope_revisions_enter_the_durable_inbox(
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://receiver"
         ) as receiver:
+            assert (await receiver.get("/health")).status_code == 204
             assert await _send(receiver, _event(), corrupt=True) == 403
             assert await _send(receiver, _event(repo_id=99)) == 403
             wrong_base = _event()
@@ -174,6 +176,46 @@ async def test_only_signed_in_scope_revisions_enter_the_durable_inbox(
     assert {
         json.loads(job.payload)["reviewers"][0]["expected_head_sha"] for job in (first, competing)
     } == {_HEAD, _NEXT}
+
+
+@pytest.mark.asyncio
+async def test_stored_bot_auth_renews_before_sending_and_fails_without_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server = "https://studio.example.test"
+    loaded = []
+    renewed = []
+    sent = []
+    current = None
+
+    def load(url: str, *, min_remaining_seconds: float = 0) -> str | None:
+        loaded.append((url, min_remaining_seconds))
+        return current
+
+    def refresh(url: str) -> str | None:
+        renewed.append(url)
+        return "refreshed-fixture-token" if len(renewed) == 1 else None
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        sent.append(request.headers["Authorization"])
+        return httpx.Response(204)
+
+    monkeypatch.setattr("omnigent.studio.pr_webhook.load_token", load)
+    monkeypatch.setattr("omnigent.studio.pr_webhook.refresh_stored_token", refresh)
+    async with httpx.AsyncClient(
+        base_url=server,
+        auth=StoredReviewAuth(server),
+        transport=httpx.MockTransport(handle),
+    ) as client:
+        assert (await client.get("/probe")).status_code == 204
+        assert loaded[0][0] == server and loaded[0][1] > 0
+        current = "valid-fixture-token"
+        assert (await client.get("/probe")).status_code == 204
+        assert renewed == [server]
+        current = None
+        with pytest.raises(httpx.RequestError, match="no usable bot login"):
+            await client.get("/probe")
+    assert sent == ["Bearer refreshed-fixture-token", "Bearer valid-fixture-token"]
 
 
 @pytest.mark.asyncio

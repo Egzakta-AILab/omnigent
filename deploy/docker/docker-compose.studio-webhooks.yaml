@@ -1,0 +1,51 @@
+# Apply after docker-compose.studio.yaml to enable the Studio receiver.
+services:
+  studio-webhooks:
+    image: egzakta-omnigent-studio:${STUDIO_REVISION:?set STUDIO_REVISION to the checkout commit}
+    pull_policy: never
+    restart: unless-stopped
+    user: "${STUDIO_WEBHOOK_UID:?set STUDIO_WEBHOOK_UID}:${STUDIO_WEBHOOK_GID:?set STUDIO_WEBHOOK_GID}"
+    depends_on:
+      omnigent:
+        condition: service_healthy
+    entrypoint: ["python", "-m", "omnigent.studio.pr_webhook"]
+    command:
+      - --server
+      - "${STUDIO_WEBHOOK_SERVER_URL:?set STUDIO_WEBHOOK_SERVER_URL to the bot login URL}"
+      - --use-stored-auth
+      - --config
+      - /etc/studio/routes.json
+      - --database
+      - /var/lib/studio/webhooks.sqlite
+      - --listen
+      - 0.0.0.0
+    environment:
+      OMNIGENT_DATA_DIR: /var/lib/studio-auth
+    env_file:
+      - path: ${STUDIO_WEBHOOK_SECRETS_FILE:?set STUDIO_WEBHOOK_SECRETS_FILE}
+        format: raw
+    volumes:
+      - type: bind
+        source: ${STUDIO_WEBHOOK_ROUTES_FILE:?set STUDIO_WEBHOOK_ROUTES_FILE}
+        target: /etc/studio/routes.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${STUDIO_WEBHOOK_AUTH_DIR:?set STUDIO_WEBHOOK_AUTH_DIR}
+        target: /var/lib/studio-auth
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${STUDIO_WEBHOOK_STATE_DIR:?set STUDIO_WEBHOOK_STATE_DIR}
+        target: /var/lib/studio
+        bind:
+          create_host_path: false
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8769/health"]
+      interval: 15s
+      timeout: 3s
+      retries: 3

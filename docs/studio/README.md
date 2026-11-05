@@ -182,10 +182,73 @@ Keep drafts and fork PRs disabled unless you want that route to review them.
 }
 ```
 
-Set the configured webhook secret and `OMNIGENT_STUDIO_REVIEW_TOKEN` through
-the service's secret store. Use a first-party Omnigent bearer for the
-dedicated non-admin account that owns the project and host. Keep the inbox
-on a persistent volume.
+#### Run the receiver with Compose
+
+Start the Studio server and sign in as the non-admin bot that owns the project
+and host. Save the bot's CLI login in a private directory dedicated to the
+receiver. Use the same HTTPS URL for login and `STUDIO_WEBHOOK_SERVER_URL`.
+
+```sh
+install -d -m 700 /absolute/path/studio-webhook-auth /absolute/path/studio-webhook-inbox
+OMNIGENT_DATA_DIR=/absolute/path/studio-webhook-auth \
+  omnigent login https://studio.example.com
+```
+
+Save the route JSON outside the checkout. In another private file, put one
+unquoted `NAME=value` line per webhook secret. Use the exact name from each
+route's `secret_env` and at least 32 bytes per value. Add these paths to your
+Studio Compose environment file.
+
+```dotenv
+STUDIO_WEBHOOK_SERVER_URL=https://studio.example.com
+STUDIO_WEBHOOK_ROUTES_FILE=/absolute/path/studio-webhooks.json
+STUDIO_WEBHOOK_SECRETS_FILE=/absolute/path/studio-webhooks.env
+STUDIO_WEBHOOK_AUTH_DIR=/absolute/path/studio-webhook-auth
+STUDIO_WEBHOOK_STATE_DIR=/absolute/path/studio-webhook-inbox
+STUDIO_WEBHOOK_UID=1000
+STUDIO_WEBHOOK_GID=1000
+```
+
+Use the numeric UID and GID of the account that owns these files and
+directories. Get them with `id -u` and `id -g` on the Docker host.
+
+For the bundled Caddy proxy, use these overlays from the same checkout and
+Compose project as the running server. The public URL must resolve from the
+receiver container. The receiver uses the same fork image as the server and
+keeps its SQLite inbox in the separate state directory.
+
+```bash
+export STUDIO_REVISION="$(git rev-parse HEAD)"
+studio=(
+  --project-name egzakta-omnigent-studio
+  --env-file /absolute/path/studio.env
+  -f deploy/docker/docker-compose.yaml
+  -f deploy/docker/docker-compose.studio.yaml
+  -f deploy/docker/docker-compose.https.yaml
+  -f deploy/docker/docker-compose.studio-webhooks.yaml
+  -f deploy/docker/docker-compose.studio-webhooks.https.yaml
+)
+docker compose "${studio[@]}" config --quiet
+docker compose "${studio[@]}" build omnigent
+docker compose "${studio[@]}" up -d --no-build
+docker compose "${studio[@]}" exec studio-webhooks python -m omnigent.studio.pr_webhook \
+  --database /var/lib/studio/webhooks.sqlite --status
+```
+
+With an existing reverse proxy, omit both HTTPS overlays and route the
+webhook path to `studio-webhooks:8769` on the Compose network. Apply changes
+to routes or HMAC secrets with `up -d --force-recreate studio-webhooks`
+using the same overlay set. Keep the inbox directory through upgrades and
+rollbacks so delivered revisions remain deduplicated. The receiver refreshes
+the bot's access token from its stored CLI login. Run the login command again
+if the refresh grant expires or is revoked.
+
+#### Run the receiver as a standalone process
+
+Provide the HMAC secrets through the service's secret store. Supply a
+first-party bearer in `OMNIGENT_STUDIO_REVIEW_TOKEN`, or use
+`--use-stored-auth` with the dedicated CLI login directory. Mount the inbox
+path on persistent storage.
 
 ```sh
 uv run --no-sync python -m omnigent.studio.pr_webhook \

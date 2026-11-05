@@ -1,0 +1,5 @@
+# Apply last, with docker-compose.https.yaml and the Studio webhook overlay.
+services:
+  caddy:
+    volumes:
+      - ./Caddyfile.studio-webhooks:/etc/caddy/Caddyfile:ro

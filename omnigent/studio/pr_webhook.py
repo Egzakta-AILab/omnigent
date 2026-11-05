@@ -12,7 +12,7 @@ import os
 import re
 import sqlite3
 from collections import Counter
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Annotated, Literal
@@ -29,6 +29,7 @@ from pydantic import (
     model_validator,
 )
 
+from omnigent.cli_auth import REFRESH_MIN_REMAINING_SECONDS, load_token, refresh_stored_token
 from omnigent.studio.pr_webhook_inbox import Delivery, InboxFull, WebhookInbox
 from omnigent.studio.reviews.discussion import (
     MAX_REVIEW_COLLABORATORS,
@@ -56,6 +57,29 @@ _REQUEST_SECONDS = 150
 _ACTIONS = {"opened", "reopened", "synchronize", "ready_for_review"}
 _RECOVERABLE_CAPTURE_STATUS = {408, 429, 500, 502, 503, 504}
 _DELIVERED = {"running", "succeeded"}
+
+
+class StoredReviewAuth(httpx.Auth):
+    """Use the dedicated bot's existing CLI login and refresh grant."""
+
+    def __init__(self, server: str) -> None:
+        self.server = server
+
+    def _token(self) -> str | None:
+        return (
+            load_token(self.server, min_remaining_seconds=REFRESH_MIN_REMAINING_SECONDS)
+            or refresh_stored_token(self.server)
+            or load_token(self.server)
+        )
+
+    async def async_auth_flow(
+        self, request: httpx.Request
+    ) -> AsyncGenerator[httpx.Request, httpx.Response]:
+        token = await asyncio.to_thread(self._token)
+        if token is None:
+            raise httpx.RequestError("The receiver has no usable bot login", request=request)
+        request.headers["Authorization"] = f"Bearer {token}"
+        yield request
 
 
 class ReviewerSettings(FrozenModel):
@@ -484,6 +508,10 @@ def create_receiver(
         openapi_url=None,
     )
 
+    @app.get("/health", include_in_schema=False)
+    async def health() -> Response:
+        return Response(status_code=204)
+
     @app.post("/webhooks/github/{route_id}")
     async def deliver(request: Request, route_id: str) -> Response:
         route = routes.get(route_id)
@@ -547,6 +575,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--config", type=Path)
     parser.add_argument("--server")
     parser.add_argument("--mode", choices=("local", "server"), default="server")
+    parser.add_argument(
+        "--use-stored-auth", action="store_true", help="refresh the bot's stored CLI login"
+    )
     parser.add_argument("--listen", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8769)
     args = parser.parse_args(argv)
@@ -564,16 +595,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         config = WebhookConfig.model_validate_json(raw)
         server = validate_server_url(args.server, args.mode)
         token = os.environ.get("OMNIGENT_STUDIO_REVIEW_TOKEN", "")
-        if args.mode == "server" and (
-            not token
-            or not token.isascii()
-            or not token.isprintable()
-            or any(c.isspace() for c in token)
+        if args.use_stored_auth and token:
+            raise ValueError("Choose either stored bot login or OMNIGENT_STUDIO_REVIEW_TOKEN")
+        if (
+            args.mode == "server"
+            and not args.use_stored_auth
+            and (
+                not token
+                or not token.isascii()
+                or not token.isprintable()
+                or any(c.isspace() for c in token)
+            )
         ):
             raise ValueError("Set OMNIGENT_STUDIO_REVIEW_TOKEN for server mode")
         studio = httpx.AsyncClient(
             base_url=f"{server}/",
             headers={"Authorization": f"Bearer {token}"} if token else {},
+            auth=StoredReviewAuth(server) if args.use_stored_auth else None,
             timeout=httpx.Timeout(_REQUEST_SECONDS, connect=5),
             follow_redirects=False,
             trust_env=False,
