@@ -101,25 +101,44 @@ def _project_config_body() -> str:
     )
 
 
-@pytest.mark.parametrize("mobile", [False, True], ids=["desktop", "mobile"])
+@pytest.mark.parametrize(
+    ("mobile", "remembered"),
+    [(False, False), (True, False), (False, True)],
+    ids=["desktop", "mobile", "remembered-workspace"],
+)
 def test_composer_prefills_from_project_config(
-    seeded_session: tuple[str, str], tmp_path: Path, mobile: bool
+    seeded_session: tuple[str, str], tmp_path: Path, mobile: bool, remembered: bool
 ) -> None:
-    """A ``?project=`` visit seeds host / workspace / agent from stored config.
+    """A project visit can browse and launch with saved or remembered settings.
 
     The pinned agent (``ag_pinned_e2e``) and workspace (``/work/configured-repo``)
     come from ``config`` — NOT from the default-ranked Claude Code or a recent
     workspace — and ride along to ``POST /v1/sessions``.
     """
     base_url, session_id = seeded_session
-    _run_in_fresh_loop(_drive_prefill(base_url, session_id, tmp_path, mobile))
+    _run_in_fresh_loop(_drive_prefill(base_url, session_id, tmp_path, mobile, remembered))
 
 
-async def _drive_prefill(base_url: str, session_id: str, tmp_path: Path, mobile: bool) -> None:
+async def _drive_prefill(
+    base_url: str, session_id: str, tmp_path: Path, mobile: bool, remembered: bool
+) -> None:
     async with async_playwright() as pw:
         browser = await pw.chromium.launch()
         page = await browser.new_page(viewport={"width": 390, "height": 540} if mobile else None)
         try:
+            if remembered:
+                last_start = {
+                    _PROJECT_ID: {
+                        "agentId": "ag_pinned_e2e",
+                        "hostId": _HOST_ID,
+                        "workspace": _CONFIG_WORKSPACE,
+                        "configSignature": "[]",
+                    }
+                }
+                await page.add_init_script(
+                    "localStorage.setItem('omnigent:project-launch-defaults', "
+                    f"JSON.stringify({json.dumps(last_start)}));"
+                )
             create_bodies: list[dict[str, Any]] = []
             workspace_reads: list[str] = []
 
@@ -139,9 +158,10 @@ async def _drive_prefill(base_url: str, session_id: str, tmp_path: Path, mobile:
                 )
 
             async def handle_project_config(route: Route) -> None:
-                await route.fulfill(
-                    status=200, content_type="application/json", body=_project_config_body()
-                )
+                project = json.loads(_project_config_body())
+                if remembered:
+                    project["config"] = {}
+                await route.fulfill(json=project)
 
             async def handle_filesystem(route: Route) -> None:
                 path = urlsplit(route.request.url).path
@@ -204,8 +224,7 @@ async def _drive_prefill(base_url: str, session_id: str, tmp_path: Path, mobile:
                 state="visible", timeout=30_000
             )
 
-            # The agent picker trigger reflects the config-pinned agent (Polly),
-            # not the default-ranked Claude Code — proof the config seed won.
+            # The agent picker reflects the project's saved or remembered agent.
             await expect(page.get_by_test_id("new-chat-landing-agent-select")).to_contain_text(
                 "Polly", timeout=15_000
             )
@@ -231,12 +250,14 @@ async def _drive_prefill(base_url: str, session_id: str, tmp_path: Path, mobile:
             await poll_until_async(lambda: len(create_bodies) == 1)
             body = create_bodies[0]
             assert body["host_id"] == _HOST_ID, body
-            # The create names its project and OMITS the fields still holding
-            # their untouched config seed, so the server default-fills them
-            # from that same config (one source of truth instead of a copy).
             assert body["project_id"] == _PROJECT_ID, body
-            assert "agent_id" not in body, body
-            assert "workspace" not in body, body
+            if remembered:
+                assert body["agent_id"] == "ag_pinned_e2e", body
+                assert body["workspace"] == _CONFIG_WORKSPACE, body
+            else:
+                # Untouched server defaults are filled by the server.
+                assert "agent_id" not in body, body
+                assert "workspace" not in body, body
         finally:
             await browser.close()
 

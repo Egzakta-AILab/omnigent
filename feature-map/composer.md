@@ -91,6 +91,7 @@ apply only to that side chat. See the [side-chat settings recipe](sessions.md).
   project settings keeps storing it.
 - `project-workspace-browser`: A new-session composer opened in a project
   can browse the saved host and working directory before its first send.
+  With no saved location, it browses the composer's selected host and directory.
   **Open project workspace** lists folders and files without changing launch
   settings. The browser closes back to the same composer and draft.
 - `config-cycle-hotkeys`: Ctrl+Alt+M cycles models and Ctrl+Alt+E cycles effort
