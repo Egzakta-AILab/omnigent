@@ -159,6 +159,26 @@ def test_resolve_config_defaults_to_no_remote_store(_entrypoint_env: None) -> No
     assert _resolve_config().artifact_store_uri is None
 
 
+def test_docker_app_exposes_studio_review_routes(
+    _entrypoint_env: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from fastapi.testclient import TestClient
+
+    from deploy.docker.entrypoint import build_app, run_migrations
+
+    database = f"sqlite:///{tmp_path / 'studio.db'}"
+    monkeypatch.setenv("DATABASE_URL", database)
+    monkeypatch.setenv("OMNIGENT_AUTH_PROVIDER", "header")
+    monkeypatch.setenv("OMNIGENT_LOCAL_SINGLE_USER", "1")
+    run_migrations(database)
+    with TestClient(build_app().app) as client:
+        assert client.get("/v1/info").json()["studio_reviews"] is True
+        assert client.get("/v1/studio/shared-reviews").json() == {
+            "entries": [],
+            "next_cursor": None,
+        }
+
+
 def test_resolve_config_rejects_non_s3_artifact_uri(
     _entrypoint_env: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
