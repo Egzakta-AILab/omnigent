@@ -370,6 +370,8 @@ function PickerIconButton({
 interface WorkspacePickerProps {
   /** Host to browse, or ``null`` to render an empty state. */
   hostId: string | null;
+  /** Browse directories without changing files or choosing a working directory. */
+  readOnly?: boolean;
   /**
    * Called with the current directory's absolute path when the user
    * clicks "Confirm". ``undefined`` hides that button.
@@ -441,6 +443,7 @@ interface WorkspacePickerProps {
  */
 export function WorkspacePicker({
   hostId,
+  readOnly = false,
   onSelect,
   onClose,
   onNavigate,
@@ -479,7 +482,7 @@ export function WorkspacePicker({
   // apply while browsing this machine's host.
   const browsingThisMachine = hostId !== null && hostId === desktopHostId;
   const canChooseNatively =
-    browsingThisMachine && onSelect !== undefined && supportsDirectoryChooser();
+    !readOnly && browsingThisMachine && onSelect !== undefined && supportsDirectoryChooser();
   // True while the user is editing the path bar, so a late listing
   // (e.g. home resolving) can't overwrite what they're typing.
   const userEditedRef = useRef(false);
@@ -490,7 +493,7 @@ export function WorkspacePicker({
   const [createError, setCreateError] = useState<string | null>(null);
   const [selectedWorktreePath, setSelectedWorktreePath] = useState<string | null>(null);
   const createDir = useCreateHostDirectory();
-  const hasCommitActions = onSelect !== undefined || onClose !== undefined;
+  const hasCommitActions = !readOnly && (onSelect !== undefined || onClose !== undefined);
 
   // Reset to home when the host *changes* — a path from the old host
   // is meaningless on the new one. Compare the previous hostId rather
@@ -948,13 +951,15 @@ export function WorkspacePicker({
               testId="workspace-picker-choose-native"
             />
           )}
-          <PickerIconButton
-            label="New folder"
-            icon={<FolderPlusIcon className="size-4" />}
-            onClick={openNewFolder}
-            disabled={!canCreateFolder}
-            testId="workspace-picker-new-folder"
-          />
+          {!readOnly && (
+            <PickerIconButton
+              label="New folder"
+              icon={<FolderPlusIcon className="size-4" />}
+              onClick={openNewFolder}
+              disabled={!canCreateFolder}
+              testId="workspace-picker-new-folder"
+            />
+          )}
           <PickerIconButton
             label={showHidden ? "Hide hidden files" : "Show hidden files"}
             icon={
@@ -1054,7 +1059,7 @@ export function WorkspacePicker({
               />
             </div>
           </div>
-          {newFolderName !== null && (
+          {!readOnly && newFolderName !== null && (
             <div
               className="flex shrink-0 flex-col gap-1 border-b bg-muted/30 px-4 py-2"
               data-testid="workspace-picker-new-folder-form"

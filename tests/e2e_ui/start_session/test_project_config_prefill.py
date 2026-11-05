@@ -26,8 +26,11 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
+import pytest
 from playwright.async_api import Route, async_playwright, expect
 
 from tests._helpers.async_thread import run_in_fresh_loop as _run_in_fresh_loop
@@ -98,7 +101,10 @@ def _project_config_body() -> str:
     )
 
 
-def test_composer_prefills_from_project_config(seeded_session: tuple[str, str]) -> None:
+@pytest.mark.parametrize("mobile", [False, True], ids=["desktop", "mobile"])
+def test_composer_prefills_from_project_config(
+    seeded_session: tuple[str, str], tmp_path: Path, mobile: bool
+) -> None:
     """A ``?project=`` visit seeds host / workspace / agent from stored config.
 
     The pinned agent (``ag_pinned_e2e``) and workspace (``/work/configured-repo``)
@@ -106,15 +112,16 @@ def test_composer_prefills_from_project_config(seeded_session: tuple[str, str]) 
     workspace — and ride along to ``POST /v1/sessions``.
     """
     base_url, session_id = seeded_session
-    _run_in_fresh_loop(_drive_prefill(base_url, session_id))
+    _run_in_fresh_loop(_drive_prefill(base_url, session_id, tmp_path, mobile))
 
 
-async def _drive_prefill(base_url: str, session_id: str) -> None:
+async def _drive_prefill(base_url: str, session_id: str, tmp_path: Path, mobile: bool) -> None:
     async with async_playwright() as pw:
         browser = await pw.chromium.launch()
-        page = await browser.new_page()
+        page = await browser.new_page(viewport={"width": 390, "height": 540} if mobile else None)
         try:
             create_bodies: list[dict[str, Any]] = []
+            workspace_reads: list[str] = []
 
             async def handle_hosts(route: Route) -> None:
                 await route.fulfill(
@@ -135,6 +142,22 @@ async def _drive_prefill(base_url: str, session_id: str) -> None:
                 await route.fulfill(
                     status=200, content_type="application/json", body=_project_config_body()
                 )
+
+            async def handle_filesystem(route: Route) -> None:
+                path = urlsplit(route.request.url).path
+                workspace_reads.append(path)
+                data = (
+                    [
+                        {
+                            "name": "README.md",
+                            "path": f"{_CONFIG_WORKSPACE}/README.md",
+                            "type": "file",
+                        }
+                    ]
+                    if path.endswith(_CONFIG_WORKSPACE)
+                    else []
+                )
+                await route.fulfill(json={"object": "list", "data": data, "has_more": False})
 
             async def handle_events(route: Route) -> None:
                 await route.fulfill(
@@ -163,6 +186,9 @@ async def _drive_prefill(base_url: str, session_id: str) -> None:
 
             await page.route("**/v1/hosts", handle_hosts)
             await stub_empty_host_picker_data(page, _HOST_ID)
+            await page.route(
+                re.compile(rf"/v1/hosts/{_HOST_ID}/filesystem(?:/|\?|$)"), handle_filesystem
+            )
             await page.route("**/v1/agents", handle_agents)
             await page.route("**/v1/sessions/projects", handle_projects_list)
             await page.route(_PROJECT_CFG_RE, handle_project_config)
@@ -184,7 +210,22 @@ async def _drive_prefill(base_url: str, session_id: str) -> None:
                 "Polly", timeout=15_000
             )
 
-            await page.get_by_test_id("new-chat-landing-input").fill("start here")
+            composer = page.get_by_test_id("new-chat-landing-input")
+            await composer.fill("start here")
+            await page.get_by_role("button", name="Open project workspace", exact=True).click(
+                timeout=5_000
+            )
+            workspace_picker = page.get_by_test_id("workspace-picker")
+            await expect(workspace_picker.get_by_text("README.md", exact=True)).to_be_visible()
+            await expect(page.get_by_test_id("workspace-picker-select")).to_have_count(0)
+            await expect(page.get_by_test_id("workspace-picker-new-folder")).to_have_count(0)
+            assert f"/v1/hosts/{_HOST_ID}/filesystem{_CONFIG_WORKSPACE}" in workspace_reads
+            assert create_bodies == []
+            await page.screenshot(path=str(tmp_path / "project-workspace-before-send.png"))
+            await page.get_by_test_id("workspace-picker-close").click()
+            await expect(workspace_picker).to_be_hidden()
+
+            await expect(composer).to_have_text("start here")
             await page.get_by_test_id("new-chat-landing-submit").click()
 
             await poll_until_async(lambda: len(create_bodies) == 1)

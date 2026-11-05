@@ -1711,7 +1711,9 @@ def register_core_routes(
             artifact_store=artifact_store,
             background_title_coordinator=background_title_coordinator,
             project_store=project_store,
-            created_by_session_id=source.id if source is not None else None,
+            created_by_session_id=(
+                source.id if source is not None and review_profile is None else None
+            ),
             created_by_project_id=source.project_id if source is not None else None,
             created_by_scheduled_task_id=(
                 source.labels.get(SCHEDULED_TASK_ORIGIN_LABEL_KEY) if source is not None else None
@@ -1928,6 +1930,22 @@ def register_core_routes(
             raise OmnigentError("Review is not owned by the caller", code=ErrorCode.FORBIDDEN)
         if session_id == review.target.source_session_id:
             raise OmnigentError("A reviewer requires its own session", code=ErrorCode.CONFLICT)
+        from omnigent.server.routes.studio_reviews import _owned_source
+
+        # Use the current filing when dispatch starts. Placement and reviewer
+        # settings still come from the captured review.
+        source = await _owned_source(
+            review.target.source_session_id,
+            user_id,
+            conversation_store,
+            permission_store,
+            auth_provider,
+        )
+        if (source.host_id, source.workspace) != (review.target.host_id, review.target.workspace):
+            raise OmnigentError("The review execution target changed", code=ErrorCode.CONFLICT)
+        legacy_project = (
+            source.labels.get(PROJECT_LABEL_KEY) if source.project_id is None else None
+        )
         profile = review.profile
         return await _create_existing_session(
             request,
@@ -1937,9 +1955,11 @@ def register_core_routes(
                 host_id=review.target.host_id,
                 workspace=review.target.workspace,
                 title=f"Review PR #{review.target.pr_number}",
+                labels={PROJECT_LABEL_KEY: legacy_project} if legacy_project else {},
                 model_override=profile.model,
                 reasoning_effort=profile.reasoning_effort,
             ),
+            source=source,
             review_profile=profile,
             reviewer_session_id=session_id,
         )
