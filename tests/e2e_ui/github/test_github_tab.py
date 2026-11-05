@@ -2078,6 +2078,35 @@ def test_studio_review_from_pr_panel(
         page.route(f"{discussion_path}/inline-drafts/*", draft_inline_comment)
         page.route(f"{discussion_path}/inline-drafts/*/discard", discard_inline_comment)
 
+        publish_count = 0
+        publication_digest = "8" * 64
+
+        def inline_publication(route: Route) -> None:
+            nonlocal publish_count
+            body = route.request.post_data_json
+            assert len(body["selected"]) == 1
+            choice = body["selected"][0]
+            draft = inline_drafts[choice["id"]]
+            assert choice["version"] == draft["version"]
+            if route.request.url.endswith("/confirm"):
+                assert body["confirm"] is True and body["digest"] == publication_digest
+                publish_count += 1
+                draft.update(publication_state="posted", provider_url=f"{pr_url}#discussion_r9")
+            else:
+                assert "confirm" not in body and "digest" not in body
+            route.fulfill(
+                json={
+                    **revision,
+                    "run_id": run_id,
+                    "pr_url": pr_url,
+                    "provider": "github",
+                    "digest": publication_digest,
+                    "drafts": [draft],
+                }
+            )
+
+        page.route(f"{discussion_path}/inline-publication/*", inline_publication)
+
         def grant_discussion_access(route: Route) -> None:
             assert route.request.post_data_json == {"user_id": "reviewer@example.test"}
             collaborators.append("reviewer@example.test")
@@ -2207,6 +2236,7 @@ def test_studio_review_from_pr_panel(
                     "agent_answers": agent_answers,
                     "can_comment": True,
                     "can_draft_inline": True,
+                    "can_publish_inline": True,
                     "can_ask": True,
                     "can_use_review_workspace": True,
                     "review_workspace_host_id": host_id,
@@ -2241,6 +2271,21 @@ def test_studio_review_from_pr_panel(
         page.screenshot(path=str(tmp_path / "review-inline-draft.png"))
         drafts.get_by_role("button", name="Discard draft").click()
         expect(drafts.get_by_text("Validate empty input first.", exact=True)).to_have_count(0)
+        drafts.get_by_role("button", name="Draft inline comment").click()
+        drafts.get_by_role("textbox", name="Inline comment draft").fill("Publish this line.")
+        drafts.get_by_role("button", name="Save draft").click()
+        publishing = page.get_by_role("region", name="Publish inline drafts")
+        publishing.get_by_role("checkbox", name=re.compile("Publish this line")).check()
+        publishing.get_by_role("button", name="Preview selected").click()
+        expect(publishing.get_by_role("heading", name="Publication preview")).to_be_visible()
+        expect(publishing.get_by_text(head_sha[:12], exact=False)).to_be_visible()
+        assert publish_count == 0
+        page.screenshot(path=str(tmp_path / "review-inline-publication-preview.png"))
+        publishing.get_by_role("button", name="Publish 1 inline comment", exact=True).click()
+        expect(publishing.get_by_role("link", name="Open published comment")).to_have_attribute(
+            "href", f"{pr_url}#discussion_r9"
+        )
+        assert publish_count == 1
         page.screenshot(path=str(tmp_path / "review-discussion.png"))
         page.get_by_role("region", name="Review context").locator(
             '[data-column-number="2"][data-line-type="change-addition"]'

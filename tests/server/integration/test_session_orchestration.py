@@ -3096,6 +3096,7 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
     from omnigent.harness_plugins import native_provider_for_key
     from omnigent.host.frames import (
         HostFsRequestFrame,
+        HostFsWriteFrame,
         HostLaunchRunnerFrame,
         HostStatFrame,
         decode_host_frame,
@@ -3154,6 +3155,7 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
     conversations.set_host_id(source["id"], host_id, workspace=workspace)
     auth_app.state.default_public_sessions = lambda: DefaultPublicSessions.ALL
     launches = []
+    inline_writes = []
     pr_url = "https://github.com/example/project/pull/42"
     role_digest = "1" * 64
     current_head = "b" * 40
@@ -3171,6 +3173,25 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
         elif isinstance(frame, HostLaunchRunnerFrame):
             launches.append(frame)
             connection.pending_launches[frame.request_id].set_result({"status": "launched"})
+        elif isinstance(frame, HostFsWriteFrame) and scenario == "project":
+            assert frame.session_id == expected_project_id
+            assert frame.workspace == workspace
+            assert frame.op == "studio_project_pull_request_publish_inline"
+            inline_writes.append(frame.params)
+            if len(inline_writes) == 1:
+                result = {
+                    "status": "ok",
+                    "payload": {
+                        "thread": {"comments": {"data": [{"url": f"{pr_url}#discussion_r1"}]}}
+                    },
+                }
+            else:
+                result = {
+                    "status": "error",
+                    "error_status": 503,
+                    "error": "Provider delivery could not be confirmed",
+                }
+            connection.pending_fs_requests[frame.request_id].set_result(result)
         elif isinstance(frame, HostFsRequestFrame) and scenario == "project":
             assert frame.session_id == expected_project_id
             assert frame.workspace == workspace
@@ -4025,6 +4046,64 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
             ).status_code == 204
         assert (await auth_client.get(discussion_path)).json()["inline_drafts"] == []
         assert (await auth_client.post(drafts_path, json=owner_draft)).status_code == 409
+        left_draft = {**bob_draft, "id": uuid4().hex, "body": "Comment on the removed line."}
+        right_draft = {**owner_draft, "id": uuid4().hex, "body": "Comment on the added line."}
+        for draft in (left_draft, right_draft):
+            assert (await auth_client.post(drafts_path, json=draft)).status_code == 200
+        publication = f"{discussion_path}/inline-publication"
+        selection = {
+            "selected": [{"id": draft["id"], "version": 1} for draft in (left_draft, right_draft)]
+        }
+        assert (
+            await auth_client.post(
+                f"{publication}/preview", json=selection, headers=foreign_headers
+            )
+        ).status_code == 403
+        preview = await auth_client.post(f"{publication}/preview", json=selection)
+        assert preview.status_code == 200, preview.text
+        preview = preview.json()
+        assert preview["head_sha"] == current_head
+        assert [draft["body"] for draft in preview["drafts"]] == [
+            left_draft["body"],
+            right_draft["body"],
+        ]
+        assert inline_writes == []
+        confirm = {**selection, "confirm": True, "digest": preview["digest"]}
+        assert (
+            await auth_client.post(f"{publication}/confirm", json={**confirm, "confirm": 1})
+        ).status_code == 422
+        assert (
+            await auth_client.post(f"{publication}/confirm", json={**confirm, "digest": "0" * 64})
+        ).status_code == 409
+        captured_head = current_head
+        current_head = "c" * 40
+        assert (await auth_client.post(f"{publication}/confirm", json=confirm)).status_code == 409
+        current_head = captured_head
+        assert inline_writes == []
+        posted = await auth_client.post(f"{publication}/confirm", json=confirm)
+        assert posted.status_code == 200, posted.text
+        posted_drafts = posted.json()["drafts"]
+        assert [draft["publication_state"] for draft in posted_drafts] == ["posted", "unknown"]
+        assert posted_drafts[0]["provider_url"] == f"{pr_url}#discussion_r1"
+        assert posted_drafts[1]["provider_url"] is None
+        assert inline_writes == [
+            {
+                "repository": "nested/project",
+                "pr_url": pr_url,
+                "anchor": draft["anchor"],
+                "body": draft["body"],
+                "base_sha": base_sha,
+                "head_sha": current_head,
+            }
+            for draft in preview["drafts"]
+        ]
+        assert (
+            await auth_client.post(f"{publication}/confirm", json=confirm)
+        ).json() == posted.json()
+        assert len(inline_writes) == 2
+        assert (
+            await auth_client.put(f"{drafts_path}/{left_draft['id']}", json=update)
+        ).status_code == 409
         return
 
     created = await create_reviewer(request, "alice", review, review.id)

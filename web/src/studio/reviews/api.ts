@@ -234,6 +234,17 @@ export interface InlineDraft {
   version: number;
   created_at: number;
   updated_at: number;
+  publication_state?: "draft" | "sending" | "posted" | "unknown";
+  provider_url?: string | null;
+}
+
+export interface InlinePublicationPreview {
+  provider: string;
+  pr_url: string;
+  base_sha: string;
+  head_sha: string;
+  digest: string;
+  drafts: InlineDraft[];
 }
 
 export type QuestionAction = "question" | "propose_fix";
@@ -300,6 +311,7 @@ export interface ReviewDiscussion {
   agent_answers?: SharedReviewAnswer[];
   can_comment: boolean;
   can_draft_inline?: boolean;
+  can_publish_inline?: boolean;
   can_attach_evidence?: boolean;
   can_ask?: boolean;
   can_use_review_workspace?: boolean;
@@ -356,6 +368,36 @@ export async function discardInlineDraft(runId: string, id: string, version: num
     },
   );
   if (!response.ok) throw await apiErrorFromResponse(response);
+}
+
+export function previewInlinePublication(runId: string, drafts: InlineDraft[]) {
+  return submitInlinePublication(runId, "preview", drafts);
+}
+
+export function confirmInlinePublication(runId: string, preview: InlinePublicationPreview) {
+  return submitInlinePublication(runId, "confirm", preview.drafts, {
+    digest: preview.digest,
+    confirm: true,
+  });
+}
+
+function submitInlinePublication(
+  runId: string,
+  action: "preview" | "confirm",
+  drafts: InlineDraft[],
+  confirmation?: { digest: string; confirm: true },
+) {
+  return reviewRequest<InlinePublicationPreview>(
+    `${reviewRunPath(runId)}/discussion/inline-publication/${action}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        selected: drafts.map(({ id, version }) => ({ id, version })),
+        ...confirmation,
+      }),
+    },
+  );
 }
 
 function questionsPath(runId: string) {

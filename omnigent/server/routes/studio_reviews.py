@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Any, Literal, TypeVar, cast
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
@@ -30,6 +32,7 @@ from omnigent.server.routes._host_filesystem import (
     HostFsError,
     HostFsUnavailableError,
     read_workspace_from_host,
+    write_workspace_from_host,
 )
 from omnigent.server.routes._host_launch import resolve_host_owner
 from omnigent.server.routes._origin import require_trusted_origin
@@ -61,6 +64,7 @@ from omnigent.stores.studio_review_store import (
 from omnigent.studio.reviews.discussion import (
     AccountId,
     AskReviewQuestion,
+    ConfirmInlinePublication,
     CreateReviewComment,
     DiffDiscussionAnchor,
     DiscussionAnchor,
@@ -68,6 +72,8 @@ from omnigent.studio.reviews.discussion import (
     FindingDiscussionAnchor,
     InlineDraft,
     InlineDraftVersion,
+    InlinePublicationPreview,
+    InlinePublicationRequest,
     QuestionDispatch,
     QuestionExecution,
     QuestionInput,
@@ -273,6 +279,52 @@ async def _read_project_review_resource(
         raise HTTPException(503, "The review host could not read this pull request") from exc
     except HostFsUnavailableError as exc:
         raise HTTPException(503, "The review host could not read this pull request") from exc
+
+
+async def _publish_inline_draft(
+    workspace: ProjectWorkspace, target: ReviewTarget, draft: InlineDraft
+) -> str | None:
+    try:
+        result = await write_workspace_from_host(
+            host_registry=workspace.registry,
+            host_conn=workspace.connection,
+            op="studio_project_pull_request_publish_inline",
+            workspace=workspace.path,
+            session_id=workspace.record_id,
+            params={
+                "repository": target.repository_path,
+                "pr_url": target.pr_url,
+                "body": draft.body,
+                "anchor": draft.anchor.model_dump(mode="json"),
+                "base_sha": target.base_sha,
+                "head_sha": target.head_sha,
+            },
+        )
+    except (HostFsError, HostFsUnavailableError):
+        return None
+    thread = result.get("thread")
+    comments = thread.get("comments") if isinstance(thread, dict) else None
+    data = comments.get("data") if isinstance(comments, dict) else None
+    url = (
+        data[0].get("url")
+        if isinstance(data, list) and data and isinstance(data[0], dict)
+        else None
+    )
+    if not isinstance(url, str) or len(url) > 2048 or not url.isprintable():
+        return None
+    try:
+        link, pr = urlsplit(url), urlsplit(target.pr_url)
+    except ValueError:
+        return None
+    if (
+        link.scheme == "https"
+        and link.netloc.lower() == pr.netloc.lower()
+        and link.path.rstrip("/").casefold() == pr.path.rstrip("/").casefold()
+        and not link.query
+        and link.fragment
+    ):
+        return url
+    return None
 
 
 async def _capture_project_patch(workspace: ProjectWorkspace, target: ReviewTarget) -> str:
@@ -945,6 +997,33 @@ def create_studio_reviews_router(
                 )
             raise
 
+    async def captured_project_workspace(
+        request: Request, target: ReviewTarget, owner: str | None
+    ) -> ProjectWorkspace:
+        assert target.source_project_id is not None
+        return await resolve_project_workspace(
+            request,
+            project_store,
+            project_id=target.source_project_id,
+            owner_id=owner,
+            host_id=target.host_id,
+            workspace=target.workspace,
+        )
+
+    async def verified_current_project_patch(
+        workspace: ProjectWorkspace, target: ReviewTarget, owner: str | None, run_id: str | None
+    ) -> str:
+        assert target.repository_path is not None
+        current = await _capture_project_target(workspace, target.repository_path, target.pr_url)
+        if current != target:
+            raise HTTPException(409, "The pull request revision or execution target changed")
+        patch = await _capture_project_patch(workspace, target)
+        if run_id is not None:
+            captured = await saved_run_patch(run_id, owner)
+            if captured is not None and captured != patch:
+                raise HTTPException(409, "The pull request diff differs from the saved review run")
+        return patch
+
     async def current_project_patch(
         request: Request, target: ReviewTarget, owner: str | None, run_id: str | None
     ) -> str:
@@ -971,24 +1050,8 @@ def create_studio_reviews_router(
             if candidate_patch is None:
                 raise HTTPException(409, "The candidate review has no saved diff")
             return candidate_patch
-        assert target.source_project_id is not None and target.repository_path is not None
-        workspace = await resolve_project_workspace(
-            request,
-            project_store,
-            project_id=target.source_project_id,
-            owner_id=owner,
-            host_id=target.host_id,
-            workspace=target.workspace,
-        )
-        current = await _capture_project_target(workspace, target.repository_path, target.pr_url)
-        if current != target:
-            raise HTTPException(409, "The pull request revision or execution target changed")
-        patch = await _capture_project_patch(workspace, target)
-        if run_id is not None:
-            captured = await saved_run_patch(run_id, owner)
-            if captured is not None and captured != patch:
-                raise HTTPException(409, "The pull request diff differs from the saved review run")
-        return patch
+        workspace = await captured_project_workspace(request, target, owner)
+        return await verified_current_project_patch(workspace, target, owner, run_id)
 
     async def launch_member(
         request: Request, review: ReviewPass, idempotency_key: str, *, run: ReviewRun | None
@@ -1435,6 +1498,7 @@ def create_studio_reviews_router(
             agent_answers=answers,
             can_comment=access.can_comment,
             can_draft_inline=access.can_comment and target.candidate is None,
+            can_publish_inline=access.actor == access.owner and target.candidate is None,
             can_attach_evidence=access.actor == access.owner,
             can_ask=access.can_comment and create_reviewer is not None and send_review is not None,
             can_use_review_workspace=access.actor == access.owner,
@@ -1577,6 +1641,125 @@ def create_studio_reviews_router(
         body = await _bounded_json(request, InlineDraftVersion, limit=1024)
         await change_inline_draft(access, draft_id, body.version, None)
         return Response(status_code=204)
+
+    async def prepare_inline_publication(
+        request: Request,
+        run_id: str,
+        body: InlinePublicationRequest,
+    ) -> tuple[DiscussionAccess, InlinePublicationPreview]:
+        access = await require_inline_draft_access(request, run_id)
+        if access.actor != access.owner:
+            raise HTTPException(403, "Only the review owner can publish from this workspace")
+        run, target = access.run, access.run.target
+        if run.patch_sha256 is None:
+            raise HTTPException(409, "This review has no captured diff")
+        try:
+            drafts = await asyncio.to_thread(
+                review_store.list_inline_drafts, run.id, actor=access.actor, owner=access.owner
+            )
+        except ReviewNotFoundError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        by_id = {draft.id: draft for draft in drafts}
+        selected = []
+        for choice in body.selected:
+            draft = by_id.get(choice.id)
+            if draft is None or draft.version != choice.version:
+                raise HTTPException(409, "The selected drafts changed. Create a new preview.")
+            selected.append(draft)
+        reference = PullRequestRef.from_url(target.pr_url)
+        digest = hashlib.sha256(
+            json.dumps(
+                [
+                    run.id,
+                    target.model_dump(mode="json"),
+                    run.patch_sha256,
+                    [
+                        [draft.id, draft.version, draft.body, draft.anchor.model_dump(mode="json")]
+                        for draft in selected
+                    ],
+                ],
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        return access, InlinePublicationPreview(
+            run_id=run.id,
+            provider=reference.provider,
+            pr_url=reference.url,
+            base_sha=target.base_sha,
+            head_sha=target.head_sha,
+            patch_sha256=run.patch_sha256,
+            digest=digest,
+            drafts=selected,
+        )
+
+    async def check_publication_revision(
+        request: Request, access: DiscussionAccess, preview: InlinePublicationPreview
+    ) -> ProjectWorkspace:
+        workspace = await captured_project_workspace(request, access.run.target, access.owner)
+        patch = await verified_current_project_patch(
+            workspace, access.run.target, access.owner, access.run.id
+        )
+        anchors = displayed_anchors(patch)
+        if any(not draft.anchor.is_in(anchors) for draft in preview.drafts):
+            raise HTTPException(409, "A draft's anchor is outside the captured diff")
+        return workspace
+
+    @router.post(
+        "/studio/review-runs/{run_id}/discussion/inline-publication/preview",
+        response_model=InlinePublicationPreview,
+        dependencies=_WRITE_GATES,
+        openapi_extra=_discussion_request_schema(InlinePublicationRequest),
+    )
+    async def preview_inline_publication(
+        request: Request, response: Response, run_id: str
+    ) -> InlinePublicationPreview:
+        body = await _bounded_json(request, InlinePublicationRequest, limit=4096)
+        access, preview = await prepare_inline_publication(request, run_id, body)
+        if any(draft.publication_state != "draft" for draft in preview.drafts):
+            raise HTTPException(409, "Select drafts that have not been sent")
+        await check_publication_revision(request, access, preview)
+        response.headers["Cache-Control"] = "no-store"
+        return preview
+
+    @router.post(
+        "/studio/review-runs/{run_id}/discussion/inline-publication/confirm",
+        response_model=InlinePublicationPreview,
+        dependencies=_WRITE_GATES,
+        openapi_extra=_discussion_request_schema(ConfirmInlinePublication),
+    )
+    async def confirm_inline_publication(
+        request: Request, response: Response, run_id: str
+    ) -> InlinePublicationPreview:
+        body = await _bounded_json(request, ConfirmInlinePublication, limit=4096)
+        access, preview = await prepare_inline_publication(request, run_id, body)
+        if body.digest != preview.digest:
+            raise HTTPException(409, "This publication differs from the preview")
+        workspace = await check_publication_revision(request, access, preview)
+        try:
+            drafts, claimed = await asyncio.to_thread(
+                review_store.claim_inline_publication,
+                access.run.id,
+                owner=access.owner,
+                selected=body.selected,
+                digest=preview.digest,
+            )
+        except ReviewNotFoundError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ReviewConflictError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        if claimed:
+            for index, draft in enumerate(drafts):
+                provider_url = await _publish_inline_draft(workspace, access.run.target, draft)
+                drafts[index] = await asyncio.to_thread(
+                    review_store.finish_inline_publication,
+                    access.run.id,
+                    draft.id,
+                    digest=preview.digest,
+                    provider_url=provider_url,
+                )
+        response.headers["Cache-Control"] = "no-store"
+        return preview.model_copy(update={"drafts": drafts})
 
     async def question_execution(
         request: Request, access: DiscussionAccess, body: AskReviewQuestion

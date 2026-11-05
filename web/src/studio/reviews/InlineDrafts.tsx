@@ -66,7 +66,7 @@ export function InlineDrafts({
             {draft.anchor.side === "base" ? "Base" : "Head"}
           </p>
           <p className="whitespace-pre-wrap break-words">{draft.body}</p>
-          {canEdit && (
+          {canEdit && (!draft.publication_state || draft.publication_state === "draft") && (
             <div className="flex flex-wrap gap-2">
               <Button
                 size="sm"

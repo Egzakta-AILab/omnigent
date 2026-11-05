@@ -84,6 +84,9 @@ class EditInlineDraft(InlineDraftVersion):
     body: CommentBody
 
 
+InlinePublicationState = Literal["draft", "sending", "posted", "unknown"]
+
+
 class InlineDraft(InlineDraftVersion):
     id: str
     thread: DiscussionAnchor
@@ -91,6 +94,50 @@ class InlineDraft(InlineDraftVersion):
     body: CommentBody
     created_at: int
     updated_at: int
+    publication_state: InlinePublicationState = "draft"
+    provider_url: str | None = None
+
+
+class InlineDraftSelection(InlineDraftVersion):
+    id: str
+
+    @field_validator("id")
+    @classmethod
+    def canonical_id(cls, value: str) -> str:
+        return require_uuid(value)
+
+
+class InlinePublicationRequest(FrozenModel):
+    selected: list[InlineDraftSelection] = Field(min_length=1, max_length=8)
+
+    @model_validator(mode="after")
+    def unique_selection(self) -> InlinePublicationRequest:
+        if len({draft.id for draft in self.selected}) != len(self.selected):
+            raise ValueError("Select each draft once")
+        return self
+
+
+class ConfirmInlinePublication(InlinePublicationRequest):
+    digest: ReviewRoleDigest
+    confirm: Literal[True]
+
+    @field_validator("confirm", mode="before")
+    @classmethod
+    def explicit_confirmation(cls, value: object) -> object:
+        if value is not True:
+            raise ValueError("Explicitly confirm publication")
+        return value
+
+
+class InlinePublicationPreview(FrozenModel):
+    run_id: str
+    provider: str
+    pr_url: str
+    base_sha: Sha
+    head_sha: Sha
+    patch_sha256: ReviewRoleDigest
+    digest: ReviewRoleDigest
+    drafts: list[InlineDraft]
 
 
 QuestionAction = Literal["question", "propose_fix"]
@@ -230,6 +277,7 @@ class ReviewDiscussionView(FrozenModel):
     agent_answers: list[SharedReviewAnswer] = Field(default_factory=list)
     can_comment: bool
     can_draft_inline: bool = False
+    can_publish_inline: bool = False
     can_attach_evidence: bool = False
     can_ask: bool = False
     can_use_review_workspace: bool = False
