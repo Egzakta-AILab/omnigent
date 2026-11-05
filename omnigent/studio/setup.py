@@ -441,6 +441,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     reproduction.add_argument("--mode", choices=("local", "server"))
     reproduction.add_argument("--server", help="trusted instance URL for --run-id")
     reproduction.add_argument("--pr", help="expected pull request URL for --run-id")
+    reproduction.add_argument(
+        "--fix-patch", type=Path, help="compare a proposed patch with the saved head"
+    )
+    reproduction.add_argument(
+        "--include-path",
+        action="append",
+        default=[],
+        help="limit both fix snapshots to a Git path",
+    )
     reproduction.add_argument("--image", required=True, help="locally installed test image")
     reproduction.add_argument("--socket", type=Path, default=Path("/var/run/docker.sock"))
     reproduction.add_argument("--timeout", type=int, default=60, help="seconds per revision")
@@ -448,12 +457,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     reproduction.add_argument("argv", nargs=argparse.REMAINDER, help="command after --")
     args = parser.parse_args(argv)
     if args.command == "reproduce":
-        from omnigent.studio.reviews.reproduction import ReproductionError, reproduce
+        from omnigent.studio.reviews.reproduction import (
+            MAX_FIX_PATCH_BYTES,
+            FixVerificationReceipt,
+            ReproductionError,
+            reproduce,
+            verify_fix,
+        )
         from omnigent.studio.verify_review_run import read_reproduction_source
 
         command = args.argv[1:] if args.argv[:1] == ["--"] else args.argv
         if args.output.exists():
             parser.error("Choose a new file for the reproduction receipt")
+        if args.include_path and args.fix_patch is None:
+            parser.error("--include-path requires --fix-patch")
         try:
             source = None
             if any((args.run_id, args.mode, args.server, args.pr)):
@@ -469,16 +486,23 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if not args.base or not args.head:
                     parser.error("Use a saved review run or specify --base and --head")
                 base, head = args.base, args.head
-            result = reproduce(
-                repository=args.repository.expanduser().resolve(),
-                base=base,
-                head=head,
-                image=args.image,
-                command=tuple(command),
-                socket=args.socket.expanduser(),
-                timeout=args.timeout,
-                source=source,
-            )
+            options: dict[str, Any] = {
+                "repository": args.repository.expanduser().resolve(),
+                "image": args.image,
+                "command": tuple(command),
+                "socket": args.socket.expanduser(),
+                "timeout": args.timeout,
+            }
+            if args.fix_patch is not None:
+                if source is None:
+                    parser.error("--fix-patch requires a saved review run")
+                with args.fix_patch.expanduser().open("rb") as patch_file:
+                    patch = patch_file.read(MAX_FIX_PATCH_BYTES + 1)
+                result = verify_fix(
+                    source=source, patch=patch, paths=tuple(args.include_path), **options
+                )
+            else:
+                result = reproduce(base=base, head=head, source=source, **options)
             args.output.parent.mkdir(parents=True, exist_ok=True)
             with tempfile.NamedTemporaryFile(
                 mode="w", encoding="utf-8", dir=args.output.parent, prefix=".reproduction-"
@@ -488,11 +512,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 os.link(receipt_file.name, args.output)
         except (OSError, ReproductionError, ValueError) as exc:
             parser.exit(2, f"Reproduction failed: {exc}\n")
-        for label, side in (("Base", result.base), ("Head", result.head)):
+        if isinstance(result, FixVerificationReceipt):
+            sides = (("Captured head", result.before), ("Proposed snapshot", result.after))
+        else:
+            sides = (("Base", result.base), ("Head", result.head))
+        for label, side in sides:
             print(
                 f"{label} {side.commit[:8]}: {side.state}, "
                 f"exit {side.exit_code}, {side.elapsed_ms} ms"
             )
+        if isinstance(result, FixVerificationReceipt):
+            print(f"Comparison: {result.outcome.replace('_', ' ')}")
+            return 0 if result.outcome == "fail_to_pass" else 1
         return 0 if result.base.state == result.head.state == "exited" else 1
     if args.command == "contracts":
         from omnigent.studio.contracts import main as contracts_main

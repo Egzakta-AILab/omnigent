@@ -14,10 +14,10 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import BinaryIO, Literal
 
-from pydantic import AwareDatetime, Field, field_validator
+from pydantic import AwareDatetime, Field, computed_field, field_validator
 
 from omnigent.studio.reviews.models import FrozenModel, ReviewRoleDigest, Sha
 
@@ -28,6 +28,7 @@ _OUTPUT_LIMIT = 8 * 1024
 REPRODUCTION_CHUNK_BYTES = 12 * 1024
 MAX_REPRODUCTION_CHUNKS = 16
 MAX_REPRODUCTION_BYTES = MAX_REPRODUCTION_CHUNKS * REPRODUCTION_CHUNK_BYTES
+MAX_FIX_PATCH_BYTES = 128 * 1024
 _ENGINE_LIMIT = 10
 _START_MARKER = b"Omnigent reproduction started\n"
 _COMMAND = """
@@ -92,6 +93,36 @@ class ReproductionReceipt(FrozenModel):
         if any("\0" in arg for arg in command):
             raise ValueError("The reproduction command contains a null byte")
         return command
+
+
+class FixVerificationReceipt(FrozenModel):
+    schema_version: Literal["omnigent.studio.fix-verification.v1"] = (
+        "omnigent.studio.fix-verification.v1"
+    )
+    observed_at: AwareDatetime
+    runtime: Literal["docker-no-network"] = "docker-no-network"
+    image_id: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    source: ReproductionSource
+    proposed_patch_sha256: ReviewRoleDigest
+    included_paths: tuple[str, ...]
+    command: tuple[str, ...]
+    timeout_seconds: int
+    before: ReproductionSide
+    after: ReproductionSide
+
+    @computed_field
+    @property
+    def outcome(
+        self,
+    ) -> Literal["fail_to_pass", "pass_to_pass", "fail_to_fail", "pass_to_fail", "inconclusive"]:
+        if any(
+            side.state != "exited" or side.oom_killed or side.exit_code is None
+            for side in (self.before, self.after)
+        ):
+            return "inconclusive"
+        if self.before.exit_code == 0:
+            return "pass_to_pass" if self.after.exit_code == 0 else "pass_to_fail"
+        return "fail_to_pass" if self.after.exit_code == 0 else "fail_to_fail"
 
 
 class AttachedReproduction(FrozenModel):
@@ -244,11 +275,11 @@ def _prepare_archive_repository(repository: Path, bare: Path, *, object_format: 
     (bare / "objects" / "info" / "alternates").write_bytes(objects + b"\n")
 
 
-def _export(bare: Path, commit: str, tree: BinaryIO) -> _Capture:
-    git = ["git", "--no-replace-objects", f"--git-dir={bare}"]
+def _export(bare: Path, commit: str, tree: BinaryIO, *, paths: tuple[str, ...] = ()) -> _Capture:
+    git = ["git", "--no-replace-objects", "--literal-pathspecs", f"--git-dir={bare}"]
     try:
         export = _capture(
-            [*git, "archive", "--format=tar", commit],
+            [*git, "archive", "--format=tar", commit, "--", *paths],
             destination=tree,
             timeout=60,
             limit=_ARCHIVE_LIMIT,
@@ -266,6 +297,46 @@ def _export(bare: Path, commit: str, tree: BinaryIO) -> _Capture:
         raise ReproductionError(f"Commit {commit} could not be exported") from exc
     tree.seek(0)
     return export
+
+
+def _stage_fix(bare: Path, head: str, patch: bytes) -> str:
+    """Apply a proposal to a private index and create an ephemeral commit for export."""
+    git = ["git", "--no-replace-objects", f"--git-dir={bare}"]
+    if _metadata([*git, "cat-file", "-t", head], "Captured head is unavailable") != b"commit":
+        raise ReproductionError("The captured head does not identify a Git commit")
+    _metadata([*git, "read-tree", head], "Could not initialize the proposed fix index")
+    with tempfile.TemporaryFile() as input_file:
+        input_file.write(patch)
+        input_file.seek(0)
+        _metadata(
+            [*git, "apply", "--cached", "--whitespace=nowarn", "-"],
+            "The proposed patch does not apply cleanly to the captured head",
+            stdin=input_file,
+        )
+    tree = _metadata([*git, "write-tree"], "Could not write the proposed fix tree")
+    head_tree = _metadata([*git, "rev-parse", f"{head}^{{tree}}"], "Could not read the head tree")
+    if tree == head_tree:
+        raise ReproductionError("The proposed patch does not change the captured head")
+    # Fixed metadata makes identical proposals produce the same commit and archive.
+    identity = b"Omnigent Studio <studio@example.invalid> 0 +0000"
+    with tempfile.TemporaryFile() as commit:
+        commit.write(
+            b"tree "
+            + tree
+            + b"\nparent "
+            + head.encode("ascii")
+            + b"\nauthor "
+            + identity
+            + b"\ncommitter "
+            + identity
+            + b"\n\nStudio fix preview\n"
+        )
+        commit.seek(0)
+        return _metadata(
+            [*git, "hash-object", "-t", "commit", "-w", "--stdin"],
+            "Could not create the proposed fix snapshot",
+            stdin=commit,
+        ).decode("ascii")
 
 
 def _run_side(
@@ -382,24 +453,22 @@ def _run_side(
                 raise ReproductionError(f"Docker could not remove container {name}") from exc
 
 
-def reproduce(
+def _compare_revisions(
     *,
     repository: Path,
     base: str,
     head: str,
     image: str,
     command: tuple[str, ...],
-    socket: Path = Path("/var/run/docker.sock"),
-    timeout: int = 60,
-    source: ReproductionSource | None = None,
-) -> ReproductionReceipt:
-    """Observe one command on two Git exports without mounting the host checkout."""
+    socket: Path,
+    timeout: int,
+    proposed_patch: bytes | None = None,
+    paths: tuple[str, ...] = (),
+) -> tuple[str, ReproductionSide, ReproductionSide]:
     if not all(_SHA.fullmatch(commit) for commit in (base, head)):
         raise ValueError("Provide both full lowercase Git commit IDs")
     if len(base) != len(head):
         raise ValueError("Both commits must use the same Git object format")
-    if source is not None and (source.base_sha, source.head_sha) != (base, head):
-        raise ValueError("The reproduction commits do not match the saved review run")
     if not socket.is_absolute() or not repository.is_dir() or not 1 <= timeout <= 300:
         raise ValueError("Provide a local checkout, an absolute Docker socket, and 1–300 seconds")
     ReproductionReceipt.validate_command(command)
@@ -412,6 +481,12 @@ def reproduce(
     ):
         config = Path(temporary) / "docker"
         config.mkdir()
+        bare = Path(temporary) / "export.git"
+        _prepare_archive_repository(
+            repository, bare, object_format="sha1" if len(base) == 40 else "sha256"
+        )
+        if proposed_patch is not None:
+            head = _stage_fix(bare, base, proposed_patch)
         docker = ["docker", "--config", str(config), "--host", f"unix://{socket}"]
         metadata = _engine(
             docker, "image", "inspect", "--format", "{{.Id}} {{json .Config.Volumes}}", image
@@ -421,13 +496,9 @@ def reproduce(
             raise ReproductionError("Docker did not resolve an immutable local image ID")
         if volumes not in ("null", "{}"):
             raise ReproductionError("Choose an image without declared Docker volumes")
-        bare = Path(temporary) / "export.git"
-        _prepare_archive_repository(
-            repository, bare, object_format="sha1" if len(base) == 40 else "sha256"
-        )
-        base_archive = _export(bare, base, base_tree)
-        head_archive = _export(bare, head, head_tree)
-        sides = [
+        base_archive = _export(bare, base, base_tree, paths=paths)
+        head_archive = _export(bare, head, head_tree, paths=paths)
+        before, after = (
             _run_side(
                 docker,
                 commit=commit,
@@ -441,13 +512,93 @@ def reproduce(
                 (base, base_tree, base_archive),
                 (head, head_tree, head_archive),
             )
-        ]
+        )
+    return image_id, before, after
+
+
+def reproduce(
+    *,
+    repository: Path,
+    base: str,
+    head: str,
+    image: str,
+    command: tuple[str, ...],
+    socket: Path = Path("/var/run/docker.sock"),
+    timeout: int = 60,
+    source: ReproductionSource | None = None,
+) -> ReproductionReceipt:
+    """Observe one command on two Git exports without mounting the host checkout."""
+    if source is not None and (source.base_sha, source.head_sha) != (base, head):
+        raise ValueError("The reproduction commits do not match the saved review run")
+    image_id, before, after = _compare_revisions(
+        repository=repository,
+        base=base,
+        head=head,
+        image=image,
+        command=command,
+        socket=socket,
+        timeout=timeout,
+    )
     return ReproductionReceipt(
         observed_at=datetime.now(UTC),
         image_id=image_id,
         command=command,
         timeout_seconds=timeout,
         source=source,
-        base=sides[0],
-        head=sides[1],
+        base=before,
+        head=after,
+    )
+
+
+def verify_fix(
+    *,
+    repository: Path,
+    source: ReproductionSource,
+    patch: bytes,
+    image: str,
+    command: tuple[str, ...],
+    socket: Path = Path("/var/run/docker.sock"),
+    timeout: int = 60,
+    paths: tuple[str, ...] = (),
+) -> FixVerificationReceipt:
+    """Compare the captured head with the same head plus a proposed text patch."""
+    if not 0 < len(patch) <= MAX_FIX_PATCH_BYTES or b"\0" in patch:
+        raise ValueError("Provide a Git text patch of at most 128 KiB")
+    try:
+        text = patch.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("The proposed patch must be UTF-8 text") from exc
+    if "GIT binary patch" in text.splitlines():
+        raise ValueError("The proposed patch must contain text changes")
+    if len(paths) > 32 or any(
+        len(path.encode()) > 1024
+        or path in ("", ".")
+        or not path.isprintable()
+        or PurePosixPath(path).is_absolute()
+        or ".." in PurePosixPath(path).parts
+        or str(PurePosixPath(path)) != path
+        for path in paths
+    ):
+        raise ValueError("Provide up to 32 relative Git paths, without parent traversal")
+    image_id, before, after = _compare_revisions(
+        repository=repository,
+        base=source.head_sha,
+        head=source.head_sha,
+        image=image,
+        command=command,
+        socket=socket,
+        timeout=timeout,
+        proposed_patch=patch,
+        paths=paths,
+    )
+    return FixVerificationReceipt(
+        observed_at=datetime.now(UTC),
+        image_id=image_id,
+        source=source,
+        proposed_patch_sha256=hashlib.sha256(patch).hexdigest(),
+        included_paths=paths,
+        command=command,
+        timeout_seconds=timeout,
+        before=before,
+        after=after,
     )
