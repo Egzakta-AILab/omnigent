@@ -1808,6 +1808,31 @@ class SqlStudioReviewRun(OmnigentBase):
     )
 
 
+class SqlStudioCreatorInstallation(OmnigentBase):
+    """Active selection for a single user's Creator panel in a project."""
+
+    __tablename__ = "studio_creator_installations"
+    workspace_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    project_id: Mapped[str] = mapped_column(Uuid16, primary_key=True)
+    actor_scope: Mapped[bytes] = mapped_column(_CKSUM32, primary_key=True)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    latest_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    selected_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
+
+
+class SqlStudioCreatorPackage(OmnigentBase):
+    """Immutable JSON package created by one reviewed installation action."""
+
+    __tablename__ = "studio_creator_packages"
+    workspace_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    project_id: Mapped[str] = mapped_column(Uuid16, primary_key=True)
+    actor_scope: Mapped[bytes] = mapped_column(_CKSUM32, primary_key=True)
+    version: Mapped[int] = mapped_column(Integer, primary_key=True)
+    digest: Mapped[bytes] = mapped_column(_CKSUM32, nullable=False)
+    definition_json: Mapped[str] = mapped_column(Text, nullable=False)
+
+
 class SqlStudioReviewPatchChunk(OmnigentBase):
     """Byte-bounded patch parts, joined only when reading a captured diff."""
 

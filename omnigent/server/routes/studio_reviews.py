@@ -61,6 +61,7 @@ from omnigent.stores import AgentStore, ConversationStore
 from omnigent.stores.artifact_store import ArtifactStore
 from omnigent.stores.permission_store import PermissionStore
 from omnigent.stores.project_store import ProjectStore
+from omnigent.stores.studio_creator_installation import CreatorInstallationConflict
 from omnigent.stores.studio_review_store import (
     ReviewConflictError,
     ReviewNotFoundError,
@@ -68,6 +69,9 @@ from omnigent.stores.studio_review_store import (
 )
 from omnigent.studio.creator_panel import (
     PANEL_BYTES,
+    CreatorActivationRequest,
+    CreatorInstallation,
+    CreatorInstallRequest,
     CreatorPanelContract,
     CreatorPanelPreview,
     ReviewPanelDefinition,
@@ -1722,6 +1726,71 @@ def create_studio_reviews_router(
             raise HTTPException(422, diagnostic) from exc
         response.headers["Cache-Control"] = "no-store"
         return preview
+
+    @router.get(
+        "/studio/review-runs/{run_id}/creator-installation", response_model=CreatorInstallation
+    )
+    async def get_creator_installation(
+        request: Request, response: Response, run_id: str
+    ) -> CreatorInstallation:
+        access = await creator_access(request, run_id)
+        try:
+            result = await asyncio.to_thread(
+                review_store.creator_installation,
+                access.run.id,
+                actor=access.actor,
+                owner=access.owner,
+            )
+        except ReviewNotFoundError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        response.headers["Cache-Control"] = "no-store"
+        return result
+
+    async def change_creator_installation(
+        access: DiscussionAccess,
+        response: Response,
+        change: CreatorInstallRequest | CreatorActivationRequest,
+    ) -> CreatorInstallation:
+        try:
+            result = await asyncio.to_thread(
+                review_store.change_creator_installation,
+                access.run.id,
+                change,
+                actor=access.actor,
+                owner=access.owner,
+            )
+        except CreatorInstallationConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except ReviewNotFoundError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        response.headers["Cache-Control"] = "no-store"
+        return result
+
+    @router.put(
+        "/studio/review-runs/{run_id}/creator-installation",
+        response_model=CreatorInstallation,
+        dependencies=_WRITE_GATES,
+        openapi_extra=_discussion_request_schema(CreatorInstallRequest),
+    )
+    async def install_creator_package(
+        request: Request, response: Response, run_id: str
+    ) -> CreatorInstallation:
+        access = await creator_access(request, run_id)
+        change = await _bounded_json(request, CreatorInstallRequest, limit=PANEL_BYTES + 1024)
+        return await change_creator_installation(access, response, change)
+
+    @router.patch(
+        "/studio/review-runs/{run_id}/creator-installation",
+        response_model=CreatorInstallation,
+        dependencies=_WRITE_GATES,
+        openapi_extra=_discussion_request_schema(CreatorActivationRequest),
+    )
+    async def activate_creator_package(
+        request: Request, response: Response, run_id: str
+    ) -> CreatorInstallation:
+        access = await creator_access(request, run_id)
+        change = await _bounded_json(request, CreatorActivationRequest, limit=1024)
+        return await change_creator_installation(access, response, change)
 
     @router.get("/studio/review-runs/{run_id}/discussion", response_model=ReviewDiscussionView)
     async def get_review_discussion(

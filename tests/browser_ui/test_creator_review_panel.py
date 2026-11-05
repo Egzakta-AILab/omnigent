@@ -6,7 +6,14 @@ import pytest
 from playwright.sync_api import Page, Route, expect
 from pydantic import ValidationError
 
-from omnigent.studio.creator_panel import compile_creator_panel, creator_panel_contract
+from omnigent.studio.creator_panel import (
+    CreatorInstallation,
+    ReviewPanelDefinition,
+    compile_creator_panel,
+    creator_panel_contract,
+    panel_capabilities,
+    panel_digest,
+)
 from tests.browser_ui.chat.session_contract import ChatSessionContract, chat_session_handle
 from tests.browser_ui.conftest import BrowserContract
 
@@ -149,6 +156,48 @@ def test_panel_opens_the_native_receipt_and_prefills_without_submitting(
         }
     ]
     contract.json(receipts_path, proof_data)
+    writes: list[dict] = []
+    if entry == "creator":
+        installation_path = f"{review_path}/creator-installation"
+        installation = CreatorInstallation().model_dump(mode="json")
+        definitions: dict[int, ReviewPanelDefinition] = {}
+
+        def respond_installation(route: Route) -> None:
+            if route.request.method == "GET":
+                route.fulfill(json=installation)
+                return
+            body = route.request.post_data_json
+            assert isinstance(body, dict)
+            writes.append(body)
+            if body["expected_revision"] != installation["revision"]:
+                route.fulfill(status=409, json={"detail": "Installation changed"})
+                return
+            if route.request.method == "PUT":
+                panel = ReviewPanelDefinition.model_validate(body["panel"])
+                version = len(definitions) + 1
+                definitions[version] = panel
+                installation["history"].insert(
+                    0,
+                    {
+                        "version": version,
+                        "digest": panel_digest(panel),
+                        "title": panel.title,
+                        "contract_version": panel.contract_version,
+                        "capabilities": panel_capabilities(panel),
+                    },
+                )
+            else:
+                version = body["version"]
+            installation["revision"] += 1
+            installation["enabled"] = version is not None
+            installation["active_panel"] = (
+                definitions[version].model_dump(mode="json") if version is not None else None
+            )
+            if version is not None:
+                installation["selected_version"] = version
+            route.fulfill(json=installation)
+
+        contract.route(f"{contract.base_url}{installation_path}", respond_installation)
     page.goto(f"{review_shell.base_url}/reviews/creator-fixture/discussion")
     if entry == "creator":
         path = f"{review_path}/creator-preview"
@@ -211,6 +260,37 @@ def test_panel_opens_the_native_receipt_and_prefills_without_submitting(
         preview.get_by_role("button", name="Open and discuss").click()
         expect(page.get_by_role("article").filter(has_text="sandbox:fixture")).to_be_focused()
         expect(page.get_by_label("Include check receipt")).to_have_value(receipt)
+        controls = page.get_by_role("region", name="Project panel installation")
+        enable = controls.get_by_role("button", name="Enable preview")
+        expect(enable).to_be_disabled()
+        controls.get_by_role("checkbox", name="Approve these capabilities").check()
+        enable.click()
+        installed = page.get_by_role("region", name="Installed Creator panel")
+        expect(installed.get_by_role("heading", name="QA checks", exact=True)).to_be_visible()
+        expect(preview).to_have_count(0)
+        page.reload()
+        expect(installed.get_by_role("heading", name="QA checks", exact=True)).to_be_visible()
+        page.get_by_text("Creator Mode", exact=True).click()
+        controls.get_by_role("button", name="Edit installed definition").click()
+        editor.fill(valid.replace("QA checks", "QA updated").replace("open_and_discuss", "open"))
+        build.click()
+        update = controls.get_by_role("button", name="Install update")
+        expect(update).to_be_disabled()
+        controls.get_by_role("checkbox", name="Approve these capabilities").check()
+        update.click()
+        expect(installed.get_by_role("heading", name="QA updated", exact=True)).to_be_visible()
+        expect(installed.get_by_role("button", name="Open proof", exact=True)).to_be_visible()
+        controls.get_by_label("Version history").select_option("1")
+        controls.get_by_role("checkbox", name="Approve these capabilities").check()
+        controls.get_by_role("button", name="Roll back to version 1").click()
+        expect(installed.get_by_role("heading", name="QA checks", exact=True)).to_be_visible()
+        expect(
+            installed.get_by_role("button", name="Open and discuss", exact=True)
+        ).to_be_visible()
+        controls.get_by_role("button", name="Disable panel").click()
+        expect(installed).to_have_count(0)
+        assert [action["expected_revision"] for action in writes] == [0, 1, 2, 3]
+        assert [len(action.get("approved_capabilities", [])) for action in writes] == [3, 2, 3, 0]
         return
     page.get_by_text("QA checks", exact=True).click()
     panel = page.frame_locator('iframe[title="QA checks"]')

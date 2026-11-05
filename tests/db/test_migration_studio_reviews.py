@@ -9,6 +9,8 @@ import sqlalchemy as sa
 from alembic import command
 
 from omnigent.db.db_models import (
+    SqlStudioCreatorInstallation,
+    SqlStudioCreatorPackage,
     SqlStudioFindingArtifact,
     SqlStudioInlineDraft,
     SqlStudioReviewCollaborator,
@@ -33,6 +35,7 @@ _INLINE_DELIVERY = "7a2594cfe931"
 _FINDING_ARTIFACTS = "ba9152e8d96f"
 _HOSTED_CHECKS = "b51ac8e4d231"
 _PUBLISHERS = "2ad8b1357c64"
+_CREATOR = "cee8b56c7a42"
 _TABLES = {"studio_review_passes", "studio_review_operations", "studio_review_events"}
 
 
@@ -82,6 +85,7 @@ def test_upgrade_and_downgrade_preserve_existing_database(tmp_path: Path) -> Non
         _migrate(uri, engine, "upgrade", _INLINE_DRAFTS)
         _migrate(uri, engine, "upgrade", _HOSTED_CHECKS)
         _migrate(uri, engine, "upgrade", _PUBLISHERS)
+        _migrate(uri, engine, "upgrade", _CREATOR)
         for model in (
             SqlStudioReviewPass,
             SqlStudioReviewOperation,
@@ -94,11 +98,31 @@ def test_upgrade_and_downgrade_preserve_existing_database(tmp_path: Path) -> Non
             SqlStudioReviewComment,
             SqlStudioInlineDraft,
             SqlStudioFindingArtifact,
+            SqlStudioCreatorInstallation,
+            SqlStudioCreatorPackage,
         ):
             inspected = sa.inspect(engine)
             actual = {c["name"] for c in inspected.get_columns(model.__tablename__)}
             assert actual == set(model.__table__.c.keys())
             assert inspected.get_foreign_keys(model.__tablename__) == []
+        creator_packages = SqlStudioCreatorPackage.__table__
+        with engine.begin() as connection:
+            connection.execute(
+                creator_packages.insert().values(
+                    workspace_id=0,
+                    project_id="a" * 32,
+                    actor_scope=b"a" * 32,
+                    version=1,
+                    digest=b"d" * 32,
+                    definition_json="{}",
+                )
+            )
+        with pytest.raises(RuntimeError, match="Creator panel packages exist"):
+            _migrate(uri, engine, "downgrade", _PUBLISHERS)
+        with engine.begin() as connection:
+            connection.execute(creator_packages.delete())
+        _migrate(uri, engine, "downgrade", _PUBLISHERS)
+        assert "studio_creator_packages" not in sa.inspect(engine).get_table_names()
         with engine.connect() as connection:
             assert connection.execute(
                 sa.text("SELECT source_session_id, source_project_id FROM studio_review_passes")

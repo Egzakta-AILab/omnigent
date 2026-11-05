@@ -75,6 +75,8 @@ links findings to their captured changes.
   receipt or preselects it in **Ask an agent** on the saved review.
 - `creator-preview`: Build and revise a data-only panel, then inspect the saved
   revision's checks and open the associated proof.
+- `creator-installation`: Enable an approved panel for your project, install
+  an update, select a prior version, or disable it while retaining history.
 
 ## How to get to it (user POV)
 
@@ -97,6 +99,8 @@ links findings to their captured changes.
 - `creator-preview`: On a saved review with the pilot enabled, expand
   **Creator Mode**, load the template or paste a definition, and build the
   preview.
+- `creator-installation`: In **Creator Mode → Project panel installation**,
+  approve and enable a built preview, or choose a version from history.
 
 A session with one PR opens its details directly. With multiple PRs, select a
 request from the list first; **All pull requests** returns to that list.
@@ -190,6 +194,10 @@ request outside the panel's grants.
 Its Creator variant rejects an invalid definition, builds a revision, marks
 edited source out of date, and opens and attaches the same proof without
 sending a question.
+It also exercises installation approval, reload, update, rollback and
+disablement. `tests/e2e/test_creator_installation_restart.py` verifies
+persistence, project scope and recovery from an incompatible package through
+real local server restarts.
 
 Render recovery has component coverage in
 `web/src/components/RenderErrorBoundary.test.tsx` and

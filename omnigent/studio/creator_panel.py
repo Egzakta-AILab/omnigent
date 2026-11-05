@@ -3,11 +3,13 @@
 import hashlib
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
+from omnigent.extensions.review_panel import ReviewCapability
 from omnigent.studio.reviews.models import ReviewRoleDigest, Sha
 
 PANEL_BYTES = 8 * 1024
+MAX_PANEL_VERSIONS = 32
 
 
 class ReviewPanelDefinition(BaseModel):
@@ -48,6 +50,53 @@ class CreatorPanelPreview(BaseModel):
     panel: ReviewPanelDefinition
 
 
+class CreatorPackageVersion(BaseModel):
+    version: int
+    digest: ReviewRoleDigest | None
+    title: str | None
+    contract_version: str | None
+    capabilities: tuple[ReviewCapability, ...] | None
+
+
+class CreatorInstallation(BaseModel):
+    revision: int = 0
+    enabled: bool = False
+    selected_version: int | None = None
+    active_panel: ReviewPanelDefinition | None = None
+    history: list[CreatorPackageVersion] = Field(default_factory=list)
+
+
+class CreatorActivationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    expected_revision: Annotated[int, Field(ge=0)]
+    version: Annotated[int, Field(ge=1, le=MAX_PANEL_VERSIONS)] | None
+    approved_capabilities: Annotated[tuple[ReviewCapability, ...], Field(max_length=3)] | None = (
+        None
+    )
+
+
+class CreatorInstallRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    expected_revision: Annotated[int, Field(ge=0)]
+    panel: ReviewPanelDefinition
+    digest: ReviewRoleDigest
+    approved_capabilities: Annotated[tuple[ReviewCapability, ...], Field(max_length=3)] | None = (
+        None
+    )
+
+
+def panel_digest(panel: ReviewPanelDefinition) -> str:
+    return hashlib.sha256(panel.model_dump_json().encode()).hexdigest()
+
+
+def panel_capabilities(panel: ReviewPanelDefinition) -> tuple[ReviewCapability, ...]:
+    if panel.proof_action == "open_and_discuss":
+        return ("review.read", "review.openProof", "review.attachProof")
+    return ("review.read", "review.openProof")
+
+
 def creator_panel_contract() -> CreatorPanelContract:
     return CreatorPanelContract(
         definition_schema=ReviewPanelDefinition.model_json_schema(),
@@ -65,6 +114,6 @@ def compile_creator_panel(
         run_id=run_id,
         base_sha=base_sha,
         head_sha=head_sha,
-        digest=hashlib.sha256(panel.model_dump_json().encode()).hexdigest(),
+        digest=panel_digest(panel),
         panel=panel,
     )
