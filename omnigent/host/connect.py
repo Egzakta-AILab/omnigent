@@ -4370,7 +4370,9 @@ class HostProcess:
             self._prewarm_model_options(), name="host-model-options-prewarm"
         )
 
-    async def _probed_codex_model_options(self) -> ModelOptionsResult | None:
+    async def _probed_codex_model_options(
+        self, *, refresh: bool = False
+    ) -> ModelOptionsResult | None:
         """
         Store-backed harness-truth Codex listing, or ``None`` on failure.
 
@@ -4380,10 +4382,14 @@ class HostProcess:
 
         :returns: The catalog listing, or ``None`` when unavailable.
         """
-        from omnigent.harnesses.codex_native.app_server import codex_launch_catalog
+        from omnigent.harnesses.codex_native.app_server import (
+            codex_launch_catalog,
+            codex_reprobed_launch_catalog,
+        )
 
+        catalog = codex_reprobed_launch_catalog if refresh else codex_launch_catalog
         try:
-            rows = await codex_launch_catalog()
+            rows = await catalog()
         except Exception:  # no catalog, never a crash
             _logger.warning("Codex model catalog unavailable", exc_info=True)
             return None
@@ -4392,7 +4398,9 @@ class HostProcess:
         routable = [row["id"] for row in rows if isinstance(row.get("id"), str) and row["id"]]
         return ModelOptionsResult(models=rows, routable_models=routable)
 
-    async def _probed_claude_model_options(self) -> ModelOptionsResult | None:
+    async def _probed_claude_model_options(
+        self, *, refresh: bool = False
+    ) -> ModelOptionsResult | None:
         """
         Store-backed harness-truth Claude listing, or ``None`` on failure.
 
@@ -4405,12 +4413,14 @@ class HostProcess:
         """
         from omnigent.harnesses.claude_native.main import (
             claude_launch_catalog,
+            claude_reprobed_launch_catalog,
             resolve_native_claude_config,
         )
 
         try:
             config = await asyncio.to_thread(resolve_native_claude_config, spec=None)
-            rows = await claude_launch_catalog(config)
+            catalog = claude_reprobed_launch_catalog if refresh else claude_launch_catalog
+            rows = await catalog(config)
         except Exception:  # no catalog, never a crash
             _logger.warning("Claude model catalog unavailable", exc_info=True)
             return None
@@ -4438,7 +4448,7 @@ class HostProcess:
             # shared catalog, probed from the configured Codex binary itself.
             # No curated fallback and no serving-endpoints listing — a probe
             # that cannot run is a failed lookup, not a successful empty catalog.
-            probed = await self._probed_codex_model_options()
+            probed = await self._probed_codex_model_options(refresh=frame.refresh)
             if probed is not None:
                 return HostModelOptionsResultFrame(
                     request_id=frame.request_id,
@@ -4471,6 +4481,25 @@ class HostProcess:
                 request_id=frame.request_id,
                 status="ok",
                 models=with_source(pi_models),
+            )
+
+        if harness == "cursor-native":
+            from omnigent.harnesses.cursor_native.main import list_cursor_cli_model_options
+
+            try:
+                cursor_models = await asyncio.to_thread(list_cursor_cli_model_options)
+            except Exception:
+                _logger.warning("Cursor model catalog unavailable", exc_info=True)
+                return HostModelOptionsResultFrame(
+                    request_id=frame.request_id,
+                    status="failed",
+                    error="the Cursor model probe failed — see the host log",
+                )
+            return HostModelOptionsResultFrame(
+                request_id=frame.request_id,
+                status="ok",
+                models=with_source([dict(model) for model in cursor_models]),
+                routable_models=[model["id"] for model in cursor_models],
             )
 
         if harness == "devin-native":
@@ -4567,7 +4596,7 @@ class HostProcess:
                 status="failed",
                 error=f"model options are unsupported for harness {frame.harness!r}",
             )
-        probed = await self._probed_claude_model_options()
+        probed = await self._probed_claude_model_options(refresh=frame.refresh)
         if probed is not None:
             return HostModelOptionsResultFrame(
                 request_id=frame.request_id,

@@ -20,6 +20,9 @@ import { apiErrorFromResponse } from "./sessionsApi";
  * and never acts on it, so adding a key here needs no backend change.
  */
 export interface ProjectConfig {
+  source_key?: string;
+  template_project_id?: string;
+  linear_issue?: { identifier: string; title: string; description: string; url: string };
   /** Default host id, or the sandbox sentinel. */
   host_id?: string;
   /** Default working directory / repo path on that host. */
@@ -111,11 +114,15 @@ export async function getProject(id: string): Promise<Project> {
  * Create a project, optionally with initial `config` defaults. Rejects with the
  * server's message on a duplicate name (409) so callers can surface it inline.
  */
-export async function createProject(name: string, config?: ProjectConfig): Promise<Project> {
+export async function createProject(
+  name: string,
+  config?: ProjectConfig,
+  template?: { template_project_id: unknown; source_key: unknown; linear_issue?: unknown },
+): Promise<Project> {
   const res = await authenticatedFetch("/v1/projects", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(config ? { name, config } : { name }),
+    body: JSON.stringify({ name, config, ...template }),
   });
   if (!res.ok) throw new Error(await readError(res));
   return (await res.json()) as Project;

@@ -2209,9 +2209,9 @@ describe("NewChatLandingScreen initial picker loading", () => {
   });
 
   it.each([
-    { harness: "cursor-native", label: "Cursor" },
-    { harness: "opencode-native", label: "OpenCode" },
-  ])("does not request unrelated model catalogs for $label", ({ harness, label }) => {
+    { harness: "cursor-native", label: "Cursor", hasCatalog: true },
+    { harness: "opencode-native", label: "OpenCode", hasCatalog: false },
+  ])("does not request unrelated model catalogs for $label", ({ harness, label, hasCatalog }) => {
     mockAgents([
       {
         id: "a_no_models",
@@ -2222,10 +2222,20 @@ describe("NewChatLandingScreen initial picker loading", () => {
         skills: [],
       },
     ]);
-    mockModelQueries(() => pendingModels);
+    mockModelQueries((queriedHarness) =>
+      queriedHarness === harness && hasCatalog
+        ? {
+            ...SUCCESS_QUERY_STATE,
+            data: [{ id: "fixture-cursor-model", displayName: "Cursor fixture", isDefault: true }],
+          }
+        : pendingModels,
+    );
     renderLanding();
 
     expect(expectReadyPicker()).toHaveAccessibleName(new RegExp(label));
+    expect(useHostModelOptionsMock.mock.calls.filter(([, , enabled]) => enabled)).toEqual(
+      hasCatalog ? expect.arrayContaining([["host_1", harness, true, { poll: false }]]) : [],
+    );
     expect(useHostModelOptionsMock).toHaveBeenCalledWith(
       "host_1",
       "claude-native",
@@ -8731,7 +8741,7 @@ describe("NewChatLandingScreen", () => {
     expect(new Headers(init.headers).get("X-Omnigent-Background-Session-Titles")).toBe("off");
   });
 
-  it("files a pre-selected project, and invalidates project sessions", async () => {
+  it("files a pre-selected issue and project, and invalidates project sessions", async () => {
     // Sequence: create POST → list projects (resolve name→id) → PATCH project_id.
     authenticatedFetchMock
       .mockResolvedValueOnce({ ok: true, json: async () => ({ id: "conv_new" }) } as Response)
@@ -8743,9 +8753,9 @@ describe("NewChatLandingScreen", () => {
     const invalidateSpy = vi.spyOn(QueryClient.prototype, "invalidateQueries");
     // A `?project=` landing (e.g. via the sidebar's per-project pencil) names the
     // project in the hero heading rather than a tray chip.
-    renderLanding({}, "/?project=docs");
+    renderLanding({}, "/?project=docs&issue=KVAD-1483");
 
-    await waitFor(() => expect(screen.getByText("docs")).toBeTruthy());
+    await screen.findByRole("heading", { level: 1, name: "docs" });
 
     fireEvent.change(screen.getByTestId("new-chat-landing-input"), {
       target: { value: "write the docs" },
@@ -8765,6 +8775,7 @@ describe("NewChatLandingScreen", () => {
       (authenticatedFetchMock.mock.calls[0][1] as RequestInit).body as string,
     ) as { labels?: Record<string, string> };
     expect(createBody.labels?.omni_project).toBe("docs");
+    expect(createBody.labels?.["omnigent.studio.issue"]).toBe("KVAD-1483");
     expect(authenticatedFetchMock.mock.calls[1][0]).toBe("/v1/projects");
     const [patchUrl, patchInit] = authenticatedFetchMock.mock.calls[2];
     expect(patchUrl).toBe("/v1/sessions/conv_new");
@@ -8795,7 +8806,7 @@ describe("NewChatLandingScreen", () => {
       .mockResolvedValue({ ok: true, json: async () => ({ id: "conv_new" }) } as Response);
     renderLanding({}, "/?project=Sprint%2042");
 
-    await waitFor(() => expect(screen.getByText("Sprint 42")).toBeTruthy());
+    await screen.findByRole("heading", { level: 1, name: "Sprint 42" });
 
     // Creating a session files it under that pre-filled project.
     fireEvent.change(screen.getByTestId("new-chat-landing-input"), {

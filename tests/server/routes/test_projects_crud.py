@@ -89,6 +89,65 @@ async def test_create_project(project_client: httpx.AsyncClient) -> None:
     assert body["updated_at"] is None
 
 
+async def test_template_project_inherits_only_session_defaults_and_reopens(multi_user_client):
+    path = "/v1/projects"
+    alice = _as_user(ALICE)
+    defaults = {"workspace": "/src/repo", "host_id": "host", "base_branch": "main"}
+    parent = await multi_user_client.post(
+        path, headers=alice, json={"name": "Parent", "config": {**defaults, "secret": "dummy"}}
+    )
+    template_id = parent.json()["id"]
+    issue = {
+        "identifier": "KVAD-1576",
+        "title": "Work and Task",
+        "description": "Show acceptance criteria",
+        "url": "https://linear.app/kvark/issue/KVAD-1576",
+    }
+    body = {
+        "name": "Work item",
+        "template_project_id": template_id,
+        "source_key": "linear:w:i",
+        "linear_issue": issue,
+    }
+    rejected = await multi_user_client.post(path, headers=_as_user(BOB), json=body)
+    assert rejected.status_code == 404
+    legacy = await multi_user_client.post(
+        path,
+        headers=alice,
+        json={key: value for key, value in body.items() if key != "linear_issue"},
+    )
+    assert legacy.is_success and "linear_issue" not in legacy.json()["config"]
+    responses = await asyncio.gather(
+        *(multi_user_client.post(path, headers=alice, json=body) for _ in range(2))
+    )
+    assert all(response.is_success for response in responses)
+    first, replay = (response.json() for response in responses)
+    assert first == replay
+    assert first["id"] == legacy.json()["id"]
+    assert first["config"] == {
+        **defaults,
+        "use_worktree": True,
+        "template_project_id": template_id,
+        "source_key": "linear:w:i",
+        "linear_issue": issue,
+    }
+    updated = await multi_user_client.patch(
+        f"{path}/{first['id']}", headers=alice, json={"config": {}}
+    )
+    assert updated.json()["config"] == {
+        "source_key": "linear:w:i",
+        "template_project_id": template_id,
+        "linear_issue": issue,
+    }
+    another_parent = await multi_user_client.post(
+        path, headers=alice, json={"name": "Another parent"}
+    )
+    reopened = await multi_user_client.post(
+        path, headers=alice, json={**body, "template_project_id": another_parent.json()["id"]}
+    )
+    assert reopened.json()["id"] == first["id"]
+
+
 async def test_create_trims_and_rejects_empty(project_client: httpx.AsyncClient) -> None:
     """Names are trimmed; empty/whitespace-only names are rejected with 422."""
     resp = await project_client.post("/v1/projects", json={"name": "  Padded  "})

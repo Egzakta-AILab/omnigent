@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { useQueries } from "@tanstack/react-query";
+import { useQueries, useQuery } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import {
   findingReproductionsKey,
+  getCreatorInstallation,
   listFindingReproductions,
   type CreatorPanelDefinition,
   type ReproductionSide,
@@ -41,7 +42,7 @@ export function CreatorPanelPreview({
   panel: CreatorPanelDefinition;
   discussion: ReviewDiscussion;
   viewerId: string | null;
-  onProof: ShowCreatorProof;
+  onProof?: ShowCreatorProof;
   label?: string;
   checkCurrent?: (signal: AbortSignal) => Promise<void>;
 }) {
@@ -90,7 +91,7 @@ export function CreatorPanelPreview({
   const attach = panel.proof_action === "open_and_discuss" && discussion.can_ask === true;
   const capability = attach ? "review.attachProof" : "review.openProof";
   async function activate(target: ReviewProofTarget) {
-    if (active.current) return;
+    if (active.current || !onProof) return;
     const controller = new AbortController();
     active.current = controller;
     setBusy(true);
@@ -99,8 +100,8 @@ export function CreatorPanelPreview({
       await checkCurrent?.(controller.signal);
       controller.signal.throwIfAborted();
       const methods = createReviewPanelMethods(discussion.id, [capability], {
-        openProof: (proof) => showProof.current(proof, false),
-        attachProof: (proof) => showProof.current(proof, true, true),
+        openProof: (proof) => showProof.current?.(proof, false) ?? false,
+        attachProof: (proof) => showProof.current?.(proof, true, true) ?? false,
       });
       await methods[capability](target, controller.signal);
     } catch (error) {
@@ -159,15 +160,17 @@ export function CreatorPanelPreview({
                     {digest.slice(0, 8)}
                   </p>
                 </div>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  disabled={busy}
-                  onClick={() => void activate({ findingKey: key, receiptDigest: digest })}
-                >
-                  {attach ? "Open and discuss" : "Open proof"}
-                </Button>
+                {onProof && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={busy}
+                    onClick={() => void activate({ findingKey: key, receiptDigest: digest })}
+                  >
+                    {attach ? "Open and discuss" : "Open proof"}
+                  </Button>
+                )}
               </li>
             ))}
           </ul>
@@ -198,5 +201,43 @@ export function CreatorPanelPreview({
         </div>
       )}
     </section>
+  );
+}
+
+export function InstalledCreatorReviewPanel({
+  discussion,
+  viewerId,
+  onProof,
+}: {
+  discussion: ReviewDiscussion;
+  viewerId: string | null;
+  onProof: ShowCreatorProof;
+}) {
+  const installation = useQuery({
+    queryKey: ["creator-installation", viewerId, discussion.id],
+    queryFn: ({ signal }) => getCreatorInstallation(discussion.id, signal),
+    retry: false,
+    gcTime: 0,
+    refetchInterval: 5000,
+  });
+  const installed = installation.isSuccess ? installation.data : undefined;
+  if (!installed?.active_panel) return null;
+
+  return (
+    <CreatorPanelPreview
+      key={installed.revision}
+      label="Installed Creator panel"
+      panel={installed.active_panel}
+      discussion={discussion}
+      viewerId={viewerId}
+      onProof={onProof}
+      checkCurrent={async (signal) => {
+        const latest = await getCreatorInstallation(discussion.id, signal);
+        if (!latest.active_panel || latest.revision !== installed.revision) {
+          void installation.refetch();
+          throw new Error("The installed panel changed. Open the current version.");
+        }
+      }}
+    />
   );
 }

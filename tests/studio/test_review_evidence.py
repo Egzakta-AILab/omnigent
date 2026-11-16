@@ -78,6 +78,36 @@ def test_rejected_citations_remain_visible_in_the_original_report():
     assert original.findings == [finding, wrong_side]
 
 
+def test_large_diff_question_keeps_numbered_focus_without_embedding_patch():
+    target = ReviewTarget(
+        source_project_id="1" * 32,
+        host_id="2" * 32,
+        workspace="/workspace",
+        repository_path="nested/project",
+        pr_url="https://github.com/example/project/pull/3",
+        repository="example/project",
+        pr_number=3,
+        base_sha="a" * 40,
+        head_sha="b" * 40,
+    )
+    question = AskReviewQuestion(
+        id="4" * 32,
+        agent_id="5" * 32,
+        anchor=DiffDiscussionAnchor(kind="diff", path="app.py", side="head", start=1, end=1),
+        body="What changed?",
+    )
+    patch = (
+        "diff --git a/bulk b/bulk\n--- /dev/null\n+++ b/bulk\n@@ -0,0 +1,2000 @@\n"
+        + "+bulk line with no relevance to the selected line\n" * 2000
+        + "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-old\n+new\n"
+    )
+    prompt = question_prompt(question, target, patch, None)
+    assert "read-only tools" in prompt
+    assert "bulk line" not in prompt
+    assert '"line": 1, "text": "new"' in prompt
+    assert target.head_sha in prompt and target.base_sha in prompt
+
+
 def test_selected_check_adds_bounded_revision_results_to_question():
     target = ReviewTarget.model_validate(
         {

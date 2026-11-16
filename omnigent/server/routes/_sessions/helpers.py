@@ -320,6 +320,7 @@ from omnigent.server.schemas import (
     ToolOutputDeltaEvent,
 )
 from omnigent.server.session_metadata_logging import harness_attributes
+from omnigent.server.session_orchestration import require_session_delegation
 from omnigent.server.startup_inputs import ManagedStartupInputs, StartupInputContext
 from omnigent.spec.types import (
     AgentSpec,
@@ -11698,6 +11699,7 @@ async def _authorize_bundled_parent_and_inherit_runner(
     )
     if parent_conv is None:
         return None, None
+    require_session_delegation(parent_conv)
     inherited_runner_id = parent_conv.runner_id
     if inherited_runner_id is not None and user_id is not None and runner_router is not None:
         runner_owner = runner_router.runner_owner(inherited_runner_id)

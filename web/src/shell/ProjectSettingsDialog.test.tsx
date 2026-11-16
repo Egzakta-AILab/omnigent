@@ -48,6 +48,7 @@ vi.mock("@/lib/CapabilitiesContext", () => ({
     managed_sandboxes_enabled: false,
     sandbox_provider: null,
     studio_workspace_settings: true,
+    studio_reviews: true,
   }),
 }));
 vi.mock("@/studio/RepositorySettingsDialog", () => ({

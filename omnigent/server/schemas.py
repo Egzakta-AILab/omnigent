@@ -6437,6 +6437,24 @@ class CreateProjectRequest(BaseModel):
 
     name: str
     config: dict[str, Any] = Field(default_factory=dict)
+    template_project_id: Annotated[str, Field(pattern=r"^[0-9a-f]{32}$")] | None = None
+    linear_issue: dict[str, str] | None = None
+    source_key: Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9._:-]{1,159}$")] | None = None
+
+    @model_validator(mode="after")
+    def validate_template(self) -> Self:
+        if self.linear_issue is not None and (
+            not self.source_key
+            or not self.source_key.startswith("linear:")
+            or set(self.linear_issue) != {"identifier", "title", "description", "url"}
+            or any(len(value) > 16384 for value in self.linear_issue.values())
+        ):
+            raise ValueError("Invalid Linear issue details")
+        if self.source_key and not self.template_project_id:
+            raise ValueError("A source key requires a template project")
+        if self.template_project_id and self.config:
+            raise ValueError("Template projects inherit their initial settings")
+        return self
 
     @field_validator("name")
     @classmethod

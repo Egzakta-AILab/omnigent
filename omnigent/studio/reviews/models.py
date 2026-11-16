@@ -197,10 +197,28 @@ MAX_RUN_REVIEWERS = 16
 ReviewRunRole = Literal["coordinator", "candidate", "required"]
 
 
+AssignmentText = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=240)
+]
+
+
+class ReviewerAssignment(FrozenModel):
+    objective: AssignmentText
+    acceptance_criterion: AssignmentText | None = None
+    expected_evidence: AssignmentText
+
+
 class ReviewerDecision(FrozenModel):
     review_id: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{32}$")]
     selected: bool = Field(strict=True)
     reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=160)]
+    assignment: ReviewerAssignment | None = None
+
+    @model_validator(mode="after")
+    def validate_assignment(self) -> ReviewerDecision:
+        if not self.selected and self.assignment is not None:
+            raise ValueError("Only selected reviewers can receive an assignment")
+        return self
 
     @field_validator("reason")
     @classmethod

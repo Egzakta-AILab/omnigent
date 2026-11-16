@@ -1,3 +1,4 @@
+import { ReadableMarkdown } from "@/components/ReadableMarkdown";
 import type { ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ExternalLinkIcon } from "lucide-react";
@@ -84,9 +85,9 @@ export function FindingCard({
         </Badge>
         <h4 className="min-w-0 font-medium [overflow-wrap:anywhere]">{finding.title}</h4>
       </div>
-      <p className="text-muted-foreground whitespace-pre-wrap [overflow-wrap:anywhere]">
+      <ReadableMarkdown className="text-muted-foreground text-sm">
         {finding.detail}
-      </p>
+      </ReadableMarkdown>
       <p className="font-mono text-xs text-muted-foreground [overflow-wrap:anywhere]">
         {finding.path}:{finding.line} · {finding.side === "base" ? "Base" : "Head"}
       </p>
@@ -147,10 +148,12 @@ export function ReviewResult({
   headRepoUrl,
   onOpenSource,
   standalone = false,
+  renderFindingActions,
 }: {
   review: ReviewPass;
   active: boolean;
   standalone?: boolean;
+  renderFindingActions?: (finding: ReviewFinding) => ReactNode;
   viewerId: string | null;
   current: boolean;
   headRepoUrl?: string | null;
@@ -201,7 +204,7 @@ export function ReviewResult({
       ) : ready ? (
         <>
           {report.data?.summary && (
-            <p className="whitespace-pre-wrap [overflow-wrap:anywhere]">{report.data.summary}</p>
+            <ReadableMarkdown className="text-sm">{report.data.summary}</ReadableMarkdown>
           )}
           {standalone && <h3 className="font-medium">Findings ({findings.size})</h3>}
           {report.data?.citation_validation === "unavailable" && (
@@ -217,7 +220,9 @@ export function ReviewResult({
                   current={current}
                   headRepoUrl={headRepoUrl}
                   onOpenSource={onOpenSource}
-                />
+                >
+                  {renderFindingActions?.(finding)}
+                </FindingCard>
               ))}
             </ol>
           ) : (

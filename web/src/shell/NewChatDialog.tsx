@@ -27,6 +27,7 @@ import {
 import { Link, useLocation, useNavigate, useReplaceSearchParams, useSearchParams } from "@/lib/routing";
 import { useViewerId } from "@/hooks/useViewerId";
 import { readCreatorAuthoringDraft } from "@/lib/creatorAuthoringDraft";
+import { STUDIO_ISSUE_LABEL, linearIssueKey } from "@/lib/studioIssue";
 import { MAIN_CANVAS_ID } from "@/canvas/canvasLayout";
 import { CANVAS_QUERY_PARAM, canvasLocation } from "@/canvas/canvasNavigation";
 import { MobileHeaderControlPortal } from "./MobileHeaderControlsSlot";
@@ -2418,6 +2419,8 @@ function NewChatLandingContent({
   // Project driving this visit, when the sidebar's per-project "new session"
   // pencil landed here with a `?project=` query param. Empty otherwise.
   const projectParam = searchParams.get("project") ?? "";
+  const issueKey = linearIssueKey(searchParams.get("issue") ?? "");
+  const taskWorktreeRequested = !!issueKey && searchParams.get("taskWorktree") === "1";
   const [cacheUser, setCacheUser] = useState(getCurrentUserId);
   useEffect(() => {
     if (cacheUser !== null) return;
@@ -3647,6 +3650,13 @@ function NewChatLandingContent({
     canLoadHostModels("pi-native"),
     { poll: selectedNativeHarness === "pi-native" },
   );
+  const {
+    data: hostCursorModelOptions,
+    isLoading: hostCursorModelsLoading,
+    error: hostCursorModelsError,
+  } = useHostModelOptions(selectedHostId, "cursor-native", canLoadHostModels("cursor-native"), {
+    poll: false,
+  });
   // Keep this host's cached choices while requests wait for readiness.
   // A fetched catalog, including an empty one, takes precedence.
   const cachedHostModels =
@@ -4039,7 +4049,16 @@ function NewChatLandingContent({
     if (supportsCursorMode) {
       const modeValue =
         CURSOR_NATIVE_EXEC_MODES.find((m) => m.value === cursorExecMode)?.label ?? cursorExecMode;
-      return [{ label: "Mode", value: modeValue }, ...routingRow];
+      return [
+        {
+          label: "Model",
+          value:
+            hostCursorModelOptions?.find((option) => option.id === pickedModel)?.displayName ??
+            defaultModelLabel(hostCursorModelOptions ?? []),
+        },
+        { label: "Mode", value: modeValue },
+        ...routingRow,
+      ];
     }
     if (supportsAgySkipPermissions) {
       const skipValue =
@@ -4065,6 +4084,7 @@ function NewChatLandingContent({
     supportsPermissionMode,
     supportsApprovalMode,
     supportsCursorMode,
+    hostCursorModelOptions,
     supportsAgySkipPermissions,
     supportsDevinPermission,
     devinPermissionMode,
@@ -4105,7 +4125,9 @@ function NewChatLandingContent({
           ? piModelOptions
           : selectedNativeHarness === "codex-native"
             ? codexModelOptions
-            : [];
+            : supportsCursorMode
+              ? (hostCursorModelOptions ?? [])
+              : [];
   const pickerModelsLoading =
     sandboxCatalogPending ||
     (!sandboxSelected &&
@@ -4118,7 +4140,7 @@ function NewChatLandingContent({
             ? hostPiModelsLoading
             : selectedNativeHarness === "devin-native"
               ? hostDevinModelsLoading
-              : false));
+              : supportsCursorMode && hostCursorModelsLoading));
   const pickerModelsError = sandboxSelected
     ? sandboxCatalogError || sandboxDefaultCatalogError
       ? new Error((sandboxCatalogError ?? sandboxDefaultCatalogError)!)
@@ -4129,7 +4151,9 @@ function NewChatLandingContent({
         ? hostCodexModelsError
         : selectedNativeHarness === "devin-native"
           ? hostDevinModelsError
-          : null;
+          : supportsCursorMode
+            ? hostCursorModelsError
+            : null;
   const modelCatalogLookupEnabled = sandboxSelected
     ? sandboxPreviewEnabled && sandboxInferenceConfigured
     : selectedNativeHarness !== null && canLoadHostModels(selectedNativeHarness);
@@ -4384,6 +4408,7 @@ function NewChatLandingContent({
     supportsModelPicker ||
     supportsPermissionMode ||
     supportsDevinMode ||
+    supportsCursorMode ||
     selectedNativeHarness === "codex-native"
       ? {
           testId: "new-chat-landing-agent-models",
@@ -4568,6 +4593,7 @@ function NewChatLandingContent({
     "codex-native": availableCodexModels,
     "pi-native": availablePiModels,
     "devin-native": hostDevinModelOptions,
+    "cursor-native": hostCursorModelOptions,
   };
   const pickerEntrySummaries = Object.fromEntries(
     [...harnessEntries, ...agentEntries].map((agent) => {
@@ -5134,6 +5160,11 @@ function NewChatLandingContent({
     resolved: !hostWorktreesArePlaceholder && hostWorktrees !== undefined,
   });
   const workspaceIsGit = verifiedGitWorktrees.length > 0;
+  const mainCheckout = verifiedGitWorktrees.find((worktree) => worktree.is_main)?.path;
+  const plannedTaskWorktree =
+    mainCheckout && branchName.trim()
+      ? `${mainCheckout.replace(/\/$/, "")}-worktrees/${branchName.trim().replaceAll("/", "-")}`
+      : null;
   const workspaceIsNonGit =
     worktreesEnabled && !hostWorktreesArePlaceholder && hostWorktrees?.length === 0;
 
@@ -5706,6 +5737,9 @@ function NewChatLandingContent({
   const projectLanding = projectParam !== "" && selectedProject === projectParam;
   const [collapsedProject, setCollapsedProject] = useState<string | null>(null);
   const showProjectWorkspace = projectLanding && collapsedProject !== projectParam;
+  const [mobileWorkspaceLocation, setMobileWorkspaceLocation] = useState<string | null>(null);
+  const mobileWorkspaceOpen = mobileWorkspaceLocation === location.key;
+  const closeMobileWorkspace = () => setMobileWorkspaceLocation(null);
   const projectWorkspaceScope = JSON.stringify([
     projectParam,
     configProjectId,
@@ -5824,6 +5858,16 @@ function NewChatLandingContent({
       if (!selectedHostId || !workspaceValid) {
         return { field: "other", message: "Please choose a host and working directory" };
       }
+    }
+    if (
+      taskWorktreeRequested &&
+      selectedProject === projectParam &&
+      (sandboxSelected || !shouldCreateWorktree)
+    ) {
+      return {
+        field: "other",
+        message: "Choose a connected host, a Git repository, and a branch for a new task worktree.",
+      };
     }
     if (configuredAgentUnavailable && selectedAgent == null) {
       return {
@@ -6373,7 +6417,8 @@ function NewChatLandingContent({
         (sandboxHasModelCatalog ||
           agentSupportsModelPicker ||
           nativeAgent?.harness === "codex-native" ||
-          nativeAgent?.harness === "devin-native") &&
+          nativeAgent?.harness === "devin-native" ||
+          agentSupportsCursorMode) &&
         submittedModel
           ? submittedModel
           : null;
@@ -6424,6 +6469,9 @@ function NewChatLandingContent({
       // survives reload.
       const baseLabels = {
         ...(nativeLabels ?? {}),
+        ...(issueKey && selectedProject && selectedProject === projectParam
+          ? { [STUDIO_ISSUE_LABEL]: issueKey }
+          : {}),
         ...(agentSupportsApprovalMode && bypassSandbox
           ? { [CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY]: "1" }
           : {}),
@@ -7480,11 +7528,24 @@ function NewChatLandingContent({
       className={cn(
         "relative flex min-h-0 flex-1",
         showProjectWorkspace
-          ? "flex-col-reverse lg:flex-row"
+          ? "flex-col max-md:pt-14 md:max-lg:pt-12 lg:flex-row"
           : "items-stretch justify-center md:items-center md:pb-24",
       )}
       data-testid="new-chat-landing"
     >
+      {taskWorktreeRequested && selectedProject === projectParam && (
+        <div className="absolute inset-x-0 top-0 z-10 mx-auto max-w-2xl px-4 text-xs text-muted-foreground">
+          <p className="break-all">
+            {issueKey} · {selectedHostDisplayName ?? "Choose a host"} ·{" "}
+            {workspaceTrimmed || "Choose a Git repository"}
+          </p>
+          <p className="break-all">
+            {branchName.trim()
+              ? `Branch ${branchName.trim()} · ${plannedTaskWorktree ?? "New worktree beside the repository"} (the host adds a suffix if needed)`
+              : "Choose a branch for a new worktree"}
+          </p>
+        </div>
+      )}
       {/* Padding lives inside the 800px cap, so the composer surface reaches
           its shared 48rem column (800 − 32 = 768px) on desktop. px-4 (16px
           gutters) keeps the composer from feeling cramped against the
@@ -7492,17 +7553,13 @@ function NewChatLandingContent({
       <div
         className={cn(
           "flex min-h-0 min-w-0 w-full flex-col items-center px-4 pb-[max(20px,env(safe-area-inset-bottom))] md:pb-16 md:select-none",
-          showProjectWorkspace ? "pt-2 lg:flex-1 lg:justify-center lg:pt-8" : "max-w-[800px] pt-8",
+          showProjectWorkspace ? "flex-1 pt-2 md:justify-center lg:pt-8" : "max-w-[800px] pt-8",
+          showProjectWorkspace && mobileWorkspaceOpen && "max-lg:hidden",
         )}
       >
         {/* On phones the heading yields its height first, so a long draft cannot
             push Send below the keyboard. */}
-        <div
-          className={cn(
-            "mb-6 flex w-full flex-1 flex-col items-center justify-center gap-3.5 max-md:min-h-0 max-md:overflow-hidden md:flex-none",
-            showProjectWorkspace && "max-lg:sr-only",
-          )}
-        >
+        <div className="mb-6 flex w-full flex-1 flex-col items-center justify-center gap-3.5 max-md:min-h-0 max-md:overflow-hidden md:flex-none">
           {selectedProject ? (
             // Landing inside a project: swap Otto's eyes for the project's
             // icon — the default pink folder, or a chosen emoji — and name the
@@ -7568,6 +7625,16 @@ function NewChatLandingContent({
           )}
           data-testid="new-chat-landing-composer-surface"
         >
+          {showProjectWorkspace && (
+            <Button
+              type="button"
+              variant="ghost"
+              className="mobile-touch-target mb-1 self-end text-muted-foreground lg:hidden"
+              onClick={() => setMobileWorkspaceLocation(location.key)}
+            >
+              <FolderOpenIcon /> Workspace
+            </Button>
+          )}
           {creatorDraft && (
             <div className="mb-3 space-y-1 rounded-md border px-3 py-2 text-sm">
               <p className="font-medium">Creator authoring draft</p>
@@ -8546,9 +8613,13 @@ function NewChatLandingContent({
 
       {showProjectWorkspace && (
         <ProjectWorkspace
-          key={projectWorkspaceScope}
+          key={projectParam}
+          scope={projectWorkspaceScope}
           projectId={configProjectId}
           target={projectWorkspaceTarget}
+          projectName={selectedProject}
+          mobileOpen={mobileWorkspaceOpen}
+          onBackToChat={closeMobileWorkspace}
           loading={workspaceStartLoading}
           agents={agentList.map((agent) => ({
             id: agent.id,
@@ -8557,13 +8628,20 @@ function NewChatLandingContent({
           agentId={effectiveAgentId}
           onSelectAgent={(id) => {
             const agent = agentList.find((candidate) => candidate.id === id);
-            if (agent) handleSelectAgent(agent);
+            if (agent) {
+              handleSelectAgent(agent);
+              closeMobileWorkspace();
+            }
           }}
           onAddFile={(path) => {
             const paths = activeContext?.files ?? [];
             if (!paths.includes(path)) updateWorkspaceContext({ files: [...paths, path] });
+            closeMobileWorkspace();
           }}
-          onAddPullRequest={(pullRequest) => updateWorkspaceContext({ pullRequest })}
+          onAddPullRequest={(pullRequest) => {
+            updateWorkspaceContext({ pullRequest });
+            closeMobileWorkspace();
+          }}
           onReviewStarted={(sessionId) =>
             navigate(`/c/${encodeURIComponent(sessionId)}?view=review`)
           }

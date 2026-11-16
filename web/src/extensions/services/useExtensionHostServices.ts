@@ -1,7 +1,7 @@
 import { useMemo, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useResolvedThemeMode } from "@/components/theme/useResolvedThemeMode";
-import { resolveIdentity } from "@/lib/identity";
+import { authenticatedFetch, resolveIdentity } from "@/lib/identity";
 import { getOmnigentServerIdentity } from "@/lib/host";
 import { fetchPullRequestInfo, type PullRequest } from "@/hooks/usePullRequests";
 import {
@@ -12,6 +12,9 @@ import {
 } from "@/hooks/useSessionPullRequests";
 import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { RunnerOfflineError } from "@/hooks/useWorkspaceChangedFiles";
+import { fetchProjectSessionsPage } from "@/hooks/useConversations";
+import { listProjects } from "@/lib/projectsApi";
+import { isImplementationSession, issueWorkspaceUrl, linearIssueKey } from "@/lib/studioIssue";
 import { useNavigate } from "@/lib/routing";
 import type { ExtensionCatalogItem, ExtensionPullRequest } from "../types";
 import { ExtensionHostServiceError } from "./errors";
@@ -133,9 +136,16 @@ export function useExtensionHostServices(extension: ExtensionCatalogItem) {
       },
       "navigation.openNewSession": async (params: unknown, signal: AbortSignal) => {
         throwIfAborted(signal);
-        const projectId = params === undefined ? undefined : objectParams(params).projectId;
+        const { projectId, prompt, issue } = params === undefined ? {} : objectParams(params);
+        if (prompt !== undefined && (typeof prompt !== "string" || prompt.length > 1000)) {
+          throw new ExtensionHostServiceError("InvalidParams", "Initial prompt is invalid");
+        }
+        const promptQuery =
+          typeof prompt === "string" && prompt.trim()
+            ? `prompt=${encodeURIComponent(prompt.trim())}`
+            : "";
         if (projectId === undefined || projectId === null) {
-          navigate("/");
+          navigate(promptQuery ? `/?${promptQuery}` : "/");
           return null;
         }
         if (typeof projectId !== "string" || !projectId || projectId.length > 256) {
@@ -145,7 +155,18 @@ export function useExtensionHostServices(extension: ExtensionCatalogItem) {
         const project = (await listProjectSummaries()).find((item) => item.id === projectId);
         throwIfAborted(signal);
         if (!project) throw new ExtensionHostServiceError("InvalidParams", "Project not found");
-        navigate({ pathname: "/", search: `?project=${encodeURIComponent(project.name)}` });
+        if (issue !== undefined) {
+          const key = typeof issue === "string" ? linearIssueKey(issue) : null;
+          if (!key || extension.id !== "egzakta.linear") {
+            throw new ExtensionHostServiceError("InvalidParams", "Linear issue is invalid");
+          }
+          navigate(issueWorkspaceUrl(project.name, key));
+          return null;
+        }
+        navigate({
+          pathname: "/",
+          search: `?project=${encodeURIComponent(project.name)}${promptQuery ? `&${promptQuery}` : ""}`,
+        });
         return null;
       },
       "theme.getCurrent": (_params: unknown, signal: AbortSignal) => {
@@ -231,12 +252,83 @@ export function useExtensionHostServices(extension: ExtensionCatalogItem) {
       },
       "projects.create": async (params: unknown, signal: AbortSignal) => {
         const name = parseCreateProjectParams(params);
+        const { templateProjectId, sourceKey, linearIssue } = objectParams(params);
         throwIfAborted(signal);
-        const project = await createProjectSummary(name);
+        const template =
+          templateProjectId === undefined && sourceKey === undefined
+            ? undefined
+            : {
+                template_project_id: templateProjectId,
+                source_key: sourceKey,
+                ...(extension.id === "egzakta.linear" ? { linear_issue: linearIssue } : {}),
+              };
+        const project = await createProjectSummary(name, template);
         // The sidebar caches its project list; refresh it so the new project shows there too.
         void queryClient.invalidateQueries({ queryKey: ["projects"] });
         return project;
       },
+      ...(extension.id === "egzakta.linear"
+        ? {
+            "linear.findTask": async (params: unknown, signal: AbortSignal) => {
+              const { sourceKey, issue } = objectParams(params);
+              const key = typeof issue === "string" ? linearIssueKey(issue) : null;
+              if (
+                !key ||
+                typeof sourceKey !== "string" ||
+                !/^linear:[a-z0-9-]+:[a-z0-9-]+$/.test(sourceKey)
+              ) {
+                throw new ExtensionHostServiceError("InvalidParams", "Linear task is invalid");
+              }
+              throwIfAborted(signal);
+              const project = (await listProjects()).find(
+                (item) => item.config?.source_key === sourceKey,
+              );
+              throwIfAborted(signal);
+              if (!project) return null;
+              const task = {
+                projectId: project.id,
+                snapshotTemplateId: project.config?.linear_issue
+                  ? undefined
+                  : project.config?.template_project_id,
+              };
+              let after: string | undefined;
+              do {
+                // The cursor is only available after reading the preceding page.
+                // eslint-disable-next-line no-await-in-loop
+                const page = await fetchProjectSessionsPage(
+                  project.name,
+                  after,
+                  20,
+                  "updated_at",
+                  false,
+                  signal,
+                );
+                const session = page.data.find((item) => isImplementationSession(item.labels, key));
+                if (session) return { ...task, sessionId: session.id };
+                after = page.has_more ? (page.last_id ?? undefined) : undefined;
+              } while (after);
+              return { ...task, sessionId: null };
+            },
+            "linear.read": async (params: unknown, signal: AbortSignal) => {
+              const { token, team, issue, after, search, assignee } = objectParams(params);
+              throwIfAborted(signal);
+              const response = await authenticatedFetch("/v1/extensions/egzakta.linear/read", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ token, team, issue, after, search, assignee }),
+                signal,
+              });
+              if (!response.ok) {
+                const error = await response.json().catch(() => ({}));
+                throw new ExtensionHostServiceError(
+                  "HostError",
+                  typeof error.detail === "string" ? error.detail : "Linear request failed",
+                );
+              }
+              return response.json();
+            },
+          }
+        : {}),
     };
     return grantedHostMethods(extension, implementations);
   }, [

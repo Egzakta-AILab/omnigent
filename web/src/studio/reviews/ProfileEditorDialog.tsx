@@ -16,6 +16,8 @@ import {
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { useHostModelOptions } from "@/hooks/useHosts";
+import { reviewModelLabels } from "./reviewModelLabels";
+import { ReviewModelRefresh } from "./ReviewModelRefresh";
 import { useViewerId } from "@/hooks/useViewerId";
 import { ApiError } from "@/lib/sessionsApi";
 import { cn } from "@/lib/utils";
@@ -65,6 +67,7 @@ function ProfileDefaults({
     poll: false,
   });
   const models = modelCatalog.data ?? [];
+  const { defaultModelLabel, defaultEffortLabel } = reviewModelLabels(models, model ?? "");
   const efforts = nativeEffortOptions(harness, models, model) ?? [];
   const hasSavedModel = !!model && !models.some((item) => item.id === model);
   const hasSavedEffort = !!effort && !efforts.some((item) => item.value === effort);
@@ -100,7 +103,7 @@ function ProfileDefaults({
               update({ defaults: { harness, model: event.target.value || null } })
             }
           >
-            <option value="">Harness default</option>
+            <option value="">{defaultModelLabel}</option>
             {hasSavedModel && <option value={model}>{model} (saved)</option>}
             {models.map((item) => (
               <option key={item.id} value={item.id}>
@@ -119,7 +122,7 @@ function ProfileDefaults({
               update({ defaults: { harness, model, reasoning_effort: event.target.value || null } })
             }
           >
-            <option value="">Harness default</option>
+            <option value="">{defaultEffortLabel}</option>
             {hasSavedEffort && <option value={effort}>{effort} (saved)</option>}
             {efforts.map((item) => (
               <option key={item.value} value={item.value}>
@@ -129,18 +132,14 @@ function ProfileDefaults({
           </select>
         </label>
       </div>
-      {harness && modelCatalog.isError && (
-        <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-          <span>Couldn’t load models for this host.</span>
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            onClick={() => void modelCatalog.refetch()}
-          >
-            Reload models
-          </Button>
-        </div>
+      {harness && hostId && (
+        <ReviewModelRefresh
+          key={JSON.stringify([hostId, harness])}
+          hostId={hostId}
+          harness={harness}
+          loading={modelCatalog.isFetching}
+          loadError={modelCatalog.isError}
+        />
       )}
     </fieldset>
   );

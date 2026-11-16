@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type Ref } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { triggerBrowserDownload } from "@/hooks/useFileContent";
@@ -16,7 +16,7 @@ function anchorLabel({ path, start, end, side }: InlineDraft["anchor"]) {
   return `${path}:${start}${start === end ? "" : `–${end}`} · ${side === "base" ? "Base" : "Head"}`;
 }
 
-function CheckDelivery({
+export function CheckDelivery({
   runId,
   draft,
   refresh,
@@ -60,11 +60,14 @@ export function InlinePublication({
   runId,
   drafts,
   refresh,
+  sectionRef,
 }: {
   runId: string;
   drafts: InlineDraft[];
+  sectionRef: Ref<HTMLElement>;
   refresh: () => Promise<void>;
 }) {
+  const hasDrafts = drafts.some((draft) => (draft.publication_state ?? "draft") === "draft");
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const selected = drafts.filter(
     (draft) =>
@@ -91,13 +94,20 @@ export function InlinePublication({
   );
 
   return (
-    <section aria-label="Publish inline drafts" className="space-y-3 rounded-md border p-3">
+    <section
+      ref={sectionRef}
+      tabIndex={-1}
+      aria-label="Publish inline drafts"
+      className="space-y-3 rounded-md border p-3"
+    >
       <div>
         <h2 className="font-medium">Publish inline drafts</h2>
-        <p className="text-sm text-muted-foreground">
-          Select up to {MAX_SELECTED} drafts. Each is posted as a separate line comment using the
-          review workspace’s configured account.
-        </p>
+        {hasDrafts && (
+          <p className="text-sm text-muted-foreground">
+            Select up to {MAX_SELECTED} drafts. Each is posted as a separate line comment using the
+            review workspace’s configured account.
+          </p>
+        )}
       </div>
       <ul className="divide-y text-sm">
         {drafts.map((draft) => {
@@ -228,7 +238,7 @@ export function InlinePublication({
             </Button>
           </div>
         </div>
-      ) : (
+      ) : hasDrafts ? (
         <Button
           size="sm"
           variant="outline"
@@ -240,7 +250,7 @@ export function InlinePublication({
         >
           {preview.isPending ? "Checking pull request…" : "Preview selected"}
         </Button>
-      )}
+      ) : null}
       {error && (
         <p role="alert" className="text-sm text-destructive">
           {error.message}

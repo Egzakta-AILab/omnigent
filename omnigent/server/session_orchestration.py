@@ -161,6 +161,17 @@ def require_named_source_private(
     require_private_bound_source(request, user_id, conversations, permissions)
 
 
+def require_session_delegation(source: Conversation) -> None:
+    if (
+        source.labels.get("omnigent.studio.review") == "true"
+        and source.git_branch == f"studio-review/{source.id}"
+    ):
+        raise OmnigentError(
+            "Task reviewers run in a single session. Use Studio to request another review.",
+            code=ErrorCode.FORBIDDEN,
+        )
+
+
 def require_orchestration_source(
     request: Request,
     user_id: str | None,
@@ -179,6 +190,7 @@ def require_orchestration_source(
     if not user_id or permissions is None:
         raise OmnigentError("Session orchestration requires ownership", code=ErrorCode.FORBIDDEN)
     source = require_private_bound_source(request, user_id, conversations, permissions)
+    require_session_delegation(source)
     if target_id is not None:
         target = require_owned_session(target_id, user_id, conversations, permissions)
         if source.id == target.id:

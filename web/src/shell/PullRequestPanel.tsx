@@ -24,6 +24,10 @@
 // PR each render their own empty state, and an associated PR falls through to
 // the header + stacked diff.
 
+import { useViewerId } from "@/hooks/useViewerId";
+import { getProject } from "@/lib/projectsApi";
+import { useSession } from "@/hooks/useSession";
+import { STUDIO_ISSUE_LABEL } from "@/lib/studioIssue";
 import { createPortal } from "react-dom";
 import { useMobilePanelHeaderTarget } from "./MobilePanelDrawer";
 import { PullRequestCommentComposer } from "./PullRequestCommentComposer";
@@ -100,8 +104,15 @@ import { gitProviderCopy, type GitProviderCopy } from "@/lib/gitProviders";
 import { parseHttpUrl } from "@/lib/openLinkInApp";
 import { absoluteTime, relativeTime } from "@/lib/relativeTime";
 import { isTempConvId } from "@/lib/tempConversationId";
+import { Link, useNavigate, useSearchParams } from "@/lib/routing";
+import { ProjectPullRequestDetails } from "@/studio/ProjectWorkspace";
+import { useReviewerSessionLookup } from "@/studio/reviews/ReviewerSessionView";
 import { WorkspaceRepositories } from "@/studio/WorkspaceRepositories";
-import { ReviewPanel, useStudioReviewHistory } from "@/studio/reviews/ReviewPanel";
+import {
+  ProjectReviewPanel,
+  ReviewPanel,
+  useStudioReviewHistory,
+} from "@/studio/reviews/ReviewPanel";
 import type { ReviewSource } from "@/studio/reviews/api";
 import {
   normalizePullRequestInfo,
@@ -1026,6 +1037,97 @@ export function selectPullRequestInPanel(
 export function PullRequestPanel({
   conversationId,
   active = true,
+  reviewSession = false,
+}: {
+  conversationId: string;
+  active?: boolean;
+  reviewSession?: boolean;
+}) {
+  return reviewSession ? (
+    <ReviewedPullRequestPanel conversationId={conversationId} active={active} />
+  ) : (
+    <BranchPullRequestPanel conversationId={conversationId} active={active} />
+  );
+}
+
+function ReviewedPullRequestPanel({
+  conversationId,
+  active,
+}: {
+  conversationId: string;
+  active: boolean;
+}) {
+  const navigate = useNavigate();
+  const lookup = useReviewerSessionLookup(conversationId, active);
+  if (lookup.isPending) {
+    return (
+      <p role="status" className="p-3 text-ui">
+        Loading the reviewed pull request…
+      </p>
+    );
+  }
+  if (lookup.isError && !lookup.data) {
+    return (
+      <div className="space-y-2 p-3 text-ui">
+        <p role="alert">Couldn’t load the reviewed pull request.</p>
+        <Button variant="outline" size="sm" onClick={() => void lookup.refetch()}>
+          Retry
+        </Button>
+      </div>
+    );
+  }
+  const review = lookup.data;
+  if (!review) {
+    return <BranchPullRequestPanel conversationId={conversationId} active={active} />;
+  }
+
+  const { target } = review;
+  return (
+    <section className="min-h-0 flex-1 overflow-y-auto" aria-label="Reviewed pull request">
+      <header className="space-y-2 border-b border-border p-3">
+        <h2 className="text-ui font-medium">Reviewed pull request</h2>
+        <a className="text-ui underline" href={target.pr_url} target="_blank" rel="noreferrer">
+          {target.repository} #{target.pr_number}
+        </a>
+        <p className="font-mono text-xs text-muted-foreground">
+          Reviewed revision · {target.head_sha.slice(0, 8)}
+        </p>
+        {review.run_id && (
+          <Button asChild variant="outline" size="sm">
+            <Link to={`/reviews/${encodeURIComponent(review.run_id)}/discussion`}>
+              Open captured diff and discussion
+            </Link>
+          </Button>
+        )}
+        {target.source_session_id && (
+          <Button asChild variant="outline" size="sm">
+            <Link to={`/c/${encodeURIComponent(target.source_session_id)}`}>
+              Open source session
+            </Link>
+          </Button>
+        )}
+      </header>
+      {target.source_project_id && target.repository_path && (
+        <ProjectPullRequestDetails
+          key={review.id}
+          projectId={target.source_project_id}
+          target={{ hostId: target.host_id, workspace: target.workspace }}
+          repository={target.repository_path}
+          url={target.pr_url}
+          initialView={review.run_id ? "patch" : "review"}
+          previousProfile={review.run_id ? undefined : review.profile}
+          onReviewStarted={(sessionId) =>
+            navigate(`/c/${encodeURIComponent(sessionId)}?view=review`)
+          }
+        />
+      )}
+    </section>
+  );
+}
+
+function BranchPullRequestPanel({
+  conversationId,
+  active = true,
 }: {
   conversationId: string;
   /** False while the panel is mounted but hidden (collapsed rail); pauses the poll. */
@@ -1189,6 +1291,19 @@ export function PullRequestPanel({
     }
   }, [selected, associations?.selected_pr_url, linked, changeSelection]);
   const prs = associations?.prs ?? [];
+  const [searchParams] = useSearchParams();
+  const reviewRequested = searchParams.get("reviewPr") === "1";
+  const openedRequestedReview = useRef<string | null>(null);
+  const requestedPr = prs.find((pr) => pr.url === selected)?.url ?? prs[0]?.url;
+  useEffect(() => {
+    if (!reviewRequested) {
+      openedRequestedReview.current = null;
+      return;
+    }
+    if (!active || !requestedPr || openedRequestedReview.current === conversationId) return;
+    openedRequestedReview.current = conversationId;
+    updateView({ selected: requestedPr, showingDetails: true, subtab: "review" });
+  }, [active, conversationId, requestedPr, reviewRequested, updateView]);
   useEffect(() => {
     if (prs.length === 1) updateView({ showingDetails: true });
   }, [updateView, prs.length]);
@@ -1605,6 +1720,17 @@ function PullRequestPanelDetails({
   const sandboxStarting = useSandboxStarting(conversationId);
   const canEdit = useCanEdit(conversationId);
   const serverInfo = useServerInfo();
+  const { session } = useSession(active ? conversationId : null);
+  const taskSession = session?.labels?.[STUDIO_ISSUE_LABEL] ? session : null;
+  const viewerId = useViewerId();
+  const taskProject = useQuery({
+    queryKey: ["studio-task-project", viewerId, taskSession?.projectId],
+    queryFn: taskSession?.projectId ? () => getProject(taskSession.projectId!) : skipToken,
+    enabled: active && activeTab === "review",
+  });
+  const taskCheckout = taskProject.data?.config;
+  const linearTaskReview = taskCheckout?.source_key?.startsWith("linear:") === true;
+
   const [reviewSource, setReviewSource] = useState<ReviewSource | null>(null);
 
   // Summary (checks + PR body), Comments, and Changes (the stacked diff).
@@ -1991,18 +2117,45 @@ function PullRequestPanelDetails({
             forceMount
             className="min-h-0 flex-1 overflow-y-auto data-[state=inactive]:hidden"
           >
-            <ReviewPanel
-              key={`${history.viewerId}:${conversationId}:${prUrl}`}
-              conversationId={conversationId}
-              active={active && selectedTab === "review"}
-              revision={{ prUrl, baseSha: baseSha ?? "", headSha: headSha ?? "" }}
-              headRepoUrl={pr.head_repository_url}
-              history={history}
-              onOpenSource={(source) => {
-                setReviewSource(source);
-                setActiveTab("changes");
-              }}
-            />
+            {linearTaskReview &&
+            taskSession?.projectId &&
+            taskCheckout?.host_id &&
+            taskCheckout.workspace ? (
+              <ProjectReviewPanel
+                projectId={taskSession.projectId}
+                hostId={taskCheckout.host_id}
+                workspace={taskCheckout.workspace}
+                repository="."
+                singleReviewerOnly
+                active={active && selectedTab === "review"}
+                revision={{ prUrl, baseSha: baseSha ?? "", headSha: headSha ?? "" }}
+                headRepoUrl={pr.head_repository_url}
+                onOpenSource={(source) => {
+                  setReviewSource(source);
+                  setActiveTab("changes");
+                }}
+              />
+            ) : taskSession?.projectId &&
+              (linearTaskReview || taskProject.isPending || taskProject.isError) ? (
+              <p className="p-3 text-sm text-muted-foreground" role="status">
+                {taskProject.isPending
+                  ? "Loading the task’s review checkout…"
+                  : "Set a trusted checkout and connected host in the task project settings to run a review."}
+              </p>
+            ) : (
+              <ReviewPanel
+                key={`${history.viewerId}:${conversationId}:${prUrl}`}
+                conversationId={conversationId}
+                active={active && selectedTab === "review"}
+                revision={{ prUrl, baseSha: baseSha ?? "", headSha: headSha ?? "" }}
+                headRepoUrl={pr.head_repository_url}
+                history={history}
+                onOpenSource={(source) => {
+                  setReviewSource(source);
+                  setActiveTab("changes");
+                }}
+              />
+            )}
           </TabsContent>
         )}
 

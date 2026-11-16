@@ -1,4 +1,4 @@
-"""Locate citations in the exact Git patch supplied to the reviewers."""
+"""Locate citations in the Git patch captured for a review."""
 
 from __future__ import annotations
 
@@ -8,7 +8,8 @@ from typing import Literal
 
 MAX_REVIEW_PATCH_BYTES = 48 * 1024
 PATCH_CHUNK_BYTES = 12 * 1024
-MAX_PATCH_CHUNKS = MAX_REVIEW_PATCH_BYTES // PATCH_CHUNK_BYTES
+MAX_PATCH_CHUNKS = 64
+MAX_SAVED_REVIEW_PATCH_BYTES = MAX_PATCH_CHUNKS * PATCH_CHUNK_BYTES
 
 Side = Literal["base", "head"]
 Anchor = tuple[str, Side, int]

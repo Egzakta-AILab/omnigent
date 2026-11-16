@@ -17,6 +17,7 @@ PULL_REQUEST_OPS = frozenset(
         "studio_project_pull_requests",
         "studio_project_pull_request",
         "studio_project_pull_request_patch",
+        "studio_project_pull_request_local_head",
         "studio_project_pull_request_publication",
     }
 )
@@ -68,6 +69,11 @@ def read_project_pull_requests(root: Path, op: str, params: dict[str, Any]) -> d
         and _FULL_SHA.fullmatch(head_sha)
     ):
         raise ValueError("Reload the pull request to view its patch.")
+    if op == "studio_project_pull_request_local_head":
+        status, _, _ = github_resource._git(
+            ["cat-file", "-e", f"{head_sha}^{{commit}}"], cwd=str(checkout)
+        )
+        return {"available": status == 0}
     result = github_resource.read_workspace_pull_request_patch(
         str(checkout), reference, head_sha=head_sha, base_sha=base_sha
     )

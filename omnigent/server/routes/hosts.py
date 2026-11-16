@@ -249,6 +249,7 @@ async def _proxy_model_options(
     host_registry: HostRegistry,
     host_conn: HostConnection,
     harness: str,
+    refresh: bool = False,
 ) -> dict[str, Any]:
     """Ask a host for the model catalog it would use for a new session."""
     from omnigent.server.routes._host_model_options import request_host_model_options
@@ -259,6 +260,7 @@ async def _proxy_model_options(
             host_conn=host_conn,
             harness=harness,
             timeout_s=_MODEL_OPTIONS_TIMEOUT_S,
+            refresh=refresh,
         )
     except ConnectionError as exc:
         raise HTTPException(
@@ -1144,6 +1146,7 @@ def create_hosts_router(
         request: Request,
         host_id: str,
         harness: str,
+        refresh: bool = False,
     ) -> HostModelOptionsResponse:
         """Return pre-launch model choices resolved by the selected host.
 
@@ -1170,6 +1173,7 @@ def create_hosts_router(
             host_registry=host_registry,
             host_conn=conn,
             harness=canonicalize_harness(harness) or harness,
+            refresh=refresh,
         )
         if result.get("status") != "ok":
             raise HTTPException(

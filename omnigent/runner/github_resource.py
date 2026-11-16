@@ -1111,7 +1111,7 @@ def read_workspace_pull_request(
     """Read an explicitly scoped PR without associating it with a session."""
     endpoint = f"repos/{reference.repository}/pulls/{reference.number}"
     with _gh_deadline_scope(time.monotonic() + _PR_EDIT_REQUEST_SECONDS):
-        data = _pr_api(root, reference, endpoint)
+        data = _pr_api(root, reference, endpoint, resource="the pull request details")
         if data.get("number") != reference.number:
             raise ValueError("GitHub returned a different pull request.")
         base_sha = _api_string(data, "base", "sha")
@@ -1746,7 +1746,7 @@ def _check_pr_revision(
     root: str, reference: PullRequestRef, *, head_sha: str, base_sha: str | None = None
 ) -> dict[str, Any]:
     """Return the PR's REST payload, raising when its head, or its base if given, moved."""
-    pr = _pr_api(root, reference, f"repos/{reference.repository}/pulls/{reference.number}")
+    pr = _pr_api(root, reference, f"repos/{reference.repository}/pulls/{reference.number}", resource="the pull request details")
     moved_head = _api_string(pr, "head", "sha") != head_sha
     moved_base = base_sha is not None and _api_string(pr, "base", "sha") != base_sha
     if moved_head or moved_base:
@@ -1956,14 +1956,36 @@ def _host_args(root: str, reference: PullRequestRef) -> list[str]:
     return ["--hostname", reference.host]
 
 
-def _pr_api(root: str, reference: PullRequestRef, endpoint: str) -> dict[str, Any]:
-    rc, out, _ = _gh(
-        ["api", *_host_args(root, reference), endpoint],
-        cwd=root,
-        token=_pr_token(root, reference),
-    )
-    if rc != 0:
-        raise ValueError("GitHub could not load the selected PR's file content")
+def _pr_api(
+    root: str, reference: PullRequestRef, endpoint: str, *, resource: str
+) -> dict[str, Any]:
+    args = ["api", *_host_args(root, reference), endpoint]
+    token = _pr_token(root, reference)
+    # GETs can be retried within the caller's existing deadline.
+    transient_statuses = {500, 502, 503, 504}
+    for attempt in range(2):
+        rc, out, err = _gh(args, cwd=root, token=token)
+        if rc == 0:
+            break
+        match = re.search(r"\bHTTP (\d{3})\b", err)
+        status = int(match[1]) if match else None
+        if status in transient_statuses and attempt == 0:
+            continue
+        if status == 404:
+            raise ValueError(
+                f"GitHub could not find {resource}. Check the link and account access."
+            )
+        if status == 429 or (status == 403 and "rate limit" in err.lower()):
+            raise ValueError(f"GitHub rate-limited the request for {resource}. Try again later.")
+        if status in {401, 403}:
+            raise ValueError(
+                f"GitHub denied access to {resource} (HTTP {status}). "
+                "Check GitHub access on the host."
+            )
+        if err in {"timed out", "gh deadline exceeded"}:
+            raise ValueError(f"GitHub timed out while loading {resource}. Refresh to retry.")
+        detail = f" (HTTP {status})" if status is not None else ""
+        raise ValueError(f"GitHub could not load {resource}{detail}. Refresh to retry.")
     try:
         result = json.loads(out)
     except ValueError as exc:
@@ -1987,7 +2009,10 @@ def _api_string(value: object, *keys: str) -> str:
 def read_review_comment(root: str, reference: PullRequestRef, comment_id: int) -> dict[str, Any]:
     with _gh_deadline_scope(time.monotonic() + _PR_EDIT_REQUEST_SECONDS):
         return _pr_api(
-            root, reference, f"repos/{reference.repository}/pulls/comments/{comment_id}"
+            root,
+            reference,
+            f"repos/{reference.repository}/pulls/comments/{comment_id}",
+            resource="the review comment",
         )
 
 
@@ -2003,7 +2028,12 @@ def _pr_file_contents(
     for candidate in (path, previous_path or path):
         if candidate.startswith("/") or any(p in {"", ".."} for p in candidate.split("/")):
             raise ValueError("Invalid repository-relative path")
-    pr = _pr_api(root, reference, f"repos/{reference.repository}/pulls/{reference.number}")
+    pr = _pr_api(
+        root,
+        reference,
+        f"repos/{reference.repository}/pulls/{reference.number}",
+        resource="the pull request details",
+    )
     current_head = _api_string(pr, "head", "sha")
     current_base = _api_string(pr, "base", "sha")
     if (head_sha and head_sha != current_head) or (base_sha and base_sha != current_base):
@@ -2016,6 +2046,7 @@ def _pr_file_contents(
         root,
         reference,
         f"repos/{reference.repository}/compare/{current_base}...{current_head}",
+        resource="the comparison between the pull request commits",
     )
     merge_base = _api_string(comparison, "merge_base_commit", "sha")
 

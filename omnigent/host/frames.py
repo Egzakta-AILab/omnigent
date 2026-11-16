@@ -1365,6 +1365,7 @@ class HostModelOptionsFrame:
 
     request_id: str
     harness: str
+    refresh: bool = False
 
 
 @dataclass
@@ -2294,6 +2295,7 @@ def encode_host_frame(frame: HostFrame) -> str:
                 "kind": HostFrameKind.MODEL_OPTIONS.value,
                 "request_id": frame.request_id,
                 "harness": frame.harness,
+                **({"refresh": True} if frame.refresh else {}),
             }
         )
     if isinstance(frame, HostModelOptionsResultFrame):
@@ -3577,6 +3579,7 @@ def _decode_model_options(msg: _JsonObject) -> HostModelOptionsFrame:
     return HostModelOptionsFrame(
         request_id=_required_str(msg, "request_id"),
         harness=_required_str(msg, "harness"),
+        refresh=_optional_bool(msg, "refresh"),
     )
 
 

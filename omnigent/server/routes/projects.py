@@ -15,10 +15,12 @@ projects share that scope.
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from typing import Any
 
 from fastapi import APIRouter, Query, Request
+from sqlalchemy.exc import IntegrityError
 
 from omnigent.entities import Project
 from omnigent.errors import ErrorCode, OmnigentError
@@ -38,6 +40,7 @@ from omnigent.stores.project_store import ProjectOrderPreference, ProjectStore, 
 
 _DEFAULT_PROJECT_PAGE = 50
 _MAX_PROJECT_PAGE = 200
+_TEMPLATE_DEFAULTS = ("host_id", "workspace", "agent_id", "model", "effort", "base_branch")
 
 
 def _to_response(project: Project) -> dict[str, Any]:
@@ -99,13 +102,52 @@ def create_projects_router(
         """
         user_id = require_user(request, auth_provider)
         await _require_private_source(request, user_id)
-        project = await asyncio.to_thread(
-            project_store.create,
-            uuid.uuid4().hex,
-            body.name,
-            user_id,
-            body.config,
-        )
+        project_id = uuid.uuid4().hex
+        config = body.config
+        if body.source_key:
+            identity = json.dumps([user_id, body.source_key], separators=(",", ":"))
+            project_id = uuid.uuid5(uuid.NAMESPACE_URL, f"omnigent:project:{identity}").hex
+            existing = await asyncio.to_thread(project_store.get, project_id, user_id=user_id)
+            if existing is not None:
+                if body.linear_issue is not None and "linear_issue" not in existing.config:
+                    existing = await asyncio.to_thread(
+                        project_store.update,
+                        project_id,
+                        user_id=user_id,
+                        linear_issue=body.linear_issue,
+                    )
+                    if existing is None:
+                        raise OmnigentError("Project not found", code=ErrorCode.NOT_FOUND)
+                    announce_projects_changed(user_id)
+                return _to_response(existing)
+        if body.template_project_id:
+            parent = await asyncio.to_thread(
+                project_store.get, body.template_project_id, user_id=user_id
+            )
+            if parent is None:
+                raise OmnigentError("Template project not found", code=ErrorCode.NOT_FOUND)
+            config = {
+                key: parent.config[key] for key in _TEMPLATE_DEFAULTS if key in parent.config
+            }
+            config["use_worktree"] = True
+            config["template_project_id"] = parent.id
+            if body.source_key:
+                config["source_key"] = body.source_key
+            if body.linear_issue is not None:
+                config["linear_issue"] = body.linear_issue
+        try:
+            project = await asyncio.to_thread(
+                project_store.create, project_id, body.name, user_id, config
+            )
+        except (IntegrityError, OmnigentError) as exc:
+            if not body.source_key or (
+                isinstance(exc, OmnigentError) and exc.code != ErrorCode.ALREADY_EXISTS
+            ):
+                raise
+            existing = await asyncio.to_thread(project_store.get, project_id, user_id=user_id)
+            if existing is None:
+                raise
+            return _to_response(existing)
         # Push the change to the owner's other connected clients so their
         # sidebars pick up the new folder without a reload.
         announce_projects_changed(user_id)

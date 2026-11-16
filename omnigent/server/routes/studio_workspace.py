@@ -18,10 +18,11 @@ from omnigent.server.routes._origin import require_trusted_origin
 from omnigent.server.routes._studio_project_workspace import (
     ProjectWorkspace,
     require_owned_project,
+    require_studio_session,
     resolve_project_workspace,
     resolve_workspace_host,
+    studio_identifier,
 )
-from omnigent.server.routes.studio_reviews import _identifier, _owned_source
 from omnigent.stores import ConversationStore, PermissionStore
 from omnigent.stores.project_store import ProjectStore
 from omnigent.studio.reviews.models import ReviewProfileEditor, ReviewProfileEditorWrite
@@ -89,6 +90,8 @@ def create_studio_workspace_router(
     project_store: ProjectStore | None,
     auth_provider: AuthProvider | None,
     permission_store: PermissionStore | None,
+    *,
+    reviews_enabled: bool,
 ) -> APIRouter:
     settings_router = APIRouter(prefix="/{scope}/{record_id}/studio")
     project_router = APIRouter(prefix="/projects/{record_id}/studio")
@@ -102,8 +105,12 @@ def create_studio_workspace_router(
     ) -> ProjectWorkspace:
         owner = require_user(request, auth_provider)
         if scope == "sessions":
-            source = await _owned_source(
-                _identifier(record_id), owner, conversation_store, permission_store, auth_provider
+            source = await require_studio_session(
+                studio_identifier(record_id),
+                owner,
+                conversation_store,
+                permission_store,
+                auth_provider,
             )
             host_id, path = source.host_id, source.workspace
         else:
@@ -145,14 +152,10 @@ def create_studio_workspace_router(
 
     ProjectTarget = Annotated[ProjectWorkspace, Depends(project_workspace)]
 
-    @settings_router.get("/review-profiles/editor", response_model=ReviewProfileEditor)
     async def get_profile_editor(response: Response, target: Target) -> dict[str, Any]:
         response.headers["Cache-Control"] = "no-store"
         return await _host_operation(target, "studio_review_profile_editor", settings=True)
 
-    @settings_router.put(
-        "/review-profiles/editor", response_model=ReviewProfileEditor, dependencies=_WRITE_GATES
-    )
     async def save_profile_editor(
         response: Response, target: Target, body: ReviewProfileEditorWrite
     ) -> dict[str, Any]:
@@ -165,7 +168,6 @@ def create_studio_workspace_router(
             settings=True,
         )
 
-    @project_router.get("/review-profiles")
     async def get_review_profiles(response: Response, target: ProjectTarget) -> dict[str, Any]:
         response.headers["Cache-Control"] = "no-store"
         return await _host_operation(target, "studio_review_profiles")
@@ -227,7 +229,11 @@ def create_studio_workspace_router(
             "studio_project_pull_request",
             params={"repository": repository, "pr_url": pr_url, "include_files": True},
         )
-        return {**result, "canonical_workspace": target.path}
+        return {
+            **result,
+            "canonical_workspace": target.path,
+            "review_available": reviews_enabled and result.get("review_available") is True,
+        }
 
     @project_router.get("/pull-requests/patch")
     async def get_pull_request_patch(
@@ -249,6 +255,17 @@ def create_studio_workspace_router(
                 "head_sha": head_sha,
             },
         )
+
+    if reviews_enabled:
+        settings_router.get("/review-profiles/editor", response_model=ReviewProfileEditor)(
+            get_profile_editor
+        )
+        settings_router.put(
+            "/review-profiles/editor",
+            response_model=ReviewProfileEditor,
+            dependencies=_WRITE_GATES,
+        )(save_profile_editor)
+        project_router.get("/review-profiles")(get_review_profiles)
 
     router = APIRouter()
     router.include_router(settings_router)

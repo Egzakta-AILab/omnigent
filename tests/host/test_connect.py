@@ -596,6 +596,11 @@ async def test_handle_model_options_serves_the_claude_catalog(
     )
     assert second.models == first.models
     assert probe_calls == [1]
+    refresh = HostModelOptionsFrame(request_id="refresh", harness="claude-native", refresh=True)
+    assert decode_host_frame(encode_host_frame(refresh)) == refresh
+    refreshed = await host._handle_model_options(refresh)
+    assert refreshed.models == first.models
+    assert probe_calls == [1, 1]
     _cleanup_host(host)
 
 
@@ -862,18 +867,45 @@ async def test_handle_model_options_codex_probe_failure_is_failed(
     _cleanup_host(host)
 
 
+async def test_handle_model_options_reads_cursor_cli_models(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from omnigent.harnesses.cursor_native import main as cursor_native
+
+    model = {
+        "id": "fixture-model",
+        "displayName": "Fixture model",
+        "isDefault": True,
+        "isCurrent": True,
+    }
+    monkeypatch.setattr(cursor_native, "list_cursor_cli_model_options", lambda: [model])
+    host = _make_host_process()
+    result = await host._handle_model_options(
+        HostModelOptionsFrame(request_id="req_models", harness="cursor-native"),
+    )
+    assert result.status == "ok"
+    assert result.models == [
+        {
+            **model,
+            "source": {"kind": "subscription", "label": "Subscription", "name": "cursor-agent"},
+        }
+    ]
+    assert result.routable_models == ["fixture-model"]
+    _cleanup_host(host)
+
+
 async def test_handle_model_options_rejects_unsupported_harness() -> None:
     """Only launch paths with host-resolved model catalogs are accepted."""
     host = _make_host_process()
 
     result = await host._handle_model_options(
-        HostModelOptionsFrame(request_id="req_models", harness="cursor-native"),
+        HostModelOptionsFrame(request_id="req_models", harness="unsupported-native"),
     )
 
     assert result == HostModelOptionsResultFrame(
         request_id="req_models",
         status="failed",
-        error="model options are unsupported for harness 'cursor-native'",
+        error="model options are unsupported for harness 'unsupported-native'",
     )
 
 

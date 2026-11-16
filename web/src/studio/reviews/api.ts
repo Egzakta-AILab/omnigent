@@ -71,6 +71,8 @@ export interface ReviewPass {
   target: {
     pr_url: string;
     repository: string;
+    source_project_id?: string | null;
+    source_session_id?: string | null;
     repository_path?: string | null;
     pr_number: number;
     base_sha: string;
@@ -151,7 +153,16 @@ interface ReviewPlan {
   coordinator_id: string;
   base_sha: string;
   head_sha: string;
-  decisions: { review_id: string; selected: boolean; reason: string }[];
+  decisions: {
+    review_id: string;
+    selected: boolean;
+    reason: string;
+    assignment?: {
+      objective: string;
+      acceptance_criterion?: string | null;
+      expected_evidence: string;
+    } | null;
+  }[];
 }
 
 export interface ReviewRun {
@@ -169,7 +180,24 @@ export interface ReviewRunPage {
   next_cursor: string | null;
 }
 
+export interface ReviewSynthesis {
+  state: "pending" | "incomplete" | "ready" | "unknown";
+  summary: string | null;
+  conflicts: { finding_keys: [string, string]; detail: string }[];
+  follow_up?: { review_id: string; finding_key: string | null; question: string } | null;
+}
+
+export interface FollowUpTurn {
+  state: ReviewSynthesis["state"];
+  result: "answered" | "blocked" | null;
+  detail: string | null;
+}
+
+export type FollowUpPhase = "ask" | "return";
+
 export interface ReviewRunReport {
+  synthesis?: ReviewSynthesis | null;
+  follow_up?: { specialist: FollowUpTurn | null; coordinator: FollowUpTurn | null } | null;
   reviewers: { review_id: string; report: ReviewReport }[];
   findings: { finding: ReviewFinding; review_ids: string[]; finding_key?: string | null }[];
   proposal?: {
@@ -417,11 +445,11 @@ export function changeCreatorInstallation(runId: string, change: CreatorPanelCha
   });
 }
 
-export function getCreatorPanelContract(runId: string, signal: AbortSignal) {
+export function getCreatorPanelContract(signal: AbortSignal) {
   return reviewRequest<{
     definition_schema: Record<string, unknown>;
     template: CreatorPanelDefinition;
-  }>(`${reviewRunPath(runId)}/creator-preview`, { signal });
+  }>("/v1/studio/creator/review-panel", { signal });
 }
 
 export function buildCreatorPanelPreview(runId: string, definition: string) {
@@ -756,6 +784,26 @@ export async function getCapturedReviewDiff(
     throw new Error("The saved diff does not match this review run.");
   }
   return evidence;
+}
+
+export function getReviewRun(runId: string, signal: AbortSignal) {
+  return reviewRequest<ReviewRun>(reviewRunPath(runId), { signal });
+}
+
+export function requestReviewSynthesis(runId: string) {
+  return postReview<unknown>(
+    `${reviewRunPath(runId)}/synthesis`,
+    `studio-review-synthesis-${runId}`,
+    {},
+  );
+}
+
+export function advanceReviewFollowUp(runId: string, phase: FollowUpPhase) {
+  return postReview<unknown>(
+    `${reviewRunPath(runId)}/follow-up/${phase}`,
+    `studio-review-follow-up-${phase}-${runId}`,
+    {},
+  );
 }
 
 export function getReviewRunReport(runId: string, signal: AbortSignal) {

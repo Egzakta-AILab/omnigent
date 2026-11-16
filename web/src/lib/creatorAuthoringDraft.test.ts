@@ -5,11 +5,11 @@ import {
   stageCreatorAuthoringDraft,
 } from "./creatorAuthoringDraft";
 
-it("keeps the authoring handoff scoped to its viewer, review, and navigation", () => {
+it("keeps the authoring handoff scoped to its viewer, editor, and navigation", () => {
   const input = {
     viewerId: "reviewer",
-    reviewId: "review-1",
-    returnTo: "/reviews/review-1/discussion",
+    editorId: "review-panel",
+    returnTo: "/creator",
     brief: "Group failures by directory",
     source: "{}",
     prompt: "Create a QA panel",
@@ -18,11 +18,11 @@ it("keeps the authoring handoff scoped to its viewer, review, and navigation", (
   expect(readCreatorAuthoringDraft("reviewer", id)).toEqual({ ...input, id });
   expect(readCreatorAuthoringDraft(null, id)).toBeUndefined();
   expect(readCreatorAuthoringDraft("another-viewer", id)).toBeUndefined();
-  expect(readCreatorEditorDraft("reviewer", "review-1")?.source).toBe("{}");
-  expect(readCreatorEditorDraft("reviewer", "another-review")).toBeUndefined();
-  expect(readCreatorEditorDraft("another-viewer", "review-1")).toBeUndefined();
+  expect(readCreatorEditorDraft("reviewer", "review-panel")?.source).toBe("{}");
+  expect(readCreatorEditorDraft("reviewer", "another-editor")).toBeUndefined();
+  expect(readCreatorEditorDraft("another-viewer", "review-panel")).toBeUndefined();
 
-  stageCreatorAuthoringDraft({ ...input, reviewId: "review-2" });
+  stageCreatorAuthoringDraft({ ...input, editorId: "another-editor" });
   expect(readCreatorAuthoringDraft("reviewer", id)).toBeUndefined();
-  expect(readCreatorEditorDraft("reviewer", "review-1")).toBeUndefined();
+  expect(readCreatorEditorDraft("reviewer", "review-panel")).toBeUndefined();
 });

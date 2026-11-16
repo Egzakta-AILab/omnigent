@@ -8,6 +8,7 @@ import json
 import logging
 import posixpath
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Any, Literal, TypeVar, cast
 from urllib.parse import urlsplit
@@ -18,7 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, Validation
 from omnigent.db.account_authority import account_generation
 from omnigent.db.utils import builtin_agent_id
 from omnigent.entities import Conversation, Project
-from omnigent.errors import ErrorCode, OmnigentError
+from omnigent.errors import OmnigentError
 from omnigent.extensions.review_panel import creator_pilot_enabled
 from omnigent.harness_availability import reported_harness_availability
 from omnigent.native.native_coding_agents import native_coding_agent_for_agent_name
@@ -47,7 +48,10 @@ from omnigent.server.routes._studio_hosted_checks import execute_hosted_check
 from omnigent.server.routes._studio_project_workspace import (
     ProjectWorkspace,
     require_owned_project,
+    require_studio_session,
     resolve_project_workspace,
+    studio_identifier,
+    uses_isolated_task_review,
 )
 from omnigent.server.routes._workspace_validation import (
     WorkspaceValidationError,
@@ -55,7 +59,6 @@ from omnigent.server.routes._workspace_validation import (
 )
 from omnigent.server.routes.skills import request_host_skills
 from omnigent.server.schemas import SessionEventInput
-from omnigent.server.session_orchestration import require_owned_session
 from omnigent.server.startup_inputs import initial_input_id
 from omnigent.stores import AgentStore, ConversationStore
 from omnigent.stores.artifact_store import ArtifactStore
@@ -124,6 +127,12 @@ from omnigent.studio.reviews.evidence_files import (
     EvidenceMediaType,
     EvidenceSide,
 )
+from omnigent.studio.reviews.followup import (
+    FollowUpPhase,
+    follow_up_key,
+    follow_up_prompt,
+    read_follow_up_turn,
+)
 from omnigent.studio.reviews.hosted_check_models import (
     ApproveHostedCheck,
     HostedCheckJob,
@@ -149,10 +158,14 @@ from omnigent.studio.reviews.plan import plan_digest, plan_instructions, read_pl
 from omnigent.studio.reviews.publication import delivery_body
 from omnigent.studio.reviews.questions import question_prompt, read_question_answer
 from omnigent.studio.reviews.report import (
+    ConsolidatedFinding,
     ConsolidatedReviewReport,
     ReviewerRunReport,
     ReviewFinding,
+    ReviewFollowUp,
     ReviewReport,
+    ReviewSynthesis,
+    SpecialistFollowUp,
     consolidate_reports,
     qualify_citations,
     read_review_report,
@@ -174,8 +187,7 @@ from omnigent.studio.reviews.service import (
     ReviewService,
     review_run_fingerprint,
 )
-from omnigent.util.session_lifecycle import is_session_closed
-from omnigent.util.uuid import uuid_to_bytes
+from omnigent.studio.reviews.synthesis import read_synthesis, synthesis_key, synthesis_prompt
 
 if TYPE_CHECKING:
     from omnigent.server.host_registry import HostConnection, HostRegistry
@@ -305,13 +317,6 @@ class StartReviewRunRequest(StartReviewRequest):
 
 
 _WRITE_GATES = [Depends(require_json_content_type), Depends(require_trusted_origin)]
-
-
-def _identifier(value: str) -> str:
-    try:
-        return uuid_to_bytes(value).hex()
-    except ValueError:
-        raise HTTPException(status_code=404, detail="Review or session not found") from None
 
 
 async def _read_project_review_resource(
@@ -449,41 +454,6 @@ async def _capture_project_target(
         ) from exc
 
 
-async def _owned_source(
-    source_session_id: str,
-    user_id: str | None,
-    conversation_store: ConversationStore,
-    permission_store: PermissionStore | None,
-    auth_provider: AuthProvider | None,
-    *,
-    private: bool = False,
-) -> Conversation:
-    if auth_provider is not None:
-        if permission_store is None or user_id is None:
-            raise HTTPException(status_code=503, detail="Review ownership checks are unavailable")
-        try:
-            return await asyncio.to_thread(
-                require_owned_session,
-                source_session_id,
-                user_id,
-                conversation_store,
-                permission_store,
-                private=private,
-            )
-        except OmnigentError as exc:
-            if exc.code in (ErrorCode.FORBIDDEN, ErrorCode.NOT_FOUND):
-                raise HTTPException(status_code=404, detail="Session not found") from None
-            raise
-    conversation = await asyncio.to_thread(conversation_store.get_conversation, source_session_id)
-    if (
-        conversation is None
-        or conversation.archived
-        or is_session_closed(conversation.labels, conversation.title)
-    ):
-        raise HTTPException(status_code=404, detail="Session not found")
-    return conversation
-
-
 async def _connected_review_host(
     request: Request, owner_id: str | None, host_id: str
 ) -> tuple[Host, HostRegistry, HostConnection]:
@@ -616,7 +586,7 @@ def create_studio_reviews_router(
     async def owned_review(request: Request, review_id: str) -> ReviewPass:
         user_id = require_user(request, auth_provider)
         review = await asyncio.to_thread(
-            review_store.get, _identifier(review_id), owner_user_id=user_id
+            review_store.get, studio_identifier(review_id), owner_user_id=user_id
         )
         if review is None:
             raise HTTPException(404, "Review not found")
@@ -630,8 +600,8 @@ def create_studio_reviews_router(
         request: Request, response: Response, source_session_id: str
     ) -> ReviewRolesResponse:
         user_id = require_user(request, auth_provider)
-        source = await _owned_source(
-            _identifier(source_session_id),
+        source = await require_studio_session(
+            studio_identifier(source_session_id),
             user_id,
             conversation_store,
             permission_store,
@@ -735,14 +705,14 @@ def create_studio_reviews_router(
         idempotency_key: IdempotencyKey,
     ) -> dict[str, Any]:
         user_id = require_user(request, auth_provider)
-        source_session_id = _identifier(source_session_id)
-        await _owned_source(
+        source_session_id = studio_identifier(source_session_id)
+        await require_studio_session(
             source_session_id, user_id, conversation_store, permission_store, auth_provider
         )
 
         async def target() -> ReviewTarget:
             captured = await capture_context(request, source_session_id, body.pr_url)
-            source = await _owned_source(
+            source = await require_studio_session(
                 source_session_id, user_id, conversation_store, permission_store, auth_provider
             )
             if body.profile_id and (source.host_id, source.workspace) != (
@@ -776,7 +746,7 @@ def create_studio_reviews_router(
         idempotency_key: IdempotencyKey,
     ) -> dict[str, Any]:
         user_id = require_user(request, auth_provider)
-        project_id = _identifier(project_id)
+        project_id = studio_identifier(project_id)
         await require_owned_project(project_store, project_id, user_id)
 
         async def target() -> ReviewTarget:
@@ -797,7 +767,7 @@ def create_studio_reviews_router(
     async def owned_run(request: Request, run_id: str) -> ReviewRun:
         user_id = require_user(request, auth_provider)
         run = await asyncio.to_thread(
-            review_store.get_run, _identifier(run_id), owner_user_id=user_id
+            review_store.get_run, studio_identifier(run_id), owner_user_id=user_id
         )
         if run is None or run.target.source_project_id is None:
             raise HTTPException(404, "Review run not found")
@@ -851,9 +821,16 @@ def create_studio_reviews_router(
         idempotency_key: IdempotencyKey,
     ) -> ReviewRun:
         user_id = require_user(request, auth_provider)
-        project_id = _identifier(project_id)
+        project_id = studio_identifier(project_id)
         await require_owned_project(project_store, project_id, user_id)
         digest = review_run_fingerprint(project_id, body)
+        if (
+            body.coordinator is None
+            and len(body.reviewers) == 1
+            and await uses_isolated_task_review(project_store, project_id, user_id)
+        ):
+            # The same task reviewer and revision must survive a reload or a lost response.
+            idempotency_key = f"studio-task-{digest}"
         try:
             existing = await asyncio.to_thread(
                 review_store.find_run_request,
@@ -926,7 +903,7 @@ def create_studio_reviews_router(
         after_id: str | None = None,
     ) -> ReviewRunPage:
         user_id = require_user(request, auth_provider)
-        project_id = _identifier(project_id)
+        project_id = studio_identifier(project_id)
         await require_owned_project(project_store, project_id, user_id)
         try:
             ref = PullRequestRef.from_url(pr_url)
@@ -940,7 +917,7 @@ def create_studio_reviews_router(
                 owner_user_id=user_id,
                 pr_url=ref.url,
                 limit=limit,
-                after_id=_identifier(after_id) if after_id else None,
+                after_id=studio_identifier(after_id) if after_id else None,
             )
         except ReviewNotFoundError as exc:
             raise HTTPException(404, str(exc)) from exc
@@ -967,7 +944,7 @@ def create_studio_reviews_router(
                 review_store.list_shared_reviews,
                 actor,
                 limit=limit,
-                after_id=_identifier(after_id) if after_id else None,
+                after_id=studio_identifier(after_id) if after_id else None,
             )
         except ReviewNotFoundError as exc:
             raise HTTPException(404, str(exc)) from exc
@@ -1025,7 +1002,7 @@ def create_studio_reviews_router(
                 source_session_id=source_session_id,
                 source_project_id=source_project_id,
                 limit=limit,
-                after_id=_identifier(after_id) if after_id is not None else None,
+                after_id=studio_identifier(after_id) if after_id is not None else None,
             )
         except ReviewNotFoundError:
             raise HTTPException(status_code=404, detail="Review cursor not found") from None
@@ -1039,8 +1016,8 @@ def create_studio_reviews_router(
         after_id: str | None = None,
     ) -> ReviewListResponse:
         user_id = require_user(request, auth_provider)
-        source_session_id = _identifier(source_session_id)
-        await _owned_source(
+        source_session_id = studio_identifier(source_session_id)
+        await require_studio_session(
             source_session_id, user_id, conversation_store, permission_store, auth_provider
         )
         return await review_history(user_id, limit, after_id, source_session_id=source_session_id)
@@ -1054,7 +1031,7 @@ def create_studio_reviews_router(
         after_id: str | None = None,
     ) -> ReviewListResponse:
         user_id = require_user(request, auth_provider)
-        project_id = _identifier(project_id)
+        project_id = studio_identifier(project_id)
         await require_owned_project(project_store, project_id, user_id)
         response.headers["Cache-Control"] = "no-store"
         return await review_history(user_id, limit, after_id, source_project_id=project_id)
@@ -1068,11 +1045,11 @@ def create_studio_reviews_router(
     async def get_session_review(
         request: Request, response: Response, reviewer_session_id: str
     ) -> ReviewPass:
-        reviewer_session_id = _identifier(reviewer_session_id)
+        reviewer_session_id = studio_identifier(reviewer_session_id)
         review = await owned_review(request, reviewer_session_id)
         if review.reviewer_session_id != reviewer_session_id:
             raise HTTPException(404, "Review not found")
-        await _owned_source(
+        await require_studio_session(
             reviewer_session_id,
             review.owner_user_id,
             conversation_store,
@@ -1178,7 +1155,7 @@ def create_studio_reviews_router(
         if project_id is not None:
             await require_owned_project(project_store, project_id, owner)
         else:
-            await _owned_source(
+            await require_studio_session(
                 target.origin_id, owner, conversation_store, permission_store, auth_provider
             )
         if (
@@ -1188,6 +1165,9 @@ def create_studio_reviews_router(
         ):
             raise HTTPException(503, "Native review execution is unavailable")
         planning = review.run_role == "coordinator"
+        isolated = target.candidate is None and await uses_isolated_task_review(
+            project_store, project_id, owner
+        )
 
         async def validate_profile() -> None:
             profile = review.profile
@@ -1229,11 +1209,30 @@ def create_studio_reviews_router(
                     )
                 role_instructions = selected_role.instructions
             if project_id is not None:
+                if isolated:
+                    workspace = await captured_project_workspace(request, target, owner)
+                    local = await _read_project_review_resource(
+                        workspace,
+                        "studio_project_pull_request_local_head",
+                        {
+                            "repository": target.repository_path,
+                            "pr_url": target.pr_url,
+                            "base_sha": target.base_sha,
+                            "head_sha": target.head_sha,
+                            "require_active": True,
+                        },
+                    )
+                    if local.get("available") is not True:
+                        raise HTTPException(
+                            409,
+                            f"Fetch PR #{target.pr_number} into the review checkout, "
+                            f"then retry. Commit {target.head_sha} is missing locally.",
+                        )
                 patch = await current_project_patch(request, target, owner, review.run_id)
             else:
                 assert read_patch is not None
                 patch = await read_patch(request, target)
-                source = await _owned_source(
+                source = await require_studio_session(
                     target.origin_id,
                     owner,
                     conversation_store,
@@ -1246,8 +1245,24 @@ def create_studio_reviews_router(
                 instructions = (
                     plan_instructions(run) if planning and run else report_instructions(review)
                 )
+                assignment = (
+                    next(
+                        (
+                            item.assignment
+                            for item in run.plan.decisions
+                            if item.review_id == review.id
+                        ),
+                        None,
+                    )
+                    if run and run.plan and not planning
+                    else None
+                )
                 return review_prompt(
-                    review, patch, instructions, role_instructions=role_instructions
+                    review,
+                    patch,
+                    instructions,
+                    role_instructions=role_instructions,
+                    assignment=assignment,
                 )
             except ValueError as exc:
                 raise HTTPException(409, str(exc)) from None
@@ -1259,10 +1274,12 @@ def create_studio_reviews_router(
                 or not session.runner_id
                 or session.agent_id != review.profile.agent_id
                 or session.harness != review.profile.harness
-                or (session.host_id, session.workspace) != (target.host_id, target.workspace)
+                or session.host_id != target.host_id
+                or not session.workspace
+                or (not isolated and session.workspace != target.workspace)
             ):
                 raise RuntimeError("Reviewer session binding did not match the capture")
-            reviewer = await _owned_source(
+            reviewer = await require_studio_session(
                 session_id,
                 owner,
                 conversation_store,
@@ -1274,7 +1291,8 @@ def create_studio_reviews_router(
                 reviewer.parent_conversation_id is not None
                 or reviewer.agent_id != review.profile.agent_id
                 or reviewer.runner_id != session.runner_id
-                or (reviewer.host_id, reviewer.workspace) != (target.host_id, target.workspace)
+                or (reviewer.host_id, reviewer.workspace) != (session.host_id, session.workspace)
+                or (isolated and reviewer.git_branch != f"studio-review/{session_id}")
                 or (project_id is not None and reviewer.project_id != project_id)
             ):
                 raise RuntimeError("Reviewer session binding changed before delivery")
@@ -1371,7 +1389,7 @@ def create_studio_reviews_router(
                 conversation_store.get_conversation, review.reviewer_session_id
             )
             if conv is not None:
-                await _owned_source(
+                await require_studio_session(
                     conv.id,
                     review.owner_user_id,
                     conversation_store,
@@ -1379,10 +1397,16 @@ def create_studio_reviews_router(
                     auth_provider,
                     private=True,
                 )
-                if (conv.agent_id, conv.host_id, conv.workspace) != (
-                    review.profile.agent_id,
-                    review.target.host_id,
-                    review.target.workspace,
+                target = review.target
+                isolated_binding = (
+                    target.source_project_id is not None
+                    and target.candidate is None
+                    and conv.project_id == target.source_project_id
+                    and conv.git_branch == f"studio-review/{conv.id}"
+                    and bool(conv.workspace)
+                )
+                if (conv.agent_id, conv.host_id) != (review.profile.agent_id, target.host_id) or (
+                    conv.workspace != target.workspace and not isolated_binding
                 ):
                     raise HTTPException(409, "The linked reviewer session binding changed")
 
@@ -1395,6 +1419,8 @@ def create_studio_reviews_router(
         review: ReviewPass, anchors: frozenset[Anchor] | None
     ) -> ReviewReport:
         await verify_report_session(review)
+        if review.run_role == "coordinator":
+            return ReviewReport(state="incomplete")
         if review.run_id is not None:
             snapshot = await asyncio.to_thread(review_store.get_report_snapshot, review)
             if snapshot is not None:
@@ -1439,6 +1465,60 @@ def create_studio_reviews_router(
             include_finding_keys=include_finding_keys,
         )
 
+    async def continuation(owner: str | None, key: str) -> ReviewOperation | None:
+        return await asyncio.to_thread(
+            review_store.find_operation,
+            owner_user_id=owner,
+            action="review.continue",
+            idempotency_key=key,
+        )
+
+    def follow_up_context(
+        run: ReviewRun, report: ConsolidatedReviewReport
+    ) -> tuple[SpecialistFollowUp, ReviewPass, ConsolidatedFinding | None]:
+        proposal = report.synthesis.follow_up if report.synthesis else None
+        if proposal is None:
+            raise HTTPException(409, "The Orchestrator has no follow-up question for this review")
+        member = next(
+            (item for item in run.selected_reviewers() if item.id == proposal.review_id), None
+        )
+        if member is None or member.reviewer_session_id is None:
+            raise HTTPException(409, "The selected specialist session is unavailable")
+        finding = (
+            next(
+                (entry for entry in report.findings if entry.finding_key == proposal.finding_key),
+                None,
+            )
+            if proposal.finding_key
+            else None
+        )
+        if proposal.finding_key and finding is None:
+            raise HTTPException(409, "The follow-up finding is unavailable")
+        return proposal, member, finding
+
+    async def observe_follow_up(
+        run: ReviewRun, report: ConsolidatedReviewReport
+    ) -> ReviewFollowUp:
+        assert run.coordinator is not None
+        owner = run.coordinator.owner_user_id
+        ask = await continuation(owner, follow_up_key(run.id, "ask"))
+        if ask is None:
+            return ReviewFollowUp()
+        proposal, member, finding = follow_up_context(run, report)
+        await verify_report_session(member)
+        prompt, digest = follow_up_prompt(run, proposal, finding)
+        specialist = await asyncio.to_thread(
+            read_follow_up_turn, conversation_store, run, member, ask, prompt, digest
+        )
+        returned = await continuation(owner, follow_up_key(run.id, "return"))
+        if returned is None or specialist.state != "ready":
+            return ReviewFollowUp(specialist=specialist)
+        prompt, digest = follow_up_prompt(run, proposal, finding, specialist=specialist)
+        coordinator = await asyncio.to_thread(
+            read_follow_up_turn, conversation_store, run, run.coordinator, returned, prompt, digest
+        )
+        return ReviewFollowUp(specialist=specialist, coordinator=coordinator)
+
     @router.get("/studio/review-runs/{run_id}/report", response_model=ConsolidatedReviewReport)
     async def get_review_run_report(
         request: Request, response: Response, run_id: str, include_finding_keys: bool = False
@@ -1446,10 +1526,212 @@ def create_studio_reviews_router(
         run = await owned_run(request, run_id)
         response.headers["Cache-Control"] = "no-store"
         anchors = await run_anchors(run.id, require_user(request, auth_provider))
-        report = await read_consolidation(run, anchors, include_finding_keys=include_finding_keys)
+        synthesis = (
+            await continuation(run.coordinator.owner_user_id, synthesis_key(run.id))
+            if run.coordinator is not None and run.plan is not None
+            else None
+        )
+        report = await read_consolidation(
+            run, anchors, include_finding_keys=include_finding_keys or synthesis is not None
+        )
         if run.coordinator is not None and run.plan is None:
             report = report.model_copy(update={"proposal": await current_proposal(run)})
+        elif synthesis is not None and run.coordinator is not None:
+            await verify_report_session(run.coordinator)
+            snapshot = await asyncio.to_thread(review_store.get_report_snapshot, run.coordinator)
+            result = None
+            if snapshot is not None:
+                # Earlier builds could save a regular report against this role.
+                with suppress(ValidationError):
+                    result = ReviewSynthesis.model_validate_json(snapshot)
+            if result is None:
+                result = await asyncio.to_thread(
+                    read_synthesis, conversation_store, run, synthesis, report
+                )
+                if result.state == "ready" and snapshot is None:
+                    saved = await asyncio.to_thread(
+                        review_store.save_report_snapshot,
+                        run.coordinator,
+                        result.model_dump_json(),
+                    )
+                    result = ReviewSynthesis.model_validate_json(saved)
+            report = report.model_copy(update={"synthesis": result})
+            if result.follow_up is not None:
+                report = report.model_copy(
+                    update={"follow_up": await observe_follow_up(run, report)}
+                )
+            if not include_finding_keys:
+                report = report.model_copy(
+                    update={
+                        "findings": [
+                            entry.model_copy(update={"finding_key": None})
+                            for entry in report.findings
+                        ]
+                    }
+                )
         return report
+
+    @router.post(
+        "/studio/review-runs/{run_id}/synthesis",
+        response_model=ReviewOperation,
+        dependencies=_WRITE_GATES,
+    )
+    async def synthesize_review_run(request: Request, run_id: str) -> ReviewOperation:
+        run = await owned_run(request, run_id)
+        coordinator = run.coordinator
+        if coordinator is None or coordinator.reviewer_session_id is None or run.plan is None:
+            raise HTTPException(409, "Start the selected reviewers before requesting synthesis.")
+        if send_review is None:
+            raise HTTPException(503, "Native review execution is unavailable")
+        owner = coordinator.owner_user_id
+        key = synthesis_key(run.id)
+        existing = await continuation(owner, key)
+        if existing is not None and existing.state != "pending":
+            return existing
+        await verify_report_session(coordinator)
+        session_id = coordinator.reviewer_session_id
+        session = await asyncio.to_thread(conversation_store.get_conversation, session_id)
+        if session is None or session.runner_id is None:
+            raise HTTPException(409, "The Orchestrator session is unavailable")
+        if session.live_status in {"running", "waiting"}:
+            raise HTTPException(409, "Wait for the Orchestrator's current turn to finish.")
+        anchors = await run_anchors(run.id, owner)
+        if anchors is None:
+            raise HTTPException(409, "This review run has no verified diff.")
+        report = await read_consolidation(run, anchors, include_finding_keys=True)
+        statuses = {member.id: member.dispatch_status for member in run.selected_reviewers()}
+        if not any(entry.report.state == "ready" for entry in report.reviewers) or any(
+            entry.report.state == "pending"
+            and statuses[entry.review_id] not in {"failed", "cancelled"}
+            for entry in report.reviewers
+        ):
+            raise HTTPException(
+                409, "Wait until the reviewers finish and at least one report is ready."
+            )
+        try:
+            prompt, digest = synthesis_prompt(run, report, allow_follow_up=True)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        return await dispatch_review_continuation(request, coordinator, key, prompt, digest)
+
+    @router.post(
+        "/studio/review-runs/{run_id}/follow-up/{phase}",
+        response_model=ReviewOperation,
+        dependencies=_WRITE_GATES,
+    )
+    async def advance_review_follow_up(
+        request: Request, run_id: str, phase: FollowUpPhase
+    ) -> ReviewOperation:
+        run = await owned_run(request, run_id)
+        if run.coordinator is None or run.plan is None:
+            raise HTTPException(409, "This run has no Orchestrator plan")
+        owner = run.coordinator.owner_user_id
+        key = follow_up_key(run.id, phase)
+        existing = await continuation(owner, key)
+        if existing is not None and existing.state != "pending":
+            return existing
+        report = await get_review_run_report(
+            request, Response(), run.id, include_finding_keys=True
+        )
+        proposal, member, finding = follow_up_context(run, report)
+        specialist = None
+        if phase == "return":
+            specialist = report.follow_up.specialist if report.follow_up else None
+            if specialist is None or specialist.state != "ready":
+                raise HTTPException(409, "Wait for the specialist's reply before sending it back")
+            member = run.coordinator
+        if run.target.source_project_id is None:
+            raise HTTPException(409, "A follow-up requires a project review")
+        await current_project_patch(request, run.target, owner, run.id)
+        prompt, digest = follow_up_prompt(run, proposal, finding, specialist=specialist)
+        return await dispatch_review_continuation(request, member, key, prompt, digest)
+
+    async def dispatch_review_continuation(
+        request: Request, member: ReviewPass, key: str, prompt: str, digest: str
+    ) -> ReviewOperation:
+        if send_review is None:
+            raise HTTPException(503, "Native review execution is unavailable")
+        owner = member.owner_user_id
+        session_id = member.reviewer_session_id
+        if session_id is None:
+            raise HTTPException(409, "The review session is unavailable")
+        await verify_report_session(member)
+        session = await asyncio.to_thread(conversation_store.get_conversation, session_id)
+        if session is None or session.runner_id is None:
+            raise HTTPException(409, "The review session is unavailable")
+        if session.live_status in {"running", "waiting"}:
+            raise HTTPException(409, "Wait for the current review turn to finish")
+        try:
+            reserved = await asyncio.to_thread(
+                review_store.reserve_operation,
+                member.id,
+                owner_user_id=owner,
+                action="review.continue",
+                idempotency_key=key,
+                request_hash=digest,
+            )
+        except ReviewConflictError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        operation = reserved.operation
+        if operation.state != "pending":
+            return operation
+        try:
+            claimed = await asyncio.to_thread(
+                review_store.claim_operation,
+                member.id,
+                operation.id,
+                owner_user_id=owner,
+                expected_version=operation.version,
+            )
+        except ReviewConflictError as exc:
+            raise HTTPException(409, "This review turn is already being sent") from exc
+
+        async def mark_unknown() -> ReviewOperation:
+            return await asyncio.to_thread(
+                review_store.mark_unknown,
+                member.id,
+                claimed.id,
+                owner_user_id=owner,
+                expected_version=claimed.version,
+            )
+
+        try:
+            delivery = await send_review(
+                request,
+                session_id,
+                SessionEventInput(
+                    type="message",
+                    data={
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": prompt}],
+                        "stable_id": initial_input_id(claimed.id),
+                    },
+                ),
+                None,  # A follow-up can resume the same session on its captured host.
+            )
+            pending_id = delivery.get("pending_id")
+            if (
+                delivery.get("queued") is not True
+                or not isinstance(pending_id, str)
+                or not pending_id
+            ):
+                raise RuntimeError("Review input acknowledgement is unavailable")
+        except asyncio.CancelledError:
+            await mark_unknown()
+            raise
+        except Exception as exc:  # noqa: BLE001 — delivery may have taken effect
+            _logger.warning(
+                "Studio review turn %s delivery is unconfirmed (%s)", key, type(exc).__name__
+            )
+            return await mark_unknown()
+        return await asyncio.to_thread(
+            review_store.reconcile_operation,
+            member.id,
+            claimed.id,
+            owner_user_id=owner,
+            expected_version=claimed.version,
+            state="running",
+        )
 
     async def require_saved_finding(
         request: Request, run_id: str, finding_key: str, *, allow_collaborator: bool = False
@@ -1646,7 +1928,7 @@ def create_studio_reviews_router(
             raise HTTPException(409, str(exc)) from exc
 
     async def discussion_access(request: Request, run_id: str) -> DiscussionAccess:
-        run_id = _identifier(run_id)
+        run_id = studio_identifier(run_id)
         actor = require_user(request, auth_provider)
         mode = getattr(request.app.state, "sharing_mode", lambda: SharingMode.ON)()
         owner = actor
@@ -1688,6 +1970,16 @@ def create_studio_reviews_router(
         if access.run.patch_sha256 is None:
             raise HTTPException(404, "This review has no captured diff")
         return access
+
+    @router.get("/studio/creator/review-panel", response_model=CreatorPanelContract)
+    async def get_creator_review_panel_contract(
+        request: Request, response: Response
+    ) -> CreatorPanelContract:
+        require_user(request, auth_provider)
+        if not creator_pilot_enabled():
+            raise HTTPException(404, "Creator Mode is unavailable")
+        response.headers["Cache-Control"] = "no-store"
+        return creator_panel_contract()
 
     @router.get(
         "/studio/review-runs/{run_id}/creator-preview", response_model=CreatorPanelContract
@@ -2080,7 +2372,7 @@ def create_studio_reviews_router(
             return await asyncio.to_thread(
                 review_store.change_inline_draft,
                 access.run.id,
-                _identifier(draft_id),
+                studio_identifier(draft_id),
                 actor=access.actor,
                 owner=access.owner,
                 version=version,
@@ -2249,7 +2541,7 @@ def create_studio_reviews_router(
         request: Request, run_id: str, draft_id: str
     ) -> InlineDraft:
         body = await _bounded_json(request, ReconcileInlinePublication, limit=4096)
-        draft_id = _identifier(draft_id)
+        draft_id = studio_identifier(draft_id)
         access = await require_inline_draft_access(request, run_id)
         if not await can_publish_inline(access):
             raise HTTPException(403, "This account cannot reconcile inline comments")
@@ -2387,7 +2679,7 @@ def create_studio_reviews_router(
             return await asyncio.to_thread(
                 review_store.get_discussion_question,
                 access.run.id,
-                _identifier(question_id),
+                studio_identifier(question_id),
                 actor=access.actor,
                 owner=access.owner,
                 intent=intent,
@@ -2400,7 +2692,7 @@ def create_studio_reviews_router(
     async def verify_question_session(
         access: DiscussionAccess, record: QuestionRecord
     ) -> Conversation:
-        session = await _owned_source(
+        session = await require_studio_session(
             record.view.session_id,
             access.actor,
             conversation_store,
@@ -2703,7 +2995,7 @@ def create_studio_reviews_router(
             return await asyncio.to_thread(
                 review_store.update_discussion_question,
                 access.run.id,
-                _identifier(question_id),
+                studio_identifier(question_id),
                 actor=access.actor,
                 owner=access.owner,
                 publish=True,
@@ -2869,8 +3161,8 @@ def create_studio_reviews_router(
         user_id = require_user(request, auth_provider)
         operation = await asyncio.to_thread(
             review_store.get_operation,
-            _identifier(review_id),
-            _identifier(operation_id),
+            studio_identifier(review_id),
+            studio_identifier(operation_id),
             owner_user_id=user_id,
         )
         if operation is None:
@@ -2888,7 +3180,7 @@ def create_studio_reviews_router(
         try:
             page = await asyncio.to_thread(
                 review_store.list_events,
-                _identifier(review_id),
+                studio_identifier(review_id),
                 owner_user_id=user_id,
                 after_sequence=after_sequence,
                 limit=limit,

@@ -684,6 +684,43 @@ def context_api(monkeypatch: pytest.MonkeyPatch) -> dict[str, tuple[int, str, st
     return responses
 
 
+@pytest.mark.parametrize("failure,expected_calls", [("502", 2), ("404", 1)])
+def test_pr_preview_handles_metadata_failure(
+    tracked: str, monkeypatch: pytest.MonkeyPatch, failure: str, expected_calls: int
+) -> None:
+    calls = 0
+
+    def gh(args: list[str], **_kwargs: object) -> tuple[int, str, str]:
+        nonlocal calls
+        assert args[-1] == "repos/example/two/pulls/42"
+        calls += 1
+        if calls == 1:
+            return 1, "", f"gh: fixture (HTTP {failure})"
+        return (
+            0,
+            json.dumps(
+                {
+                    "number": 42,
+                    "title": "Test pull request",
+                    "state": "open",
+                    "head": {"sha": "a" * 40, "ref": "feature"},
+                    "base": {"sha": "b" * 40, "ref": "main"},
+                }
+            ),
+            "",
+        )
+
+    monkeypatch.setattr(github, "_gh", gh)
+    reference = PullRequestRef.from_url(B)
+    if failure == "404":
+        with pytest.raises(ValueError, match="could not find the pull request"):
+            github.read_workspace_pull_request(tracked, reference, include_files=False)
+    else:
+        result = github.read_workspace_pull_request(tracked, reference, include_files=False)
+        assert result["pr"]["head_sha"] == "a" * 40
+    assert calls == expected_calls
+
+
 @pytest.mark.parametrize(
     "endpoint,payload",
     [

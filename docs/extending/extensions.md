@@ -37,25 +37,24 @@ packages are not supported.
 
 ## Creator Mode review panel pilot
 
-Set `OMNIGENT_STUDIO_CREATOR_PILOT=1` on the server and restart. Open a saved
-review discussion and expand **Creator Mode**. For the Studio Compose overlay,
+Set `OMNIGENT_STUDIO_CREATOR_PILOT=1` on the server and restart. Open
+**Creator Mode** from the Omnigent sidebar. For the Studio Compose overlay,
 set the same variable in its environment before recreating the service.
 
-1. Describe a panel and select **Open authoring draft**. The native composer
-   opens with your brief, the installed schema, a QA template, and any draft
-   or diagnostic currently in the editor. You can also copy the prompt.
-2. Review the prompt, select Codex or Claude Code and an isolated workspace,
-   then send it. Return to the original review in the same app window and
-   paste the resulting JSON into **Panel definition**. The authoring handoff
-   keeps the brief and definition in memory until reload. Use **Load QA
-   template** to try the preview without an agent session.
-3. Select **Build preview**. The panel groups checks from findings on that
-   saved revision. **Open and discuss** opens the selected receipt and
-   preselects it in **Ask an agent**. You can review the context before
-   submitting a question.
+1. Choose the review panel extension and select **Open authoring draft**.
+   The native composer opens with your brief, the installed schema, a QA
+   template, and any draft or diagnostic currently in the editor.
+2. Choose an agent and an isolated workspace, then send the brief. Use **Back
+   to Creator Mode** and paste the resulting JSON into **Panel definition**.
+   The handoff keeps the brief and definition in memory until reload. **Load
+   QA template** gives you a starting definition directly.
+3. Paste a saved discussion link under **Saved review for preview**, then
+   select **Use saved review** and **Build preview**. The preview groups
+   check receipts from that revision. The selected review also supplies the
+   project for installation.
 4. Edit and rebuild after a diagnostic. **Download definition** saves the
-   validated JSON for a normal Git branch. The preview belongs to the open
-   discussion and is cleared when you leave it.
+   validated JSON. Once installed, **Open review** lets you try the panel's
+   proof actions in its review discussion.
 
 The preview compiles a bounded JSON definition and renders it with native
 Omnigent components. The definition can choose grouping, filtering, labels,

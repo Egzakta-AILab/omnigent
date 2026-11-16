@@ -29,6 +29,14 @@ vi.mock("@/hooks/useAvailableAgents", () => ({
         builtin: true,
       },
       {
+        id: "my-agent",
+        name: "my-agent",
+        display_name: "My agent",
+        harness: "codex-native",
+        builtin: false,
+        mine: true,
+      },
+      {
         id: "claude",
         name: "claude-native-ui",
         display_name: "Claude Code",
@@ -73,12 +81,28 @@ it("prefills profile defaults and drops model overrides when the harness changes
   vi.mocked(authenticatedFetch).mockImplementation(async (input, init) => {
     const path = String(input).split("?")[0];
     if (path.endsWith("/review-profiles")) return Response.json({ profiles: [profile] });
+    if (String(input).endsWith("/codex-native/model-options?refresh=true")) {
+      return Response.json({
+        models: [
+          {
+            id: "codex-review-model",
+            displayName: "Codex review model",
+            isDefault: true,
+            defaultReasoningEffort: "high",
+            supportedReasoningEfforts: [{ reasoningEffort: "high" }],
+          },
+          { id: "fresh-model", displayName: "Fresh model" },
+        ],
+      });
+    }
     if (path.endsWith("/codex-native/model-options")) {
       return Response.json({
         models: [
           {
             id: "codex-review-model",
             displayName: "Codex review model",
+            isDefault: true,
+            defaultReasoningEffort: "high",
             supportedReasoningEfforts: [{ reasoningEffort: "high" }],
           },
         ],
@@ -110,10 +134,23 @@ it("prefills profile defaults and drops model overrides when the harness changes
   await choose("Reviewer profile", "Security");
   expect(screen.queryByRole("combobox", { name: "Review skill" })).not.toBeInTheDocument();
   expect(screen.getByRole("combobox", { name: "Reviewer" })).toHaveTextContent("Codex");
+  await user.click(screen.getByText("Model and workspace settings", { exact: false }));
   await waitFor(() =>
     expect(screen.getByRole("combobox", { name: "Model" })).toHaveTextContent("Codex review model"),
   );
   expect(screen.getByRole("combobox", { name: "Reasoning effort" })).toHaveTextContent("High");
+  await user.click(screen.getByRole("button", { name: "Refresh models" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Refresh models" })).toBeEnabled());
+  await user.click(screen.getByRole("combobox", { name: "Model" }));
+  expect(await screen.findByRole("option", { name: "Fresh model" })).toBeVisible();
+  expect(screen.getByRole("option", { name: "Codex review model (host default)" })).toBeVisible();
+  await user.keyboard("{Escape}");
+  await user.click(screen.getByRole("combobox", { name: "Reasoning effort" }));
+  expect(screen.getByRole("option", { name: "High (model default)" })).toBeVisible();
+  await user.keyboard("{Escape}");
+  await user.click(screen.getByRole("combobox", { name: "Reviewer" }));
+  expect(screen.queryByRole("option", { name: /My agent/ })).not.toBeInTheDocument();
+  await user.keyboard("{Escape}");
   await user.click(run);
   expect(await screen.findByRole("alert")).toHaveTextContent("Profile changed");
   expect(captures[0]).toMatchObject({
@@ -133,8 +170,12 @@ it("prefills profile defaults and drops model overrides when the harness changes
   expect(screen.getByText(/Model retired-model is unavailable/)).toBeInTheDocument();
   expect(run).toBeDisabled();
   await choose("Reviewer", "Claude Code");
-  expect(screen.getByRole("combobox", { name: "Model" })).toHaveTextContent("Default");
-  expect(screen.getByRole("combobox", { name: "Reasoning effort" })).toHaveTextContent("Default");
+  expect(screen.getByRole("combobox", { name: "Model" })).toHaveTextContent(
+    "Use agent’s model setting",
+  );
+  expect(screen.getByRole("combobox", { name: "Reasoning effort" })).toHaveTextContent(
+    "Use agent’s effort setting",
+  );
   await user.click(run);
   await waitFor(() => expect(captures).toHaveLength(2));
   expect(captures[1]).toMatchObject({
@@ -155,15 +196,21 @@ it.each(["single", "run", "coordinated"] as const)(
     const baseSha = "1".repeat(40);
     const headSha = "2".repeat(40);
     const capturePath = "/v1/projects/project/studio/reviews";
-    const launchPath = "/v1/studio/reviews/review/start";
     const profile = { id: "backend", label: "Backend", digest: "b".repeat(64) };
     const security = { id: "security", label: "Security", digest: "c".repeat(64) };
+    const orchestrator = {
+      id: "orchestrator",
+      label: "Orchestrator",
+      digest: "d".repeat(64),
+      defaults: { harness: "claude-native", model: "planning-model" },
+    };
     const runsPath = "/v1/projects/project/studio/review-runs";
     const runPath = "/v1/studio/review-runs/run";
     const findingKey = "f".repeat(64);
     const reproductionPath = `${runPath}/findings/${findingKey}/reproductions`;
     let runWasStarted = false;
     let planWasApproved = false;
+    let synthesisRequested = false;
     let receiptAttached = false;
     let receiptAccessDenied = false;
     const captured = {
@@ -179,7 +226,12 @@ it.each(["single", "run", "coordinated"] as const)(
       profile: { harness: "codex-native", role: profile },
       dispatch_status: "not_requested",
     };
-    const launched = { ...captured, dispatch_status: "succeeded", reviewer_session_id: "review" };
+    const launched = {
+      ...captured,
+      run_id: "run",
+      dispatch_status: "succeeded",
+      reviewer_session_id: "review",
+    };
     const second = {
       ...launched,
       id: "other",
@@ -204,12 +256,18 @@ it.each(["single", "run", "coordinated"] as const)(
     };
     const digest = "a".repeat(64);
     function visibleRun() {
+      if (mode === "single") return { ...run, reviewers: [launched] };
       if (mode !== "coordinated") return run;
       return {
         ...run,
-        coordinator: { ...launched, id: "coordinator", reviewer_session_id: "coordinator" },
+        coordinator: {
+          ...launched,
+          id: "coordinator",
+          reviewer_session_id: "coordinator",
+          profile: { harness: "claude-native", role: orchestrator, model: "planning-model" },
+        },
         reviewers: [
-          { ...(planWasApproved ? launched : captured), run_role: "required" },
+          { ...(planWasApproved ? launched : captured), run_role: "candidate" },
           { ...second, reviewer_session_id: null, dispatch_status: "not_requested" },
         ],
         plan: planWasApproved ? plan : null,
@@ -254,10 +312,12 @@ it.each(["single", "run", "coordinated"] as const)(
       const url = new URL(String(input), "http://localhost");
       const path = url.pathname;
       if (init?.method === "POST") {
-        posts.push({ path, body: JSON.parse(String(init.body)) });
-        if (path === capturePath) return Response.json({ review: captured });
-        if (path === launchPath) return Response.json(launched);
+        posts.push({ path, body: init.body ? JSON.parse(String(init.body)) : undefined });
         if (path === runsPath) return Response.json(visibleRun());
+        if (path === `${runPath}/synthesis`) {
+          synthesisRequested = true;
+          return Response.json({ state: "running" });
+        }
         if (path === reproductionPath) {
           receiptAttached = true;
           return Response.json(evidence);
@@ -288,6 +348,9 @@ it.each(["single", "run", "coordinated"] as const)(
                     },
                   ],
                   findings: [{ finding, review_ids: ["review"] }],
+                  synthesis: synthesisRequested
+                    ? { state: "ready", summary: "Coordinator synthesis", conflicts: [] }
+                    : null,
                 }
               : { proposal: { state: "ready", plan, digest }, reviewers: [], findings: [] },
           );
@@ -313,7 +376,7 @@ it.each(["single", "run", "coordinated"] as const)(
       if (path === "/v1/projects/project/studio/review-profiles") {
         expect(url.searchParams.get("host_id")).toBe("selected-host");
         expect(url.searchParams.get("workspace")).toBe("/selected workspace");
-        return Response.json({ profiles: [profile, security] });
+        return Response.json({ profiles: [orchestrator, profile, security] });
       }
       if (path.endsWith("/codex-native/model-options")) return Response.json({ models: [] });
       if (path === "/v1/skills") return Response.json({ skills: [] });
@@ -335,44 +398,72 @@ it.each(["single", "run", "coordinated"] as const)(
             workspace="/selected workspace"
             repository="nested/repo"
             revision={{ prUrl, baseSha, headSha }}
+            previousProfile={
+              mode === "single"
+                ? { agent_id: "codex", harness: "codex-native", role: profile, skill: null }
+                : undefined
+            }
             onReviewStarted={onReviewStarted}
           />
         </QueryClientProvider>
       </MemoryRouter>,
     );
     const user = userEvent.setup();
-    await user.click(await screen.findByRole("combobox", { name: "Reviewer profile" }));
-    await user.click(await screen.findByRole("option", { name: "Backend" }));
-    await user.click(screen.getByRole("combobox", { name: "Reviewer" }));
-    await user.click(await screen.findByRole("option", { name: "Codex" }));
-    if (mode !== "single") {
-      await user.click(screen.getByRole("button", { name: "Add reviewer to run" }));
-      if (mode === "coordinated") {
-        await user.click(screen.getByRole("button", { name: "Use as coordinator" }));
-        await user.click(screen.getByRole("checkbox", { name: "Require Backend · Codex" }));
-      }
+    const defaultMode = screen.getByRole("button", { name: "Orchestrator" });
+    expect(defaultMode).toHaveAttribute("aria-pressed", "true");
+    if (mode === "coordinated") {
+      expect(screen.queryByRole("combobox", { name: "Reviewer profile" })).toBeNull();
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: "Run orchestrated review" })).toBeEnabled(),
+      );
+      await user.click(screen.getByRole("button", { name: "Run orchestrated review" }));
+      const approval = await screen.findByRole("button", {
+        name: "Approve plan and start reviewers",
+      });
+      expect(screen.getByText("No security paths changed.")).toBeVisible();
+      expect(screen.queryByText("Consolidated findings")).toBeNull();
+      expect(posts[0].body).toMatchObject({
+        coordinator: {
+          profile_id: "orchestrator",
+          harness: "claude-native",
+          model: "planning-model",
+        },
+        reviewers: [
+          { profile_id: "backend", host_id: "selected-host", expected_head_sha: headSha },
+          { profile_id: "security", host_id: "selected-host", expected_head_sha: headSha },
+        ],
+      });
+      expect(posts[0].body).not.toHaveProperty("required_reviewer_indices");
+      expect(posts).toHaveLength(2);
+      await user.click(approval);
+      expect(await screen.findByText("1 / 1 reports ready")).toBeVisible();
+      expect(screen.getByText("Backend report")).toBeVisible();
+      await user.click(screen.getByText("Reviewer selection and reasons"));
+      expect(screen.getByText("Skipped")).toBeVisible();
+      expect(screen.getByText("Plan approved")).toBeVisible();
+      expect(posts[2]).toEqual({ path: `${runPath}/start`, body: { proposal_digest: digest } });
+      await user.click(screen.getByRole("button", { name: "Consolidate with Orchestrator" }));
+      expect(await screen.findByText("Coordinator synthesis")).toBeVisible();
+      expect(posts[3]?.path).toBe(`${runPath}/synthesis`);
+      return;
+    }
+
+    if (mode === "single") {
+      await user.click(
+        await screen.findByRole("button", { name: "Use previous reviewer settings" }),
+      );
+      expect(posts).toHaveLength(0);
+    } else {
+      await user.click(screen.getByRole("button", { name: "Manual" }));
+      await user.click(await screen.findByRole("combobox", { name: "Reviewer profile" }));
+      expect(screen.queryByRole("option", { name: "Orchestrator" })).toBeNull();
+      await user.click(await screen.findByRole("option", { name: "Backend" }));
+      await user.click(screen.getByRole("combobox", { name: "Reviewer" }));
+      await user.click(await screen.findByRole("option", { name: "Codex" }));
+      await user.click(screen.getByRole("button", { name: "Add reviewer" }));
       await user.click(screen.getByRole("combobox", { name: "Reviewer profile" }));
       await user.click(await screen.findByRole("option", { name: "Security" }));
-      await user.click(screen.getByRole("button", { name: "Add reviewer to run" }));
-      if (mode === "coordinated") {
-        await user.click(screen.getByRole("button", { name: "Ask coordinator to plan" }));
-        const approval = await screen.findByRole("button", {
-          name: "Approve plan and start reviewers",
-        });
-        expect(screen.getByText("No security paths changed.")).toBeVisible();
-        expect(screen.queryByText("Consolidated findings")).toBeNull();
-        expect(posts[0].body).toMatchObject({
-          coordinator: { profile_id: "backend" },
-          required_reviewer_indices: [0],
-        });
-        expect(posts).toHaveLength(2);
-        await user.click(approval);
-        expect(await screen.findByText("1 / 1 reports ready")).toBeVisible();
-        expect(screen.getByText("Skipped")).toBeVisible();
-        expect(screen.getByText("Plan approved")).toBeVisible();
-        expect(posts[2]).toEqual({ path: `${runPath}/start`, body: { proposal_digest: digest } });
-        return;
-      }
+      await user.click(screen.getByRole("button", { name: "Add reviewer" }));
       await user.click(screen.getByRole("button", { name: "Run selected reviewers" }));
       expect(await screen.findByText("2 / 2 reports ready")).toBeVisible();
       expect(screen.getByText("Consolidated findings")).toBeVisible();
@@ -415,25 +506,25 @@ it.each(["single", "run", "coordinated"] as const)(
     await waitFor(() => expect(onReviewStarted).toHaveBeenCalledWith(launched));
     expect(posts).toEqual([
       {
-        path: capturePath,
+        path: runsPath,
         body: {
-          pr_url: prUrl,
-          expected_base_sha: baseSha,
-          expected_head_sha: headSha,
-          agent_id: "codex",
-          harness: "codex-native",
-          profile_id: "backend",
-          profile_digest: "b".repeat(64),
-          host_id: "selected-host",
-          workspace: "/selected workspace",
-          repository: "nested/repo",
+          reviewers: [
+            {
+              pr_url: prUrl,
+              expected_base_sha: baseSha,
+              expected_head_sha: headSha,
+              agent_id: "codex",
+              harness: "codex-native",
+              profile_id: "backend",
+              profile_digest: "b".repeat(64),
+              host_id: "selected-host",
+              workspace: "/selected workspace",
+              repository: "nested/repo",
+            },
+          ],
         },
       },
-      { path: launchPath, body: {} },
+      { path: `${runPath}/start`, body: {} },
     ]);
-    expect(await screen.findByRole("link", { name: "Open review report" })).toHaveAttribute(
-      "href",
-      "/c/review?view=review",
-    );
   },
 );

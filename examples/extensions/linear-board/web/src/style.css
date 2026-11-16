@@ -1,0 +1,98 @@
+:root {
+  color-scheme: light dark;
+  font:
+    14px/1.5 system-ui,
+    sans-serif;
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+body {
+  margin: 0;
+  background: Canvas;
+  color: CanvasText;
+}
+main {
+  padding: clamp(16px, 3vw, 32px);
+  display: grid;
+  gap: 16px;
+}
+header {
+  border-bottom: 1px solid color-mix(in srgb, CanvasText 18%, transparent);
+  padding-bottom: 12px;
+}
+h1,
+h2,
+p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+h1 {
+  font-size: 23px;
+}
+h2 {
+  font-size: 15px;
+}
+.connection,
+.detail {
+  display: grid;
+  justify-items: start;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+  max-width: 44rem;
+}
+.detail > p {
+  white-space: pre-wrap;
+}
+label {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+button,
+select,
+input {
+  font: inherit;
+  padding: 7px 10px;
+  border: 1px solid color-mix(in srgb, CanvasText 28%, transparent);
+  border-radius: 6px;
+  max-width: 100%;
+}
+button {
+  cursor: pointer;
+}
+button:disabled {
+  cursor: default;
+}
+.filters {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  align-items: end;
+}
+.issue-search {
+  display: flex;
+  align-items: end;
+  gap: 6px;
+}
+.issue-list {
+  display: grid;
+  gap: 6px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.issue-list button {
+  display: grid;
+  width: 100%;
+  gap: 3px;
+  text-align: left;
+  background: Canvas;
+  overflow-wrap: anywhere;
+}
+.issue-list small {
+  opacity: 0.75;
+}

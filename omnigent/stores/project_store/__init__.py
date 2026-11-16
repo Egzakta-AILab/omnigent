@@ -110,6 +110,7 @@ class ProjectStore(ABC):
         user_id: str | None,
         name: str | None = None,
         config: dict[str, Any] | None = None,
+        linear_issue: dict[str, str] | None = None,
     ) -> Project | None:
         """
         Update mutable fields of an owned project.
@@ -123,6 +124,7 @@ class ProjectStore(ABC):
             non-empty, unique among the owner's projects.
         :param config: New config object to replace the stored one, or ``None``
             to leave it unchanged. An empty dict clears the stored defaults.
+        :param linear_issue: Snapshot to store if the project has no saved issue details.
         :returns: The updated :class:`Project`, or ``None`` if not found.
         :raises OmnigentError: ``ALREADY_EXISTS`` if the new name collides with
             another of the owner's projects.
