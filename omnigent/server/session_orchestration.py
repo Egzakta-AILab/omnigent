@@ -76,6 +76,17 @@ def require_owned_session(
     raise OmnigentError("Session is not owned or available", code=ErrorCode.FORBIDDEN)
 
 
+def require_session_delegation(source: Conversation) -> None:
+    if (
+        source.labels.get("omnigent.studio.review") == "true"
+        and source.git_branch == f"studio-review/{source.id}"
+    ):
+        raise OmnigentError(
+            "Task reviewers run in a single session. Use Studio to request another review.",
+            code=ErrorCode.FORBIDDEN,
+        )
+
+
 def require_orchestration_source(
     request: Request,
     user_id: str | None,
@@ -101,6 +112,7 @@ def require_orchestration_source(
         raise OmnigentError(
             "Session orchestration requires the sender's bound runner", code=ErrorCode.FORBIDDEN
         )
+    require_session_delegation(source)
     if target_id is not None:
         target = require_owned_session(target_id, user_id, conversations, permissions)
         if source.id == target.id:

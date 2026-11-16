@@ -1,13 +1,23 @@
+import { ReadableMarkdown } from "@/components/ReadableMarkdown";
 import { useState } from "react";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { EllipsisIcon } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Link } from "@/lib/routing";
 import { FindingReproductions } from "./FindingReproductions";
 import {
   getCapturedReviewDiff,
+  getReviewRun,
   getReviewRunReport,
   listProjectReviewRuns,
+  requestReviewSynthesis,
   startReview,
   startReviewRun,
   type ReviewPass,
@@ -23,11 +33,48 @@ import {
 } from "./ReviewResult";
 
 import { ReviewDiff } from "./ReviewDiff";
+import { ReviewFollowUp } from "./ReviewFollowUp";
 
 type Revision = Pick<ReviewSource, "prUrl" | "baseSha" | "headSha">;
 
 export function reviewRunsKey(viewerId: string | null, projectId: string, prUrl: string) {
   return ["studio-review-runs", viewerId, projectId, prUrl] as const;
+}
+
+export function useProjectReviewRuns(
+  viewerId: string | null,
+  projectId: string,
+  prUrl: string,
+  enabled = true,
+) {
+  return useInfiniteQuery({
+    queryKey: reviewRunsKey(viewerId, projectId, prUrl),
+    queryFn: ({ pageParam, signal }) => listProjectReviewRuns(projectId, prUrl, pageParam, signal),
+    initialPageParam: null as string | null,
+    getNextPageParam: (page) => page.next_cursor ?? undefined,
+    enabled,
+    retry: false,
+    staleTime: 10_000,
+    refetchInterval: (query) =>
+      query.state.data?.pages.some((page) =>
+        page.entries.some(
+          (run) =>
+            run.coordinator?.dispatch_status === "dispatching" ||
+            run.reviewers.some((member) => member.dispatch_status === "dispatching"),
+        ),
+      )
+        ? 4_000
+        : false,
+  });
+}
+
+export function currentReviewRun(runs: ReviewRun[], revision: Revision) {
+  return runs.find(
+    (run) =>
+      !run.target.candidate &&
+      run.target.base_sha === revision.baseSha &&
+      run.target.head_sha === revision.headSha,
+  );
 }
 
 function isPendingRun(run: ReviewRun | undefined, report: ReviewRunReport | undefined) {
@@ -69,6 +116,7 @@ export function ReviewRunsPanel({
   onOpenSource,
   launchErrors,
   launchPending,
+  fixedRun = false,
 }: {
   projectId: string;
   revision: Revision;
@@ -78,34 +126,32 @@ export function ReviewRunsPanel({
   onOpenSource?: (source: ReviewSource) => void;
   launchErrors?: { run: ReviewRun; errors: Record<string, string> };
   launchPending: boolean;
+  fixedRun?: boolean;
 }) {
   const queryClient = useQueryClient();
   const [selectedMember, setSelectedMember] = useState("");
   const [captured, setCaptured] = useState<{ runId: string; source: ReviewSource | null }>();
   const key = reviewRunsKey(viewerId, projectId, revision.prUrl);
-  const runs = useInfiniteQuery({
-    queryKey: key,
-    queryFn: ({ pageParam, signal }) =>
-      listProjectReviewRuns(projectId, revision.prUrl, pageParam, signal),
-    initialPageParam: null as string | null,
-    getNextPageParam: (page) => page.next_cursor ?? undefined,
+  const runs = useProjectReviewRuns(viewerId, projectId, revision.prUrl, !fixedRun);
+  const fixed = useQuery({
+    queryKey: ["studio-review-run", viewerId, selectedRunId],
+    queryFn: ({ signal }) => getReviewRun(selectedRunId, signal),
+    enabled: fixedRun && !!selectedRunId,
     retry: false,
     refetchInterval: (query) =>
-      query.state.data?.pages.some((page) =>
-        page.entries.some(
-          (item) =>
-            item.coordinator?.dispatch_status === "dispatching" ||
-            item.reviewers.some((entry) => entry.dispatch_status === "dispatching"),
-        ),
-      )
+      query.state.data?.coordinator?.dispatch_status === "dispatching" ||
+      query.state.data?.reviewers.some((entry) => entry.dispatch_status === "dispatching")
         ? 4_000
         : false,
   });
   const entries = (runs.data?.pages ?? []).flatMap((page) => page.entries);
-  const run =
-    entries.find((entry) => entry.id === selectedRunId) ??
-    entries.find((entry) => !entry.target.candidate) ??
-    entries[0];
+  const run = fixedRun
+    ? fixed.data
+    : (entries.find((entry) => entry.id === selectedRunId) ??
+      currentReviewRun(entries, revision) ??
+      entries.find((entry) => !entry.target.candidate) ??
+      entries[0]);
+  const reloadRun = () => (fixedRun ? fixed.refetch() : runs.refetch());
   const capturedOpen = !!run?.patch_sha256 && captured?.runId === run.id && !runs.isRefetchError;
   const capturedSource = capturedOpen ? (captured?.source ?? null) : null;
   const savedDiff = useQuery({
@@ -125,7 +171,13 @@ export function ReviewRunsPanel({
     queryFn: ({ signal }) => getReviewRunReport(run!.id, signal),
     enabled: !!run && !runs.isRefetchError,
     retry: false,
-    refetchInterval: (query) => (isPendingRun(run, query.state.data) ? 4_000 : false),
+    refetchInterval: (query) =>
+      isPendingRun(run, query.state.data) ||
+      query.state.data?.synthesis?.state === "pending" ||
+      query.state.data?.follow_up?.specialist?.state === "pending" ||
+      query.state.data?.follow_up?.coordinator?.state === "pending"
+        ? 4_000
+        : false,
   });
   const start = useMutation({
     mutationFn: async ({
@@ -144,18 +196,28 @@ export function ReviewRunsPanel({
       return (await startReviewRun(runId, proposalDigest)).errors;
     },
     onSettled: async () => {
-      await Promise.all([queryClient.invalidateQueries({ queryKey: key }), report.refetch()]);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: key }),
+        ...(fixedRun ? [fixed.refetch()] : []),
+        report.refetch(),
+      ]);
     },
   });
 
-  if (runs.isError && !runs.isFetchNextPageError) {
+  const synthesisAction = useMutation({
+    mutationFn: requestReviewSynthesis,
+    onSettled: () => report.refetch(),
+  });
+
+  if (fixedRun && fixed.isPending) return <p role="status">Loading review run…</p>;
+  if ((fixedRun && fixed.isError) || (runs.isError && !runs.isFetchNextPageError)) {
     return (
       <section className="space-y-2 border-t border-border pt-3">
         <h3 className="font-medium">Review runs</h3>
         <p role="alert" className="text-muted-foreground">
           Couldn’t load review runs.
         </p>
-        <Button variant="outline" size="sm" onClick={() => void runs.refetch()}>
+        <Button variant="outline" size="sm" onClick={() => void reloadRun()}>
           Retry
         </Button>
       </section>
@@ -176,6 +238,27 @@ export function ReviewRunsPanel({
   const selected = run.reviewers.filter(
     (entry) => !coordinator || (!!run.plan && decisions.get(entry.id)?.selected),
   );
+  const synthesis = report.data?.synthesis;
+  const canSynthesize =
+    !!run.plan &&
+    ready > 0 &&
+    selected.every(
+      (entry) =>
+        ["failed", "cancelled"].includes(entry.dispatch_status) ||
+        report.data?.reviewers.some(
+          (result) => result.review_id === entry.id && result.report.state !== "pending",
+        ),
+    );
+  const planningStatus =
+    proposal?.state === "ready"
+      ? "Plan ready for approval"
+      : coordinator?.dispatch_status === "not_requested"
+        ? "Coordinator queued"
+        : coordinator?.dispatch_status === "failed" ||
+            coordinator?.dispatch_status === "cancelled" ||
+            !!proposal?.error
+          ? "Planning stopped"
+          : "Coordinator planning";
   const member = run.reviewers.find((entry) => entry.id === selectedMember);
   const memberReport = report.data?.reviewers.find(
     (entry) => entry.review_id === member?.id,
@@ -224,32 +307,62 @@ export function ReviewRunsPanel({
     <section aria-label="Review runs" className="space-y-3 border-t border-border pt-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h3 className="font-medium">Review runs</h3>
-        <Badge variant="secondary">
-          {awaitingPlan ? "Planning reviewers" : `${ready} / ${selected.length} reports ready`}
-        </Badge>
+        <div className="flex items-center gap-1">
+          <Badge variant="secondary" role="status">
+            {awaitingPlan ? planningStatus : `${ready} / ${selected.length} reports ready`}
+          </Badge>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                aria-label="Review run actions"
+                className="mobile-touch-target"
+              >
+                <EllipsisIcon />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem onSelect={() => void Promise.all([reloadRun(), report.refetch()])}>
+                Refresh run
+              </DropdownMenuItem>
+              {run.patch_sha256 && (
+                <DropdownMenuItem
+                  onSelect={() =>
+                    setCaptured(capturedOpen ? undefined : { runId: run.id, source: null })
+                  }
+                >
+                  {capturedOpen ? "Close captured diff" : "Open captured diff"}
+                </DropdownMenuItem>
+              )}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
       </div>
-      <label className="block space-y-1 text-xs">
-        <span>Review run</span>
-        <select
-          className="h-8 w-full rounded-md border bg-background px-2 text-sm"
-          value={run.id}
-          onChange={(event) => {
-            onSelectRun(event.target.value);
-            setSelectedMember("");
-            setCaptured(undefined);
-            start.reset();
-          }}
-        >
-          {entries.map((entry) => (
-            <option key={entry.id} value={entry.id}>
-              {entry.target.head_sha.slice(0, 8)} · {entry.reviewers.length}{" "}
-              {entry.coordinator ? "candidates" : "reviewers"} ·{" "}
-              {entry.target.candidate && "Candidate snapshot · "}
-              {new Date(entry.created_at).toLocaleString()}
-            </option>
-          ))}
-        </select>
-      </label>
+      {!fixedRun && (
+        <label className="block space-y-1 text-xs">
+          <span>Review run</span>
+          <select
+            className="h-8 w-full rounded-md border bg-background px-2 text-sm"
+            value={run.id}
+            onChange={(event) => {
+              onSelectRun(event.target.value);
+              setSelectedMember("");
+              setCaptured(undefined);
+              start.reset();
+            }}
+          >
+            {entries.map((entry) => (
+              <option key={entry.id} value={entry.id}>
+                {entry.target.head_sha.slice(0, 8)} · {entry.reviewers.length}{" "}
+                {entry.coordinator ? "candidates" : "reviewers"} ·{" "}
+                {entry.target.candidate && "Candidate snapshot · "}
+                {new Date(entry.created_at).toLocaleString()}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
       {runs.hasNextPage && (
         <Button
           size="sm"
@@ -262,11 +375,89 @@ export function ReviewRunsPanel({
       )}
       <p className="font-mono text-xs text-muted-foreground">
         {run.target.base_sha.slice(0, 8)} → {run.target.head_sha.slice(0, 8)}
-        {run.target.candidate ? " · Candidate snapshot" : !current && " · Earlier revision"}
+        {run.target.candidate ? " · Candidate snapshot" : !current && " · Outdated"}
       </p>
-      <p className="wrap-break-word text-xs text-muted-foreground">
-        {run.target.workspace} · Host {run.target.host_id}
-      </p>
+      <details className="text-xs text-muted-foreground">
+        <summary className="w-fit cursor-pointer">Run environment</summary>
+        <p className="mt-1 wrap-break-word">
+          {run.target.workspace} · Host {run.target.host_id}
+        </p>
+      </details>
+      {coordinator && run.plan && (
+        <section aria-label="Orchestrator synthesis" className="space-y-2 rounded-md border p-3">
+          <h4 className="font-medium">Orchestrator synthesis</h4>
+          {synthesis?.summary && (
+            <ReadableMarkdown className="text-sm">{synthesis.summary}</ReadableMarkdown>
+          )}
+          {!!synthesis?.conflicts.length && (
+            <ul className="space-y-2 text-sm">
+              {synthesis.conflicts.map((conflict) => (
+                <li key={JSON.stringify(conflict.finding_keys)} className="rounded-md border p-2">
+                  <p className="font-medium">Reviewer disagreement</p>
+                  <p>{conflict.detail}</p>
+                  <ul className="mt-1 text-xs text-muted-foreground">
+                    {conflict.finding_keys.map((findingKey) => {
+                      const source = report.data?.findings.find(
+                        (entry) => entry.finding_key === findingKey,
+                      );
+                      return source ? (
+                        <li key={findingKey}>
+                          {source.finding.path}:{source.finding.line} · {source.finding.title}
+                        </li>
+                      ) : null;
+                    })}
+                  </ul>
+                </li>
+              ))}
+            </ul>
+          )}
+          {synthesis?.state === "pending" && (
+            <p role="status">The Orchestrator is reading the specialist reports…</p>
+          )}
+          {synthesis?.state === "unknown" && (
+            <p role="status">Delivery is unconfirmed. Check the Orchestrator transcript.</p>
+          )}
+          {synthesis?.state === "incomplete" && (
+            <p role="status">
+              The Orchestrator did not return a complete synthesis. The specialist reports are
+              below.
+            </p>
+          )}
+          {!synthesis && (
+            <>
+              <p className="text-sm text-muted-foreground">
+                {canSynthesize
+                  ? "Send the saved specialist reports to the Orchestrator."
+                  : "Synthesis is available when the reviewers finish and at least one report is ready."}
+              </p>
+              <Button
+                size="sm"
+                className="mobile-touch-target"
+                disabled={!canSynthesize || synthesisAction.isPending}
+                onClick={() => synthesisAction.mutate(run.id)}
+              >
+                {synthesisAction.isPending
+                  ? "Requesting synthesis…"
+                  : "Consolidate with Orchestrator"}
+              </Button>
+            </>
+          )}
+          {synthesisAction.error && (
+            <p role="alert" className="text-destructive">
+              {synthesisAction.error.message}
+            </p>
+          )}
+          {report.data && (
+            <ReviewFollowUp
+              key={run.id}
+              run={run}
+              report={report.data}
+              current={current}
+              refresh={report.refetch}
+            />
+          )}
+        </section>
+      )}
       {coordinator && (
         <section aria-label="Coordinator" className="space-y-2 rounded-md border p-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
@@ -274,10 +465,10 @@ export function ReviewRunsPanel({
               <h4 className="font-medium">Coordinator</h4>
               <p className="text-sm text-muted-foreground">{reviewSettingsLabel(coordinator)}</p>
             </div>
-            {coordinator.reviewer_session_id && (
+            {coordinator.reviewer_session_id && !fixedRun && (
               <Button asChild size="sm" variant="outline">
-                <Link to={`/c/${encodeURIComponent(coordinator.reviewer_session_id)}?view=chat`}>
-                  Open planning session
+                <Link to={`/c/${encodeURIComponent(coordinator.reviewer_session_id)}?view=review`}>
+                  Open Orchestrator
                 </Link>
               </Button>
             )}
@@ -287,7 +478,7 @@ export function ReviewRunsPanel({
           ) : (
             <p className="text-sm" role="status">
               {proposal?.state === "ready"
-                ? "Review the proposed roster below."
+                ? "Review the proposed roster below. Reviewer sessions start after approval."
                 : proposal?.error ||
                   coordinator.launch_error ||
                   errors?.[coordinator.id] ||
@@ -308,55 +499,118 @@ export function ReviewRunsPanel({
           )}
         </section>
       )}
-      <ul className="divide-y divide-border">
-        {run.reviewers.map((entry) => {
-          const decision = decisions.get(entry.id);
-          const hasReportView = !coordinator || (!!run.plan && decision?.selected);
-          return (
-            <li key={entry.id} className="flex flex-wrap items-center justify-between gap-2 py-2">
-              {hasReportView ? (
-                <button
-                  type="button"
-                  className="min-w-0 text-left text-sm [overflow-wrap:anywhere] hover:underline"
-                  aria-pressed={member?.id === entry.id}
-                  onClick={() => setSelectedMember(entry.id)}
-                >
-                  {reviewSettingsLabel(entry)}
-                </button>
-              ) : (
-                <span className="min-w-0 text-sm [overflow-wrap:anywhere]">
-                  {reviewSettingsLabel(entry)}
-                </span>
-              )}
-              <div className="flex gap-1">
-                {entry.run_role === "required" && <Badge variant="secondary">Required</Badge>}
-                <Badge variant="outline">
-                  {hasReportView
-                    ? memberStatus(entry, report.data)
-                    : decision
-                      ? decision.selected
-                        ? "Selected"
-                        : "Skipped"
-                      : "Candidate"}
-                </Badge>
-              </div>
-              {decision && (
-                <p className="basis-full break-words text-xs text-muted-foreground">
-                  {decision.reason}
-                </p>
-              )}
-              {(entry.launch_error || errors?.[entry.id]) && (
-                <p className="basis-full text-xs text-destructive">
-                  {entry.launch_error || errors?.[entry.id]}
-                </p>
-              )}
-            </li>
-          );
-        })}
-      </ul>
+      {!awaitingPlan && selected.length > 0 && (
+        <section aria-label="Specialist reports" className="space-y-3">
+          <h4 className="font-medium">Specialist reports</h4>
+          {selected.map((entry) => {
+            const result = report.data?.reviewers.find(
+              (item) => item.review_id === entry.id,
+            )?.report;
+            return (
+              <article key={entry.id} className="space-y-2 rounded-md border p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h5 className="font-medium">{reviewSettingsLabel(entry)}</h5>
+                  <Badge variant="outline">{memberStatus(entry, report.data)}</Badge>
+                </div>
+                {result?.summary && (
+                  <ReadableMarkdown className="text-sm">{result.summary}</ReadableMarkdown>
+                )}
+                <div className="flex flex-wrap gap-2">
+                  {entry.reviewer_session_id && (
+                    <Button asChild size="sm" variant="ghost">
+                      <Link to={`/c/${encodeURIComponent(entry.reviewer_session_id)}?view=chat`}>
+                        Transcript
+                      </Link>
+                    </Button>
+                  )}
+                  {result &&
+                    (result.findings.length > 0 || !!result.unverified_findings?.length) && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setSelectedMember(entry.id)}
+                      >
+                        View findings ({result.findings.length})
+                      </Button>
+                    )}
+                </div>
+              </article>
+            );
+          })}
+        </section>
+      )}
+      <details open={awaitingPlan}>
+        <summary className="cursor-pointer text-sm text-muted-foreground">
+          Reviewer selection and reasons
+        </summary>
+        <ul className="divide-y divide-border">
+          {run.reviewers.map((entry) => {
+            const decision = decisions.get(entry.id);
+            const hasReportView = !coordinator || (!!run.plan && decision?.selected);
+            return (
+              <li key={entry.id} className="flex flex-wrap items-center justify-between gap-2 py-2">
+                {hasReportView ? (
+                  <button
+                    type="button"
+                    className="min-w-0 text-left text-sm [overflow-wrap:anywhere] hover:underline"
+                    aria-pressed={member?.id === entry.id}
+                    onClick={() => setSelectedMember(entry.id)}
+                  >
+                    {reviewSettingsLabel(entry)}
+                  </button>
+                ) : (
+                  <span className="min-w-0 text-sm [overflow-wrap:anywhere]">
+                    {reviewSettingsLabel(entry)}
+                  </span>
+                )}
+                <div className="flex gap-1">
+                  {entry.run_role === "required" && <Badge variant="secondary">Required</Badge>}
+                  <Badge variant="outline">
+                    {hasReportView
+                      ? memberStatus(entry, report.data)
+                      : decision
+                        ? decision.selected
+                          ? "Selected"
+                          : "Skipped"
+                        : "Candidate"}
+                  </Badge>
+                </div>
+                {decision && (
+                  <p className="basis-full break-words text-xs text-muted-foreground">
+                    {decision.reason}
+                  </p>
+                )}
+                {decision?.assignment && (
+                  <div className="basis-full space-y-1 break-words text-sm">
+                    <p>
+                      <span className="font-medium">Assignment</span>{" "}
+                      {decision.assignment.objective}
+                    </p>
+                    {decision.assignment.acceptance_criterion && (
+                      <p>
+                        <span className="font-medium">Acceptance criterion</span>{" "}
+                        {decision.assignment.acceptance_criterion}
+                      </p>
+                    )}
+                    <p>
+                      <span className="font-medium">Expected evidence</span>{" "}
+                      {decision.assignment.expected_evidence}
+                    </p>
+                  </div>
+                )}
+                {(entry.launch_error || errors?.[entry.id]) && (
+                  <p className="basis-full text-xs text-destructive">
+                    {entry.launch_error || errors?.[entry.id]}
+                  </p>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      </details>
       <div className="flex flex-wrap gap-2">
         {run.patch_sha256 && (
-          <Button asChild size="sm" variant="outline">
+          <Button asChild size="sm" variant="outline" className="mobile-touch-target">
             <Link to={`/reviews/${encodeURIComponent(run.id)}/discussion`}>Discuss review</Link>
           </Button>
         )}
@@ -378,23 +632,7 @@ export function ReviewRunsPanel({
             Start pending reviewers
           </Button>
         )}
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() => void Promise.all([runs.refetch(), report.refetch()])}
-        >
-          Refresh run
-        </Button>
       </div>
-      {run.patch_sha256 && (
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() => setCaptured(capturedOpen ? undefined : { runId: run.id, source: null })}
-        >
-          {capturedOpen ? "Close captured diff" : "Open captured diff"}
-        </Button>
-      )}
       {capturedOpen && (
         <section aria-label="Captured diff" className="space-y-2 rounded-md border p-2">
           <h4 className="font-medium">Captured diff</h4>
@@ -465,9 +703,6 @@ export function ReviewRunsPanel({
                     </Button>
                   )}
               </div>
-              {memberReport?.summary && (
-                <p className="whitespace-pre-wrap">{memberReport.summary}</p>
-              )}
               <ol className="space-y-2">
                 {Array.from(
                   uniqueReviewFindings(memberReport?.findings),

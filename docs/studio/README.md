@@ -33,6 +33,23 @@ Starting again from this checkout reuses its local conversations and review
 records. The `--clean` option wipes that state. See the
 [supervisor guide](../../dev/omnidev/README.md#isolation) for storage and logs.
 
+If the Codex model picker still shows an older catalog after **Refresh models**,
+check `command -v codex` and `codex --version` in the launch terminal. Refresh
+asks the same host CLI for its catalog. To use the Codex CLI bundled with the
+ChatGPT app on this Mac, stop the supervisor and run these commands from the
+checkout:
+
+```sh
+codex_app_bin="/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS"
+export PATH="$codex_app_bin:$PWD/.omnigent/tools/bin:$HOME/.local/bin:$PATH"
+command -v codex
+codex --version
+OMNIGENT_STUDIO_CREATOR_PILOT=1 .omnigent/build/cargo/debug/omnidev
+```
+
+Reopen the UI from the supervisor's header and refresh models again. For other
+hosts, put the intended installed CLI first on that host's launch `PATH`.
+
 If you already use the Omnigent desktop app, choose **Server → Change
 Server…** and enter the `server` URL from the same header. The desktop app
 uses the backend URL. Your browser uses the `ui` URL. In either client,
@@ -409,6 +426,11 @@ provenance needs.
 
 ## Run a review locally
 
+The fork enables Review/QA by default. Set `OMNIGENT_STUDIO_REVIEWS=0`
+and restart the server to run a workspace without Review/QA. You can still
+browse repositories and pull requests. Re-enable it to access existing review
+records. Configure reviewers from the PR’s **Review** tab or project settings.
+
 1. Start the local instance, connect your host and open a session you own in
    a workspace where you already run Codex or Claude Code.
 2. In the target repository, use `gh auth status` to check GitHub sign-in and
@@ -434,9 +456,25 @@ provenance needs.
 
 The reviewer runs in the captured workspace with the selected agent's normal
 permissions. It receives the PR diff at the captured base and head revisions.
-The first version accepts GitHub text diffs up to 48 KiB. A moved revision
-requires a fresh capture. Review reports and reproduction receipts are separate.
+Session reviews accept GitHub text diffs up to 48 KiB. Linear task sessions
+use project review runs in the PR tab, with the project's trusted host and
+checkout for profile selection. The reviewer gets a new worktree at the
+captured PR head. Ensure that commit is available in the checkout's Git
+objects. Project review runs use the saved, chunked diff limit and preserve
+older verdicts as **Outdated** when the PR revision moves. Review reports and reproduction receipts are separate.
 See the [review API and state model](review-records.md) for retry behavior.
+
+Use **Refresh models** to ask the selected host for a fresh Codex or Claude
+Code catalog. The host's CLI login and provider configuration determine which
+models appear. Cursor's new-session picker reads its models from the host's
+Cursor CLI. The PR reviewer picker shows your available agents and marks those
+that launch in regular sessions only.
+
+**Custom skill** discovers skills for the selected reviewer in the selected
+workspace. **Reviewer profile** applies the workspace's review instructions.
+The native reviewer uses the MCP configuration available to that CLI on the
+execution host. The review form has no MCP service selector and does not carry
+over per-session MCP selections from another chat.
 
 ### Share reviewer profiles with a workspace
 
@@ -468,9 +506,9 @@ profiles:
 Egzakta's workspace references the shared Backend, Frontend, AI Quality,
 and CI/CD QA lenses and keeps private-review versions of KVARK's Security
 and Orchestrator instructions in the meta-repo.
-The review uses the Markdown body as guidance for a single private review of
-the captured PR diff. Orchestrator applies its routing criteria within that
-review. Native tool permissions and the requested model come from the selected
+Each specialist uses its profile's Markdown as guidance for a private review
+of the captured PR diff. The Orchestrator uses its profile to choose
+specialists from the eligible workspace profiles. Native tool permissions and the requested model come from the selected
 harness and launch settings. History records the requested model and profile.
 If the profile changes after capture, start a fresh review to use the new version.
 
@@ -506,33 +544,66 @@ Leave **Random worktree** off so new sessions open the root that contains your
 nested clones.
 
 Open the project or choose **New session in project**. Workspace opens beside
-the composer using its selected host and directory. Browse **Files**, choose
-an agent, or manage reviewer profiles under **Profiles**. Use **Add file to
-prompt** or **Add PR to prompt** to carry a reference into your first message.
+the composer on desktop. On a phone, the project opens in the composer. Tap
+**Workspace** to browse and **Back to chat** to return to your draft. Both use
+the selected host and directory. Browse **Files**, choose an agent, or manage
+reviewer profiles under **Profiles**. Use **Add file to prompt** or **Add PR to prompt**
+in the PR actions menu to compose with that reference.
 
 To start with a review, select a repository under **Pull Requests**, then
 choose an open PR or paste its GitHub URL. The **Diff** tab opens first. Inspect
-a changed file, then choose **Review → Run review**. The private reviewer
-session opens on a report with the captured revision, reviewer settings,
-summary, and findings. **Open transcript** shows the original exchange. In
-the PR’s **Review** tab, use **Show in diff** to jump to the cited file and
-line for a saved finding on the current revision.
+a changed file, then open **Review**. Choose **Manual → Run diff review** for
+a single specialist and its private report. **Open PR in Workspace** opens
+the reviewed PR from the report. **Open finding** opens the cited line in the
+captured diff with the discussion, check and fix proposals, and inline comment
+drafts. **Open transcript** shows the original exchange.
 
-To group reviewers on the same revision, configure one reviewer and select
-**Add reviewer to run**. Repeat for the other profiles or skills, then select
-**Run selected reviewers**. A run captures the roster before launching its
-private reviewer sessions. Under **Review runs**, open the consolidation or
-select an individual reviewer to inspect the report. The run keeps its
-first complete report for each reviewer once read and shows a reason when
-a reviewer cannot start. A run with missing reports shows partial coverage.
+If an older report has no saved run, open the PR in Workspace and start a new
+diff review from its **Review** tab. The new run captures the current PR
+revision.
 
-To let an agent choose the roster, configure a reviewer and select **Use as
-coordinator**. Add reviewer candidates and check **Required** beside anyone the
-run must include. Select **Ask coordinator to plan**. The run shows which
-candidates the coordinator chose or skipped and why. **Approve plan and start
-reviewers** saves those decisions and starts the selected reviewers. The planning
-session is available from the run, and consolidation counts the selected
-reviewers. Each review launch checks that the PR still matches the captured diff.
+**Orchestrator** is the default for a project PR. It uses the workspace's
+`orchestrator` profile and gets its candidate list from the other workspace
+profiles that have an available reviewer. Choose **Run orchestrated review**
+to have it read the captured diff and decide which specialists to use.
+**Review runs** shows its choices, omissions, and reasons. **Approve plan and
+start reviewers** saves the plan and starts a private session for each
+selected specialist. **Open Orchestrator** opens the run with the captured
+PR, specialist reports, and a link to the coordinator transcript.
+
+When the reviewers finish, choose **Consolidate with Orchestrator** to send
+the saved reports to the same coordinator session. The run shows its
+synthesis and links disagreements to the reported findings. The individual
+reports and severity-ranked findings are available while synthesis runs.
+
+If the Orchestrator identifies an evidence gap, the run shows its proposed
+question and recipient. Choose **Send question to specialist** to continue
+the original review session. When the reply arrives, choose **Return reply to
+Orchestrator** for an assessment. The question, reply, assessment, and links
+to the original sessions stay with the run. Both sends require the captured
+PR revision to match. Agent replies describe what was observed or blocked.
+Use the sandbox check workflow for verified execution receipts.
+
+This flow uses the same worker-continuation pattern as
+[Polly’s cross-review recipe](../../examples/polly/skills/cross-review/SKILL.md).
+Studio uses its own approved review sends because its reviewers are independent
+sessions. The [messaging boundary](../session-messaging-tool-boundary.md) explains
+how Omnigent distinguishes independent sessions from child delegation.
+
+Use **Manual** to select specific reviewers. Run the configured reviewer
+directly or select **Add reviewer** for each member and then **Run selected
+reviewers**. Under **Review runs**, open the consolidation or select a
+reviewer to inspect its report. A run with missing reports shows partial
+coverage.
+
+Under **Model and workspace settings**, the picker shows the model and effort
+advertised by the host when available. **Use agent’s model setting** means the
+native agent resolves the model at launch. Select a named model to request it
+explicitly.
+
+Each reviewer reads the captured diff. Repository checks are proposed and
+approved separately in the discussion. Each review launch checks that the PR
+still matches the captured diff.
 
 New runs save the revision-checked diff before dispatch. **Show in captured
 diff** opens a finding's cited line from that saved copy, even after the PR
@@ -727,7 +798,8 @@ line range. The draft records the path, side, and range on the captured PR.
 You can edit or discard your draft from the same thread. Each author sees
 their own drafts, including in a review shared with teammates.
 
-The review owner can select drafts in **Publish inline drafts**, choose
+Use **Review drafts to publish** from the thread to reach **Publish inline drafts**.
+The review owner or a teammate with publishing access can select drafts, choose
 **Preview selected**, and confirm with **Publish inline comments**. The preview
 shows the exact text, lines, and PR revision. Omnigent checks the revision again
 at confirmation and posts each selected draft as its own thread from the
@@ -781,8 +853,9 @@ session uses the selected native agent's permissions. It receives numbered
 rows near the selected line. Omnigent checks each cited path, side, line and
 quote against the saved diff. A failed check leaves the reply available in
 the private session for inspection. When the answer is ready, **Share answer**
-adds it and its matched excerpts to the internal thread. The excerpts show
-which text the agent cited. Judge its interpretation separately.
+adds it and its matched excerpts to the internal thread. Use **Continue in
+private session** on an answer you shared to ask a follow-up with that
+conversation's context. The excerpts show which text the agent cited.
 
 For any workspace, open **Project settings → Repositories**, or open
 **Manage repositories** from the PR panel. The managers run on the connected

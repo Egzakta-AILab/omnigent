@@ -2601,7 +2601,7 @@ export async function fetchProjectSessionIds(project: string, limit = 2): Promis
 }
 
 /** One page of the viewer's sessions in a project, newest-first. */
-async function fetchProjectSessionsPage(
+export async function fetchProjectSessionsPage(
   project: string,
   after?: string,
   limit = 20,

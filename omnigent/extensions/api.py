@@ -19,6 +19,7 @@ class ExtensionPermission(StrEnum):
     """Host capabilities an extension may request."""
 
     NAVIGATION = "navigation"
+    LINEAR_READ = "linear.read"
     PROJECTS_READ = "projects.read"
     PROJECTS_WRITE = "projects.write"
     SESSIONS_READ = "sessions.read"

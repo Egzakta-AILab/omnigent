@@ -73,7 +73,8 @@ def test_panel_opens_the_native_receipt_and_prefills_without_submitting(
     bundle = "d" * 64
     base = "1" * 40
     head = "2" * 40
-    review_path = "/v1/studio/review-runs/creator-fixture"
+    run_id = "f" * 32
+    review_path = f"/v1/studio/review-runs/{run_id}"
     asset = f"/v1/extensions/example.qa/assets/{bundle}/script"
     contract = review_shell.contract
     contract.json(
@@ -103,7 +104,7 @@ def test_panel_opens_the_native_receipt_and_prefills_without_submitting(
     contract.json(
         f"{review_path}/discussion",
         {
-            "id": "creator-fixture",
+            "id": run_id,
             "project_name": "Creator test",
             "repository": "example/workspace",
             "pr_url": "https://example.test/pr/1",
@@ -198,11 +199,14 @@ def test_panel_opens_the_native_receipt_and_prefills_without_submitting(
             route.fulfill(json=installation)
 
         contract.route(f"{contract.base_url}{installation_path}", respond_installation)
-    page.goto(f"{review_shell.base_url}/reviews/creator-fixture/discussion")
+    if entry == "creator":
+        contract.json("/v1/info", {"single_user": True, "studio_creator": True})
+    discussion_url = f"{review_shell.base_url}/reviews/{run_id}/discussion"
+    page.goto(discussion_url)
     if entry == "creator":
         path = f"{review_path}/creator-preview"
         catalog = creator_panel_contract()
-        contract.json(path, catalog.model_dump(mode="json"))
+        contract.json("/v1/studio/creator/review-panel", catalog.model_dump(mode="json"))
         contract.json(
             f"/v1/hosts/{review_shell.host_id}/filesystem",
             {"path": "/", "entries": []},
@@ -215,7 +219,7 @@ def test_panel_opens_the_native_receipt_and_prefills_without_submitting(
             raw = route.request.post_data or ""
             try:
                 preview = compile_creator_panel(
-                    raw.encode(), run_id="creator-fixture", base_sha=base, head_sha=head
+                    raw.encode(), run_id=run_id, base_sha=base, head_sha=head
                 )
             except ValidationError:
                 route.fulfill(status=422, json={"detail": "proof_action: Unknown action."})
@@ -223,24 +227,20 @@ def test_panel_opens_the_native_receipt_and_prefills_without_submitting(
                 route.fulfill(status=200, json=preview.model_dump(mode="json"))
 
         contract.route(f"{contract.base_url}{path}", build_preview)
+        expect(page.get_by_role("heading", name="Review discussion")).to_be_visible()
+        expect(page.get_by_label("Describe the panel")).to_have_count(0)
+        page.get_by_role("link", name="Creator Mode", exact=True).click()
+        expect(page.get_by_role("heading", name="Creator Mode", exact=True)).to_be_visible()
         page.get_by_test_id("new-chat-button").click()
         composer = page.get_by_test_id("new-chat-landing-input")
         composer.fill("My ordinary session draft")
         page.go_back()
-        page.get_by_text("Creator Mode", exact=True).click()
         page.get_by_role("button", name="Load QA template").click()
         editor = page.get_by_label("Panel definition (JSON)")
         valid = editor.input_value()
-        editor.fill(valid.replace('"open_and_discuss"', '"send"'))
         build = page.get_by_role("button", name="Build preview")
-        build.click()
-        expect(page.get_by_role("alert").filter(has_text="Unknown action")).to_be_visible()
-        page.context.grant_permissions(["clipboard-read", "clipboard-write"])
-        page.get_by_role("button", name="Copy authoring prompt").click()
-        expect(page.get_by_text("Authoring prompt copied.", exact=False)).to_be_visible()
-        prompt = page.evaluate("navigator.clipboard.readText()")
-        assert "Installed schema:" in prompt and "Unknown action" in prompt
-        assert "Captured check failure." not in prompt
+        expect(build).to_be_disabled()
+        expect(page.get_by_role("region", name="Project panel installation")).to_have_count(0)
         brief = page.get_by_label("Describe the panel")
         brief.fill("Group failures by directory for the QA team.")
         page.get_by_role("button", name="Open authoring draft").click()
@@ -252,11 +252,22 @@ def test_panel_opens_the_native_receipt_and_prefills_without_submitting(
         assert review_shell.event_posts == []
         page.get_by_role("link", name="Back to Creator Mode").click()
         expect(brief).to_have_value("Group failures by directory for the QA team.")
-        expect(editor).to_have_value(valid.replace('"open_and_discuss"', '"send"'))
+        expect(editor).to_have_value(valid)
         page.get_by_test_id("new-chat-button").click()
         expect(composer).to_contain_text("My ordinary session draft")
         page.go_back()
         expect(editor).to_be_visible()
+        page.get_by_label("Saved review for preview").fill(discussion_url)
+        page.get_by_role("button", name="Use saved review").click()
+        editor.fill(valid.replace('"open_and_discuss"', '"send"'))
+        build.click()
+        expect(page.get_by_role("alert").filter(has_text="Unknown action")).to_be_visible()
+        page.context.grant_permissions(["clipboard-read", "clipboard-write"])
+        page.get_by_role("button", name="Copy authoring prompt").click()
+        expect(page.get_by_text("Authoring prompt copied.", exact=False)).to_be_visible()
+        prompt = page.evaluate("navigator.clipboard.readText()")
+        assert "Installed schema:" in prompt and "Unknown action" in prompt
+        assert "Captured check failure." not in prompt
         editor.fill(valid.replace('"file"', '"directory"').replace("QA checks", "QA by folder"))
         pending_receipts: list[Route] = []
         receipts_url = f"{contract.base_url}{receipts_path}"
@@ -281,20 +292,23 @@ def test_panel_opens_the_native_receipt_and_prefills_without_submitting(
         expect(preview).to_have_count(0)
         expect(page.get_by_text("Preview is out of date.", exact=False)).to_be_visible()
         build.click()
-        preview.get_by_role("button", name="Open and discuss").click()
-        expect(page.get_by_role("article").filter(has_text="sandbox:fixture")).to_be_focused()
-        expect(page.get_by_label("Include check receipt")).to_have_value(receipt)
+        expect(preview.get_by_role("button", name="Open and discuss")).to_have_count(0)
         controls = page.get_by_role("region", name="Project panel installation")
         enable = controls.get_by_role("button", name="Enable preview")
         expect(enable).to_be_disabled()
         controls.get_by_role("checkbox", name="Approve these capabilities").check()
         enable.click()
+        expect(preview).to_have_count(0)
+        page.get_by_role("link", name="Open review", exact=True).click()
         installed = page.get_by_role("region", name="Installed Creator panel")
         expect(installed.get_by_role("heading", name="QA checks", exact=True)).to_be_visible()
-        expect(preview).to_have_count(0)
+        expect(page.get_by_label("Describe the panel")).to_have_count(0)
+        installed.get_by_role("button", name="Open and discuss").click()
+        expect(page.get_by_role("article").filter(has_text="sandbox:fixture")).to_be_focused()
+        expect(page.get_by_label("Include check receipt")).to_have_value(receipt)
         page.reload()
         expect(installed.get_by_role("heading", name="QA checks", exact=True)).to_be_visible()
-        page.get_by_text("Creator Mode", exact=True).click()
+        page.go_back()
         controls.get_by_role("button", name="Edit installed definition").click()
         editor.fill(valid.replace("QA checks", "QA updated").replace("open_and_discuss", "open"))
         build.click()
@@ -302,16 +316,23 @@ def test_panel_opens_the_native_receipt_and_prefills_without_submitting(
         expect(update).to_be_disabled()
         controls.get_by_role("checkbox", name="Approve these capabilities").check()
         update.click()
+        expect(preview).to_have_count(0)
+        page.get_by_role("link", name="Open review", exact=True).click()
         expect(installed.get_by_role("heading", name="QA updated", exact=True)).to_be_visible()
         expect(installed.get_by_role("button", name="Open proof", exact=True)).to_be_visible()
+        page.go_back()
         controls.get_by_label("Version history").select_option("1")
         controls.get_by_role("checkbox", name="Approve these capabilities").check()
         controls.get_by_role("button", name="Roll back to version 1").click()
+        page.get_by_role("link", name="Open review", exact=True).click()
         expect(installed.get_by_role("heading", name="QA checks", exact=True)).to_be_visible()
         expect(
             installed.get_by_role("button", name="Open and discuss", exact=True)
         ).to_be_visible()
+        page.go_back()
         controls.get_by_role("button", name="Disable panel").click()
+        expect(controls.get_by_role("button", name="Disable panel")).to_have_count(0)
+        page.get_by_role("link", name="Open review", exact=True).click()
         expect(installed).to_have_count(0)
         assert [action["expected_revision"] for action in writes] == [0, 1, 2, 3]
         assert [len(action.get("approved_capabilities", [])) for action in writes] == [3, 2, 3, 0]

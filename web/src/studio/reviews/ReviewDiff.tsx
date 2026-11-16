@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { parsePatchFiles } from "@pierre/diffs";
 import { FileDiff } from "@pierre/diffs/react";
 import { useResolvedThemeMode } from "@/components/theme/useResolvedThemeMode";
@@ -14,6 +14,7 @@ export function ReviewDiff({
   onClearSource,
   discussionRange,
   onSelectRange,
+  revealCitedLine = true,
 }: {
   patch: string;
   truncated: boolean;
@@ -21,6 +22,7 @@ export function ReviewDiff({
   sourceLine?: string | null;
   onClearSource: () => void;
   discussionRange?: Extract<DiscussionAnchor, { kind: "diff" }>;
+  revealCitedLine?: boolean;
   onSelectRange?: (range: Extract<DiscussionAnchor, { kind: "diff" }> | null) => void;
 }) {
   const themeMode = useResolvedThemeMode();
@@ -57,12 +59,19 @@ export function ReviewDiff({
   const diffContainer = useRef<HTMLDivElement>(null);
   const scrolledSource = useRef<ReviewSource | null>(null);
   const revealSource = useCallback(() => {
+    if (!revealCitedLine) {
+      scrolledSource.current = null;
+      return;
+    }
     if (!source || !anchor || !diffContainer.current || scrolledSource.current === source) return;
     const row = findDiffRow(anchor, diffContainer.current);
     if (!row) return;
     scrolledSource.current = source;
     row.scrollIntoView({ block: "nearest" });
-  }, [anchor, source]);
+  }, [anchor, revealCitedLine, source]);
+  useEffect(() => {
+    revealSource();
+  }, [revealSource]);
 
   return (
     <div className="space-y-2">

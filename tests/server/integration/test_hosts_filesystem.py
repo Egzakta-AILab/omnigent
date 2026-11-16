@@ -192,7 +192,8 @@ async def fs_setup(
                 )
                 continue
             if isinstance(frame, HostModelOptionsFrame):
-                reply = replies.get(f"model:{frame.harness}", {})
+                key = f"model:{frame.harness}"
+                reply = replies.get(key + (":refresh" if frame.refresh else ""), {})
                 await comm.send_input(
                     {
                         "type": "websocket.receive",
@@ -412,11 +413,15 @@ async def test_host_model_options_returns_prelaunch_catalog(
         "routable_models": ["system.ai.claude-sonnet-4-6[1m]"],
     }
 
+    refreshed_rows = [{"id": "new-model", "displayName": "New model"}]
+    replies["model:claude-native:refresh"] = {"models": refreshed_rows}
+    path = f"/v1/hosts/{_HOST_ID}/harnesses/claude-native/model-options"
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.get(
-            f"/v1/hosts/{_HOST_ID}/harnesses/claude-native/model-options",
-        )
+        resp = await client.get(path)
+        refreshed = await client.get(path, params={"refresh": "true"})
 
+    assert refreshed.status_code == 200, refreshed.text
+    assert refreshed.json()["models"] == refreshed_rows
     assert resp.status_code == 200
     assert resp.json() == {
         "models": [

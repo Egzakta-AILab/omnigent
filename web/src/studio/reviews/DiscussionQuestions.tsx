@@ -2,9 +2,17 @@ import { useId, useState, type RefObject } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { nativeEffortOptions } from "@/components/HarnessConfigControls";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { useAvailableAgents } from "@/hooks/useAvailableAgents";
 import { triggerBrowserDownload } from "@/hooks/useFileContent";
 import { useHostModelOptions, useHosts } from "@/hooks/useHosts";
+import { reviewModelLabels } from "./reviewModelLabels";
+import { ReviewModelRefresh } from "./ReviewModelRefresh";
 import { nativeCodingAgentForAgentName } from "@/lib/nativeCodingAgents";
 import { randomUUID } from "@/lib/randomUUID";
 import { Link } from "@/lib/routing";
@@ -205,6 +213,8 @@ function AskForm({
   anchor,
   viewerId,
   action,
+  draftKey,
+  drafts,
   attempt,
   refresh,
   suggestedProof,
@@ -213,6 +223,8 @@ function AskForm({
   anchor: DiscussionAnchor;
   viewerId: string | null;
   action: QuestionAction;
+  draftKey: string;
+  drafts: RefObject<Map<string, string>>;
   attempt: RefObject<QuestionAttempt | undefined>;
   refresh: () => Promise<void>;
   suggestedProof?: ReviewProofTarget;
@@ -239,11 +251,13 @@ function AskForm({
       : "";
   const isProposal = action !== "question";
   const [body, setBody] = useState(
-    action === "propose_check"
-      ? "Propose a sandbox check that can reproduce this finding."
-      : action === "propose_fix"
-        ? "Propose a focused patch for this finding."
-        : "",
+    () =>
+      drafts.current.get(draftKey) ??
+      (action === "propose_check"
+        ? "Propose a sandbox check that can reproduce this finding."
+        : action === "propose_fix"
+          ? "Propose a focused patch for this finding."
+          : ""),
   );
   const [reviewWorkspace, setReviewWorkspace] = useState(!!discussion.can_use_review_workspace);
   const [hostId, setHostId] = useState("");
@@ -274,7 +288,11 @@ function AskForm({
   const models = modelCatalog.data ?? [];
   const { model, effort } =
     modelChoice?.scope === modelScope ? modelChoice : { model: "", effort: "" };
-  const validModel = !model || models.some((option) => option.id === model);
+  const { modelId, modelName, defaultModelLabel, defaultEffortLabel } = reviewModelLabels(
+    models,
+    model,
+  );
+  const validModel = !model || !!modelId;
   const efforts = validModel
     ? (nativeEffortOptions(nativeAgent?.harness, models, model) ?? [])
     : [];
@@ -290,7 +308,10 @@ function AskForm({
     mutationFn: (input: AskReviewQuestion) => askReviewQuestion(discussion.id, input),
     onSuccess: async (_question, input) => {
       if (attempt.current?.id === input.id) attempt.current = undefined;
-      setBody("");
+      if ((drafts.current.get(draftKey) ?? body).trim() === input.body) {
+        drafts.current.set(draftKey, "");
+        setBody("");
+      }
       await refresh();
     },
   });
@@ -424,7 +445,7 @@ function AskForm({
                 setModelChoice({ scope: modelScope, model: event.target.value, effort: "" })
               }
             >
-              <option value="">Agent default</option>
+              <option value="">{defaultModelLabel}</option>
               {!validModel && (
                 <option value={model} disabled>
                   {model} (unavailable)
@@ -436,6 +457,9 @@ function AskForm({
                 </option>
               ))}
             </select>
+            {modelId && modelId !== modelName && (
+              <p className="break-all text-xs text-muted-foreground">{modelId}</p>
+            )}
           </div>
           {(efforts.length > 0 || effort) && (
             <div className="grid gap-1">
@@ -449,7 +473,7 @@ function AskForm({
                   setModelChoice({ scope: modelScope, model, effort: event.target.value })
                 }
               >
-                <option value="">Default</option>
+                <option value="">{defaultEffortLabel}</option>
                 {!validEffort && (
                   <option value={effort} disabled>
                     {effort} (unavailable)
@@ -464,15 +488,14 @@ function AskForm({
             </div>
           )}
           {modelCatalog.isPending && <p role="status">Loading models…</p>}
-          {modelCatalog.isError && (
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              onClick={() => void modelCatalog.refetch()}
-            >
-              Retry loading models
-            </Button>
+          {modelHost && (
+            <ReviewModelRefresh
+              key={modelScope}
+              hostId={modelHost}
+              harness={nativeAgent.harness}
+              loading={modelCatalog.isFetching}
+              loadError={modelCatalog.isError}
+            />
           )}
         </div>
       )}
@@ -495,7 +518,10 @@ function AskForm({
         maxLength={2000}
         value={body}
         disabled={ask.isPending}
-        onChange={(event) => setBody(event.target.value)}
+        onChange={(event) => {
+          drafts.current.set(draftKey, event.target.value);
+          setBody(event.target.value);
+        }}
       />
       <Button type="submit" size="sm" disabled={!ready || ask.isPending}>
         {ask.isPending
@@ -512,6 +538,8 @@ function AskForm({
 export function DiscussionQuestions({
   discussion,
   anchor,
+  draftKey,
+  drafts,
   questions,
   answers,
   viewerId,
@@ -521,6 +549,8 @@ export function DiscussionQuestions({
 }: {
   discussion: ReviewDiscussion;
   anchor: DiscussionAnchor;
+  draftKey: string;
+  drafts: RefObject<Map<string, string>>;
   questions: ReviewQuestion[];
   answers: SharedReviewAnswer[];
   viewerId: string | null;
@@ -540,23 +570,93 @@ export function DiscussionQuestions({
         : null;
   const setOpen = (action: QuestionAction | null) =>
     setComposer({ suggestion: suggestedProof, action });
+  const privateSessions = new Map(
+    questions
+      .filter((question) => question.published_at)
+      .map((question) => [question.id, question.session_id]),
+  );
   return (
     <div className="space-y-2">
-      {answers.map((item) => (
-        <article key={item.id} className="space-y-1 rounded-md border p-2 text-sm">
-          <p className="text-xs font-medium">
-            {REVIEW_HARNESS_LABELS[item.harness]} answer · Shared by {item.requested_by ?? "Local"}
-          </p>
-          <p className="whitespace-pre-wrap break-words text-muted-foreground">{item.question}</p>
-          {item.proof_digest && (
-            <p className="text-xs text-muted-foreground">
-              Check receipt · {item.proof_digest.slice(0, 8)}
-            </p>
+      {discussion.can_ask && (
+        <>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              className="mobile-touch-target"
+              aria-expanded={open === "question"}
+              onClick={() => setOpen(open === "question" ? null : "question")}
+            >
+              Ask an agent
+            </Button>
+            {anchor.kind === "finding" && !discussion.candidate && (
+              <Button
+                size="sm"
+                variant="outline"
+                className="mobile-touch-target"
+                aria-expanded={open === "propose_fix"}
+                onClick={() => setOpen(open === "propose_fix" ? null : "propose_fix")}
+              >
+                Propose a fix
+              </Button>
+            )}
+            {anchor.kind === "finding" && discussion.check_repository && (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button size="sm" variant="ghost" className="mobile-touch-target">
+                    More actions
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent>
+                  <DropdownMenuItem
+                    onSelect={() => setOpen(open === "propose_check" ? null : "propose_check")}
+                  >
+                    Draft sandbox check
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            )}
+          </div>
+          {open && (
+            <AskForm
+              key={open}
+              draftKey={JSON.stringify([draftKey, open])}
+              drafts={drafts}
+              action={open}
+              discussion={discussion}
+              anchor={anchor}
+              viewerId={viewerId}
+              attempt={attempt}
+              refresh={refresh}
+              suggestedProof={open === "propose_check" ? undefined : suggestedProof}
+            />
           )}
-          <p className="whitespace-pre-wrap break-words">{item.answer}</p>
-          <AnswerCitations citations={item.citations} />
-        </article>
-      ))}
+        </>
+      )}
+      {answers.map((item) => {
+        const sessionId = privateSessions.get(item.id);
+        return (
+          <article key={item.id} className="space-y-1 rounded-md border p-2 text-sm">
+            <p className="text-xs font-medium">
+              {REVIEW_HARNESS_LABELS[item.harness]} answer · Shared by{" "}
+              {item.requested_by ?? "Local"}
+            </p>
+            <p className="whitespace-pre-wrap break-words text-muted-foreground">{item.question}</p>
+            {item.proof_digest && (
+              <p className="text-xs text-muted-foreground">
+                Check receipt · {item.proof_digest.slice(0, 8)}
+              </p>
+            )}
+            <p className="whitespace-pre-wrap break-words">{item.answer}</p>
+            <AnswerCitations citations={item.citations} />
+            {sessionId && (
+              <Button asChild size="sm" variant="outline">
+                <Link to={`/c/${encodeURIComponent(sessionId)}`}>Continue in private session</Link>
+              </Button>
+            )}
+          </article>
+        );
+      })}
       {questions
         .filter((question) => !question.published_at)
         .map((question) => (
@@ -569,52 +669,6 @@ export function DiscussionQuestions({
             refresh={refresh}
           />
         ))}
-      {discussion.can_ask && (
-        <>
-          <div className="flex flex-wrap gap-2">
-            <Button
-              size="sm"
-              variant="outline"
-              aria-expanded={open === "question"}
-              onClick={() => setOpen(open === "question" ? null : "question")}
-            >
-              Ask an agent
-            </Button>
-            {anchor.kind === "finding" && (
-              <Button
-                size="sm"
-                variant="outline"
-                aria-expanded={open === "propose_fix"}
-                onClick={() => setOpen(open === "propose_fix" ? null : "propose_fix")}
-              >
-                Propose a fix
-              </Button>
-            )}
-            {anchor.kind === "finding" && discussion.check_repository && (
-              <Button
-                size="sm"
-                variant="outline"
-                aria-expanded={open === "propose_check"}
-                onClick={() => setOpen(open === "propose_check" ? null : "propose_check")}
-              >
-                Draft sandbox check
-              </Button>
-            )}
-          </div>
-          {open && (
-            <AskForm
-              key={open}
-              action={open}
-              discussion={discussion}
-              anchor={anchor}
-              viewerId={viewerId}
-              attempt={attempt}
-              refresh={refresh}
-              suggestedProof={open === "question" ? suggestedProof : undefined}
-            />
-          )}
-        </>
-      )}
     </div>
   );
 }

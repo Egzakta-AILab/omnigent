@@ -119,9 +119,10 @@ export function useHosts(options: UseHostsOptions = {}) {
 async function fetchHostModelOptions(
   hostId: string,
   harness: string,
+  refresh = false,
 ): Promise<NativeModelOption[]> {
   const res = await authenticatedFetch(
-    `/v1/hosts/${encodeURIComponent(hostId)}/harnesses/${encodeURIComponent(harness)}/model-options`,
+    `/v1/hosts/${encodeURIComponent(hostId)}/harnesses/${encodeURIComponent(harness)}/model-options${refresh ? "?refresh=true" : ""}`,
   );
   if (!res.ok) {
     let detail = `${res.status} ${res.statusText}`;
@@ -138,6 +139,19 @@ async function fetchHostModelOptions(
   // Backward compatibility with servers that encoded probe failure in a 200.
   if (models.length === 0 && body.error) throw new Error(body.error);
   return models;
+}
+
+export function useRefreshHostModelOptions(hostId: string, harness: string) {
+  const queryClient = useQueryClient();
+  const server = getOmnigentServerIdentity();
+  return useMutation({
+    mutationFn: () => fetchHostModelOptions(hostId, harness, true),
+    onSuccess: async (models) => {
+      const queryKey = ["host-model-options", hostId, harness, server];
+      await queryClient.cancelQueries({ queryKey, exact: true });
+      queryClient.setQueryData(queryKey, models);
+    },
+  });
 }
 
 // A shared request may start from an inactive observer while another needs retries.

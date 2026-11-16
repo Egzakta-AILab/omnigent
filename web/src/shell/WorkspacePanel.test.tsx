@@ -449,6 +449,7 @@ describe("WorkspacePanel surface presentation", () => {
           ...FALLBACK_SERVER_INFO,
           single_user: singleUser,
           studio_workspace_settings: true,
+          studio_reviews: true,
         },
         showBrowserTab: true,
       });

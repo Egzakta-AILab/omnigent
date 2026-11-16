@@ -335,7 +335,9 @@ from omnigent.util.session_lifecycle import (
     is_session_closed,
 )
 
-ReviewSend = Callable[[Request, str, SessionEventInput, str], Awaitable[dict[str, bool | str]]]
+ReviewSend = Callable[
+    [Request, str, SessionEventInput, str | None], Awaitable[dict[str, bool | str]]
+]
 
 # custom-lint: disable-next=workspace-scoped-cache -- lock; collision only serializes
 _retry_recovery_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
@@ -3596,9 +3598,9 @@ def register_events_routes(
         request: Request,
         session_id: str,
         body: SessionEventInput,
-        runner_id: str,
+        runner_id: str | None,
     ) -> dict[str, bool | str]:
-        """Deliver the claimed review's first message to its original runner."""
+        """Pin initial review input or resume the bound session for a follow-up."""
         if body.type != "message" or body.data.get("role") != "user":
             raise OmnigentError(
                 "A review starts with a user message", code=ErrorCode.INVALID_INPUT

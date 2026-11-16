@@ -536,8 +536,14 @@ async def test_coordinator_approval_checks_revision_and_dispatches_only_selected
         for name in (CODEX_NATIVE_AGENT_NAME, CLAUDE_NATIVE_AGENT_NAME)
     ]
     provider_head = HEAD_SHA
+    isolated = False
+    local_head_available = False
     patch = (
-        "diff --git a/check.py b/check.py\n--- a/check.py\n+++ b/check.py\n"
+        "diff --git a/fixtures.txt b/fixtures.txt\n--- /dev/null\n+++ b/fixtures.txt\n"
+        "@@ -0,0 +1,2000 @@\n"
+        + ("+" + "x" * 98 + "\n")
+        * 2000
+        + "diff --git a/check.py b/check.py\n--- a/check.py\n+++ b/check.py\n"
         "@@ -1 +1 @@\n-old\n+new\n"
     )
     profile_digest = "3" * 64
@@ -561,6 +567,8 @@ async def test_coordinator_approval_checks_revision_and_dispatches_only_selected
                     "head_sha": provider_head,
                 }
             }
+        if op == "studio_project_pull_request_local_head":
+            return {"available": local_head_available}
         assert op == "studio_project_pull_request_patch"
         return {
             "object": "session.github.pr_diff",
@@ -578,7 +586,8 @@ async def test_coordinator_approval_checks_revision_and_dispatches_only_selected
             conversation_id=session_id,
             agent_id=review.profile.agent_id,
             host_id=target.host_id,
-            workspace=target.workspace,
+            workspace=f"/review-worktrees/{session_id}" if isolated else target.workspace,
+            git_branch=f"studio-review/{session_id}" if isolated else None,
             project_id=project.id,
             runner_id=uuid.uuid4().hex,
         )
@@ -626,10 +635,16 @@ async def test_coordinator_approval_checks_revision_and_dispatches_only_selected
     assert captured.is_success, captured.text
     run = captured.json()
     path = f"/v1/studio/review-runs/{run['id']}"
+    saved = await review_client.get(f"{path}/patch", headers=headers)
+    assert saved.is_success and saved.json()["patch"] == patch
     started = await review_client.post(f"{path}/start", headers=headers, json={})
     assert started.is_success and started.json()["errors"] == {}, started.text
     coordinator = started.json()["run"]["coordinator"]
     assert harness.send_review.await_count == 1
+    planning_prompt = harness.send_review.await_args.args[2].data["content"][0]["text"]
+    assert "linked Linear issue" in planning_prompt
+    assert "select the applicable specialists" in planning_prompt
+    assert "untrusted_patch" not in planning_prompt and "fixtures.txt" not in planning_prompt
     assert all(item["reviewer_session_id"] is None for item in started.json()["run"]["reviewers"])
 
     def append_reply(session_id, fence, data):
@@ -657,13 +672,25 @@ async def test_coordinator_approval_checks_revision_and_dispatches_only_selected
             "reason": "No frontend changes"
             if member["profile"]["role"]["id"] == "frontend"
             else "Backend scope",
+            **(
+                {
+                    "assignment": {
+                        "objective": "Investigate the "
+                        f"{member['profile']['role']['id']} boundary.",
+                        "acceptance_criterion": "Reject unauthorized requests.",
+                        "expected_evidence": "Cite the guard and its regression test.",
+                    }
+                }
+                if member["profile"]["role"]["id"] != "frontend"
+                else {"assignment": None}
+            ),
         }
         for member in run["reviewers"]
     ]
     revision = {"base_sha": BASE_SHA, "head_sha": HEAD_SHA}
     append_reply(
         coordinator["reviewer_session_id"],
-        "studio-review-plan-v1",
+        "studio-review-plan-v2",
         {"coordinator_id": coordinator["id"], **revision, "decisions": decisions},
     )
     plan = (await review_client.get(f"{path}/report", headers=headers)).json()["proposal"]
@@ -689,6 +716,20 @@ async def test_coordinator_approval_checks_revision_and_dispatches_only_selected
     }
     assert approved.json()["run"]["plan"]["decisions"] == decisions
     assert harness.send_review.await_count == 3
+    for call in harness.send_review.await_args_list[1:]:
+        reviewer_prompt = call.args[2].data["content"][0]["text"]
+        assert "linked Linear issue" in reviewer_prompt
+        assert "Trace changed code through callers" in reviewer_prompt
+        assert "existing isolated environment" in reviewer_prompt
+        assert "untrusted_patch" not in reviewer_prompt and "fixtures.txt" not in reviewer_prompt
+        member = next(
+            member for member in selected if member["reviewer_session_id"] == call.args[1]
+        )
+        role = member["profile"]["role"]["id"]
+        other_role = "security" if role == "backend" else "backend"
+        assert f"Investigate the {role} boundary." in reviewer_prompt
+        assert f"Investigate the {other_role} boundary." not in reviewer_prompt
+        assert "Cite the guard and its regression test." in reviewer_prompt
     assert (await review_client.post(f"{path}/start", headers=headers, json=approval)).is_success
     assert harness.send_review.await_count == 3
 
@@ -731,6 +772,52 @@ async def test_coordinator_approval_checks_revision_and_dispatches_only_selected
         "start": 1,
         "end": 1,
     }
+
+    # The task reviewer can retry after fetching a missing head without creating
+    # a second run or losing the verdict for the prior revision.
+    isolated = True
+    harness.project_store.update(project.id, user_id=ALICE, config={"source_key": "linear:w:i"})
+    provider_head = "c" * 40
+    member = selection("backend", codex, "codex-native")
+    member["expected_head_sha"] = provider_head
+    capture_path = f"/v1/projects/{project.id}/studio/review-runs"
+    first = await review_client.post(
+        capture_path,
+        headers={**headers, "Idempotency-Key": "task-new-head"},
+        json={"reviewers": [member]},
+    )
+    assert first.is_success, first.text
+    task_path = f"/v1/studio/review-runs/{first.json()['id']}"
+    blocked = await review_client.post(f"{task_path}/start", headers=headers, json={})
+    assert "missing locally" in next(iter(blocked.json()["errors"].values()))
+    assert blocked.json()["run"]["reviewers"][0]["dispatch_status"] == "not_requested"
+    assert harness.send_review.await_count == 3
+    local_head_available = True
+    replay = await review_client.post(
+        capture_path,
+        headers={**headers, "Idempotency-Key": "task-retry"},
+        json={"reviewers": [member]},
+    )
+    assert replay.json()["id"] == first.json()["id"]
+    task_started = await review_client.post(f"{task_path}/start", headers=headers, json={})
+    assert task_started.is_success and task_started.json()["errors"] == {}
+    assert harness.send_review.await_count == 4
+    reviewer = task_started.json()["run"]["reviewers"][0]
+    append_reply(
+        reviewer["reviewer_session_id"],
+        "studio-review-v1",
+        {
+            "review_id": reviewer["id"],
+            "base_sha": BASE_SHA,
+            "head_sha": provider_head,
+            "summary": "The fix restored the precondition.",
+            "findings": [],
+        },
+    )
+    fixed = (await review_client.get(f"{task_path}/report", headers=headers)).json()
+    assert fixed["reviewers"][0]["report"]["state"] == "ready"
+    assert fixed["findings"] == []
+    assert (await review_client.get(f"{path}/report", headers=headers)).json()["findings"]
 
 
 @pytest.mark.parametrize("synced", [True, False], ids=["associated", "not-yet-synced"])

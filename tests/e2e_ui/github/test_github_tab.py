@@ -1157,7 +1157,14 @@ def test_reply_to_inline_review_conversation(
 
 
 @pytest.mark.parametrize(
-    "entry", ["rail", "composer-desktop", "composer-mobile", "canvas", "project"]
+    "entry",
+    [
+        "rail",
+        "composer-desktop",
+        "composer-mobile",
+        "canvas",
+        pytest.param("project", marks=pytest.mark.browser_context_args(has_touch=True)),
+    ],
 )
 def test_studio_review_from_pr_panel(
     page: Page, seeded_session: tuple[str, str], tmp_path: Path, entry: str
@@ -1586,6 +1593,8 @@ def test_studio_review_from_pr_panel(
         run_posts: list[str] = []
         run: dict = {}
         run_id = "f" * 32
+        single_run_id = "4" * 32
+        single_run: dict = {}
         patch_sha = hashlib.sha256(_PR_DIFF["patch"].encode()).hexdigest()
         run_reviewers = ("2" * 32, "3" * 32)
         run_started = False
@@ -1684,13 +1693,48 @@ def test_studio_review_from_pr_panel(
             "outcome": "fail_to_pass",
         }
 
+        show_earlier_review = False
+
         def project_runs(route: Route) -> None:
             if route.request.method == "GET":
-                route.fulfill(json={"entries": [run] if run else [], "next_cursor": None})
+                entries = [entry for entry in (run, single_run) if entry]
+                if show_earlier_review:
+                    entries = [
+                        {**entry, "target": {**entry["target"], "base_sha": "3" * 40}}
+                        for entry in entries
+                    ]
+                route.fulfill(json={"entries": entries, "next_cursor": None})
                 return
             assert route.request.method == "POST"
-            run_posts.append("capture")
             inputs = route.request.post_data_json["reviewers"]
+            if len(inputs) == 1:
+                assert inputs == [
+                    {
+                        "pr_url": pr_url,
+                        "expected_base_sha": base_sha,
+                        "expected_head_sha": head_sha,
+                        "agent_id": agent_id,
+                        "harness": "codex-native",
+                        "model": model,
+                        "reasoning_effort": "high",
+                        "skill": "team-review",
+                        "host_id": host_id,
+                        "workspace": workspace,
+                        "repository": ".",
+                    }
+                ]
+                single_run.update(
+                    id=single_run_id,
+                    target=review["target"],
+                    patch_sha256=patch_sha,
+                    reviewers=[review],
+                    created_at=review["created_at"],
+                )
+                review["run_id"] = single_run_id
+                capture_keys.append(route.request.headers["idempotency-key"])
+                route.fulfill(json=single_run)
+                return
+            run_posts.append("capture")
             assert [item["skill"] for item in inputs] == ["team-review", "security-review"]
             assert all(item["expected_head_sha"] == head_sha for item in inputs)
             run.update(
@@ -1720,6 +1764,25 @@ def test_studio_review_from_pr_panel(
             for member in run["reviewers"]:
                 member.update(dispatch_status="running", reviewer_session_id=member["id"])
             route.fulfill(json={"run": run, "errors": {}})
+
+        def start_single_run(route: Route) -> None:
+            assert route.request.method == "POST" and route.request.post_data_json == {}
+            start_keys.append(route.request.headers["idempotency-key"])
+            review.update(
+                state="running", dispatch_status="running", reviewer_session_id=reviewer_id
+            )
+            route.fulfill(json={"run": single_run, "errors": {}})
+
+        def single_run_report(route: Route) -> None:
+            route.fulfill(
+                json={
+                    "reviewers": [{"review_id": review_id, "report": report}],
+                    "findings": [
+                        {"finding": finding, "review_ids": [review_id], "finding_key": finding_key}
+                        for finding in report["findings"]
+                    ],
+                }
+            )
 
         def project_run_report(route: Route) -> None:
             route.fulfill(
@@ -1817,6 +1880,11 @@ def test_studio_review_from_pr_panel(
             f"{project_path}/studio/review-profiles?*", lambda r: r.fulfill(json={"profiles": []})
         )
         page.route(re.compile(r"/studio/review-runs(?:\?|$)"), project_runs)
+        page.route(f"**/v1/studio/review-runs/{single_run_id}/start", start_single_run)
+        page.route(
+            re.compile(rf"/v1/studio/review-runs/{single_run_id}/report(?:\?|$)"),
+            single_run_report,
+        )
         page.route(f"**/v1/studio/review-runs/{run_id}/start", start_project_run)
         page.route(
             re.compile(rf"/v1/studio/review-runs/{run_id}/report(?:\?|$)"), project_run_report
@@ -1859,8 +1927,34 @@ def test_studio_review_from_pr_panel(
                 }
             ],
         )
+        page.set_viewport_size({"width": 320, "height": 700})
         page.goto(f"{base_url}/?project=Workspace%20Review")
         workspace_panel = page.get_by_role("complementary", name="Project workspace")
+        composer = page.get_by_test_id("new-chat-landing-composer-surface")
+        draft = page.get_by_test_id("new-chat-landing-input")
+        expect(composer).to_be_visible()
+        expect(workspace_panel).to_be_hidden()
+        draft.fill("My project draft")
+        page.screenshot(path=str(tmp_path / "project-chat-first-mobile.png"))
+        composer.get_by_role("button", name="Workspace", exact=True).tap()
+        expect(workspace_panel).to_be_visible()
+        expect(composer).to_be_hidden()
+        tab_list = workspace_panel.get_by_role("tablist")
+        files = workspace_panel.get_by_role("tabpanel", name="Files", exact=True)
+        tab_bar_box = tab_list.bounding_box()
+        assert tab_bar_box["y"] + tab_bar_box["height"] <= files.bounding_box()["y"]
+        for tab in tab_list.get_by_role("tab").all():
+            box = tab.bounding_box()
+            assert box["height"] >= 44
+            assert box["y"] + box["height"] <= tab_bar_box["y"] + tab_bar_box["height"]
+        assert page.evaluate("document.documentElement.scrollWidth === window.innerWidth")
+        page.screenshot(path=str(tmp_path / "project-workspace-mobile.png"))
+        workspace_panel.get_by_role("button", name="Back to chat", exact=True).tap()
+        expect(composer).to_be_visible()
+        expect(draft).to_have_value("My project draft")
+        draft.fill("")
+        page.set_viewport_size({"width": 390, "height": 844})
+        composer.get_by_role("button", name="Workspace", exact=True).tap()
         expect(workspace_panel).to_be_visible()
         workspace_panel.get_by_role("tab", name="Pull Requests", exact=True).click()
         workspace_panel.get_by_role("button", name=re.compile(re.escape(pr_title))).click()
@@ -1869,35 +1963,82 @@ def test_studio_review_from_pr_panel(
         expect(workspace_panel.get_by_role("combobox", name="Changed file")).to_have_value(
             "src/app/main.py"
         )
-        workspace_panel.get_by_role("tab", name="Review", exact=True).click()
+        workspace_panel.get_by_role("button", name="Pull request actions").click()
+        expect(page.get_by_role("menuitem", name="Open on GitHub")).to_be_visible()
+        expect(page.get_by_role("menuitem", name="Refresh revision")).to_be_visible()
+        page.keyboard.press("Escape")
+        workspace_panel.get_by_role("button", name="Review this PR", exact=True).click()
+        expect(
+            workspace_panel.get_by_role("button", name="Orchestrator", exact=True)
+        ).to_have_attribute("aria-pressed", "true")
+        workspace_panel.get_by_role("button", name="Manual", exact=True).click()
         workspace_panel.get_by_role("combobox", name="Reviewer", exact=True).click()
         page.get_by_role("option", name="Codex", exact=True).click()
         workspace_panel.get_by_role("combobox", name="Review skill", exact=True).click()
         page.get_by_role("option", name="team-review", exact=True).click()
+        workspace_panel.get_by_text("Model and workspace settings", exact=False).click()
         workspace_panel.get_by_role("combobox", name="Model", exact=True).click()
         page.get_by_role("option", name="Review Model", exact=True).click()
         workspace_panel.get_by_role("combobox", name="Reasoning effort", exact=True).click()
         page.get_by_role("option", name="High", exact=True).click()
         assert not capture_keys and not start_keys and not ordinary_creates
+        workspace_panel.get_by_text("Model and workspace settings", exact=False).click()
+        assert page.evaluate("document.documentElement.scrollWidth === window.innerWidth")
         page.screenshot(path=str(tmp_path / "project-review-before-launch.png"))
-        workspace_panel.get_by_role("button", name="Run review", exact=True).click()
+        page.set_viewport_size({"width": 1440, "height": 900})
+        workspace_panel.get_by_role("button", name="Run diff review", exact=True).click()
         expect(page.get_by_text(report["summary"], exact=True)).to_be_visible(timeout=15_000)
         expect(page.get_by_role("link", name="Open transcript", exact=True)).to_be_visible()
+        expect(page.get_by_role("link", name="Open finding", exact=True)).to_have_attribute(
+            "href", f"/reviews/{single_run_id}/discussion?finding={finding_key}"
+        )
+        page.get_by_role("button", name="Open PR in Workspace", exact=True).click()
+        reviewed_pr = page.get_by_role("region", name="Reviewed pull request", exact=True)
+        expect(
+            reviewed_pr.get_by_role("link", name=f"{repository} #{_PR_NUMBER}")
+        ).to_have_attribute("href", pr_url)
+        expect(reviewed_pr.get_by_text(pr_title, exact=True)).to_be_visible()
+        expect(page.get_by_text("No open PR for main", exact=True)).not_to_be_visible()
         page.screenshot(path=str(tmp_path / "project-review-report.png"))
+        review.pop("run_id")
+        page.reload()
+        expect(page.get_by_role("heading", name="Earlier review")).to_be_visible()
+        expect(page.get_by_role("link", name="Ask in original transcript")).to_have_attribute(
+            "href", f"/c/{reviewer_id}?view=chat"
+        )
+        page.get_by_role("button", name="Set up review of current PR").click()
+        reviewed_pr.get_by_role("button", name="Use previous reviewer settings").click()
+        expect(reviewed_pr.get_by_role("button", name="Run diff review")).to_be_enabled()
+        assert len(capture_keys) == len(start_keys) == 1
+        review["run_id"] = single_run_id
+        show_earlier_review = True
         page.goto(f"{base_url}/?project=Workspace%20Review")
         workspace_panel.get_by_role("tab", name="Pull Requests", exact=True).click()
         workspace_panel.get_by_role("button", name=re.compile(re.escape(pr_title))).click()
-        workspace_panel.get_by_role("tab", name="Review", exact=True).click()
-        workspace_panel.get_by_role("button", name="Show in diff", exact=True).click()
-        expect(diff_tab).to_have_attribute("data-state", "active")
-        expect(workspace_panel.get_by_text("Review finding · src/app/main.py:2")).to_be_visible()
-        workspace_panel.get_by_role("tab", name="Review", exact=True).click()
+        expect(workspace_panel.get_by_text("Saved reviews for earlier revisions")).to_be_visible()
+        workspace_panel.get_by_role("button", name="Review this PR", exact=True).click()
+        expect(workspace_panel.get_by_role("region", name="Run a review")).to_be_visible()
+        show_earlier_review = False
+        page.goto(f"{base_url}/?project=Workspace%20Review")
+        workspace_panel.get_by_role("tab", name="Pull Requests", exact=True).click()
+        workspace_panel.get_by_role("button", name=re.compile(re.escape(pr_title))).click()
+        expect(workspace_panel.get_by_text("Saved review for this revision")).to_be_visible()
+        workspace_panel.get_by_role("button", name="Open saved review", exact=True).click()
+        expect(
+            workspace_panel.get_by_role("region", name="Review runs", exact=True).get_by_role(
+                "link", name="Discuss review", exact=True
+            )
+        ).to_have_attribute("href", f"/reviews/{single_run_id}/discussion")
+        expect(workspace_panel.get_by_role("region", name="Run a review")).to_be_hidden()
+        assert len(capture_keys) == len(start_keys) == 1
+        workspace_panel.get_by_role("button", name="New review", exact=True).click()
+        workspace_panel.get_by_role("button", name="Manual", exact=True).click()
         workspace_panel.get_by_role("combobox", name="Reviewer", exact=True).click()
         page.get_by_role("option", name="Codex", exact=True).click()
         for skill in ("team-review", "security-review"):
             workspace_panel.get_by_role("combobox", name="Review skill", exact=True).click()
             page.get_by_role("option", name=skill, exact=True).click()
-            workspace_panel.get_by_role("button", name="Add reviewer to run", exact=True).click()
+            workspace_panel.get_by_role("button", name="Add reviewer", exact=True).click()
         workspace_panel.get_by_role("button", name="Run selected reviewers", exact=True).click()
         runs_panel = workspace_panel.get_by_role("region", name="Review runs", exact=True)
         expect(runs_panel.get_by_text("2 / 2 reports ready")).to_be_visible()
@@ -2183,6 +2324,14 @@ def test_studio_review_from_pr_panel(
                         "published_at": question["published_at"],
                     }
                 )
+                agent_answers.append(
+                    {
+                        **agent_answers[0],
+                        "id": "5" * 32,
+                        "requested_by": "teammate",
+                        "citations": [],
+                    }
+                )
             route.fulfill(json=question)
 
         def approve_check(route: Route) -> None:
@@ -2246,6 +2395,8 @@ def test_studio_review_from_pr_panel(
         )
         runs_panel.get_by_role("link", name="Discuss finding", exact=True).click()
         expect(page.get_by_role("heading", name="Review discussion")).to_be_visible()
+        expect(page.get_by_role("region", name="Selected thread")).to_be_focused()
+        page.screenshot(path=str(tmp_path / "review-discussion-start.png"))
         page.get_by_text("Share this review", exact=True).click()
         page.get_by_label("Omnigent account ID").fill("reviewer@example.test")
         page.get_by_role("button", name="Grant access", exact=True).click()
@@ -2277,7 +2428,9 @@ def test_studio_review_from_pr_panel(
         drafts.get_by_role("button", name="Draft inline comment").click()
         drafts.get_by_role("textbox", name="Inline comment draft").fill("Publish this line.")
         drafts.get_by_role("button", name="Save draft").click()
+        drafts.get_by_role("button", name="Review drafts to publish").click()
         publishing = page.get_by_role("region", name="Publish inline drafts")
+        expect(publishing).to_be_focused()
         publishing.get_by_role("checkbox", name=re.compile("Publish this line")).check()
         publishing.get_by_role("button", name="Preview selected").click()
         expect(publishing.get_by_role("heading", name="Publication preview")).to_be_visible()
@@ -2288,8 +2441,12 @@ def test_studio_review_from_pr_panel(
         expect(publishing.get_by_role("link", name="Open published comment")).to_have_attribute(
             "href", f"{pr_url}#discussion_r9"
         )
+        expect(drafts.get_by_role("link", name="Open published comment")).to_have_attribute(
+            "href", f"{pr_url}#discussion_r9"
+        )
         assert publish_count == 1
         page.screenshot(path=str(tmp_path / "review-discussion.png"))
+        page.get_by_role("textbox", name="Internal reply").fill("An unsent finding reply.")
         page.get_by_role("region", name="Review context").locator(
             '[data-column-number="2"][data-line-type="change-addition"]'
         ).click()
@@ -2330,10 +2487,18 @@ def test_studio_review_from_pr_panel(
             thread.get_by_text("Codex answer · Shared by fixture-owner", exact=True)
         ).to_be_visible()
         expect(excerpts.get_by_text("added line", exact=True)).to_be_visible()
-        expect(thread.get_by_role("link", name="Open private session")).to_have_count(0)
+        expect(thread.get_by_role("link", name="Continue in private session")).to_have_attribute(
+            "href", "/c/" + "9" * 32
+        )
+        expect(thread.get_by_text("Codex answer · Shared by teammate", exact=True)).to_be_visible()
+        expect(thread.get_by_role("link", name="Continue in private session")).to_have_count(1)
         page.screenshot(path=str(tmp_path / "review-agent-answer.png"))
         page.get_by_role("button", name=re.compile(r"Keep the input validation")).click()
-        thread.get_by_role("button", name="Propose a fix", exact=True).click()
+        expect(thread.get_by_role("textbox", name="Internal reply")).to_have_value(
+            "An unsent finding reply."
+        )
+        thread.get_by_role("button", name="More actions", exact=True).click()
+        page.get_by_role("menuitem", name="Propose a fix", exact=True).click()
         thread.get_by_label("Answer with").select_option("reviewer:" + "6" * 64)
         thread.get_by_role("button", name="Request private proposal", exact=True).click()
         expect(thread.get_by_text("Private fix proposal · Codex")).to_be_visible()
@@ -2345,7 +2510,8 @@ def test_studio_review_from_pr_panel(
         assert download.value.path().read_bytes() == proposed_patch.encode()
         page.screenshot(path=str(tmp_path / "review-private-fix-proposal.png"))
         page.context.grant_permissions(["clipboard-read", "clipboard-write"], origin=base_url)
-        thread.get_by_role("button", name="Draft sandbox check", exact=True).click()
+        thread.get_by_role("button", name="More actions", exact=True).click()
+        page.get_by_role("menuitem", name="Draft sandbox check", exact=True).click()
         thread.get_by_label("Answer with").select_option("reviewer:" + "6" * 64)
         thread.get_by_role("button", name="Request private proposal", exact=True).click()
         card = thread.get_by_role("region", name="Sandbox check proposal")
@@ -2365,6 +2531,25 @@ def test_studio_review_from_pr_panel(
         run_button.click()
         expect(card.get_by_text("Check results attached", exact=True)).to_be_visible()
         page.screenshot(path=str(tmp_path / "review-sandbox-check-proposal.png"))
+        page.set_viewport_size({"width": 390, "height": 844})
+        discussion_region = page.get_by_role("region", name="Internal discussion")
+        context_region = page.get_by_role("region", name="Review context")
+        assert discussion_region.bounding_box()["y"] < context_region.bounding_box()["y"]
+        thread.get_by_role("button", name="View cited line", exact=True).click()
+        expect(context_region.get_by_role("heading", name="Captured diff")).to_be_focused()
+        context_region.get_by_role("button", name="Back to thread", exact=True).click()
+        expect(thread).to_be_focused()
+        ask_button = thread.get_by_role("button", name="Ask an agent", exact=True)
+        if ask_button.get_attribute("aria-expanded") != "true":
+            ask_button.click()
+        question = thread.get_by_role("textbox", name="Question for agent", exact=True)
+        question.fill("Can you clarify this result?")
+        ask_button.click()
+        ask_button.click()
+        expect(question).to_have_value("Can you clarify this result?")
+        assert page.evaluate("document.documentElement.scrollWidth === window.innerWidth")
+        ask_button.click()
+        page.screenshot(path=str(tmp_path / "review-discussion-mobile.png"))
         return
 
     page.goto(f"{base_url}/{'canvas/' if entry == 'canvas' else ''}c/{session_id}")
@@ -2442,6 +2627,7 @@ def test_studio_review_from_pr_panel(
     else:
         panel.get_by_role("combobox", name="Review skill", exact=True).click()
         page.get_by_role("option", name="team-review", exact=True).click()
+    panel.get_by_text("Model and workspace settings", exact=False).click()
     panel.get_by_role("combobox", name="Model", exact=True).click()
     page.get_by_role("option", name="Review Model", exact=True).click()
     panel.get_by_role("combobox", name="Reasoning effort", exact=True).click()

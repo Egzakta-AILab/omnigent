@@ -4913,7 +4913,11 @@ def server(
     permission_store = SqlAlchemyPermissionStore(db_uri)
     scheduled_task_store = SqlAlchemyScheduledTaskStore(db_uri)
     project_store = SqlAlchemyProjectStore(db_uri)
-    studio_review_store = StudioReviewStore(db_uri)
+    studio_review_store = (
+        StudioReviewStore(db_uri)
+        if os.environ.get("OMNIGENT_STUDIO_REVIEWS", "1") != "0"
+        else None
+    )
     preference_store = None
     if authority_id is not None:
         from omnigent.stores.preference_store.sqlalchemy_store import SqlAlchemyPreferenceStore

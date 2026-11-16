@@ -1313,12 +1313,15 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
         assert owner_view["can_attach_evidence"] is True
         assert owner_view["review_workspace_host_id"] == host_id
         creator_path = f"{run_path}/creator-preview"
+        creator_contract_path = "/v1/studio/creator/review-panel"
         assert (await auth_client.get(creator_path)).status_code == 404
+        assert (await auth_client.get(creator_contract_path)).status_code == 404
         with monkeypatch.context() as creator_env:
             creator_env.setenv("OMNIGENT_STUDIO_CREATOR_PILOT", "1")
             assert (await auth_client.get(discussion_path)).json()["creator_available"] is True
-            contract = await auth_client.get(creator_path)
+            contract = await auth_client.get(creator_contract_path)
             assert contract.status_code == 200
+            assert (await auth_client.get(creator_path)).json() == contract.json()
             assert contract.headers["Cache-Control"] == "no-store"
             definition = contract.json()["template"]
             preview = await auth_client.post(creator_path, json=definition)
@@ -1534,19 +1537,31 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
         assert send_review.await_count == 4
         coordinator = conversations.get_conversation(planning_id)
         assert coordinator is not None and coordinator.project_id == expected_project_id
+        assert coordinator.title == "Orchestrator PR #42"
+        assert coordinator.labels["omnigent.studio.review"] == "true"
         proposal = {
             "coordinator_id": planning_id,
             "base_sha": base_sha,
             "head_sha": current_head,
             "decisions": [
-                {"review_id": required["id"], "selected": False, "reason": "No coverage needed"},
-                {"review_id": optional["id"], "selected": True, "reason": "Covers the change"},
+                {
+                    "review_id": required["id"],
+                    "selected": False,
+                    "reason": "No coverage needed",
+                    "assignment": None,
+                },
+                {
+                    "review_id": optional["id"],
+                    "selected": True,
+                    "reason": "Covers the change",
+                    "assignment": None,
+                },
             ],
         }
 
         def save_proposal() -> None:
             save_assistant_message(
-                planning_id, "```studio-review-plan-v1\n" + json.dumps(proposal) + "\n```"
+                planning_id, "```studio-review-plan-v2\n" + json.dumps(proposal) + "\n```"
             )
 
         save_proposal()
@@ -1556,6 +1571,15 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
         assert rejected["reviewers"] == []
         proposal["decisions"][0]["selected"] = True
         proposal["decisions"][1]["selected"] = False
+        save_proposal()
+        rejected = (await auth_client.get(f"{plan_path}/report")).json()
+        assert rejected["proposal"]["state"] == "incomplete"
+        assert "give each selected reviewer an assignment" in rejected["proposal"]["error"]
+        proposal["decisions"][0]["assignment"] = {
+            "objective": "Verify the changed behavior",
+            "acceptance_criterion": None,
+            "expected_evidence": "Cite the changed line and regression test",
+        }
         save_proposal()
         proposed = (await auth_client.get(f"{plan_path}/report")).json()["proposal"]
         assert proposed["state"] == "ready" and proposed["plan"] == proposal
@@ -2082,6 +2106,97 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
         assert [
             frame.params["job_id"] for frame in hosted_frames if frame.op.endswith("_start")
         ] == [job["id"], unconfirmed["id"]]
+        synthesis_path = f"{plan_path}/synthesis"
+        assert (await auth_client.post(synthesis_path, json={})).status_code == 409
+        specialist_envelope = {
+            "review_id": required["id"],
+            "base_sha": base_sha,
+            "head_sha": current_head,
+            "summary": "Backend reviewer inspected the changed condition.",
+            "findings": [finding],
+        }
+        save_assistant_message(
+            required["id"], "```studio-review-v1\n" + json.dumps(specialist_envelope) + "\n```"
+        )
+        sends_before_synthesis = send_review.await_count
+        requested = await auth_client.post(synthesis_path, json={})
+        assert requested.status_code == 200, requested.text
+        operation = requested.json()
+        assert operation["state"] == "running"
+        assert send_review.await_args.args[1] == planning_id
+        assert send_review.await_args.args[3] is None
+        prompt = send_review.await_args.args[2].data["content"][0]["text"]
+        assert specialist_envelope["summary"] in prompt
+        assert current_head in prompt
+        assert (await auth_client.post(synthesis_path, json={})).json() == operation
+        assert send_review.await_count == sends_before_synthesis + 1
+        assert (await auth_client.get(f"{plan_path}/report")).json()["synthesis"][
+            "state"
+        ] == "pending"
+
+        question_echo(prompt, planning_id)
+        synthesis = {
+            "run_id": planned_run["id"],
+            "input_digest": operation["request_hash"],
+            "summary": "The backend reviewer flagged the input condition. No tests were run.",
+            "conflicts": [],
+            "follow_up": {
+                "review_id": required["id"],
+                "finding_key": None,
+                "question": "Which guard covers an absent input?",
+            },
+        }
+        save_assistant_message(
+            planning_id, "```studio-review-synthesis-v2\n" + json.dumps(synthesis) + "\n```"
+        )
+        question_echo("A later question", planning_id)
+        save_assistant_message(planning_id, "An unrelated later response.")
+        observed = (await auth_client.get(f"{plan_path}/report")).json()
+        assert observed["synthesis"]["state"] == "ready"
+        assert observed["synthesis"]["summary"] == synthesis["summary"]
+        assert len(observed["findings"]) == 1
+        assert "finding_key" not in observed["findings"][0]
+        assert observed["synthesis"]["follow_up"] == synthesis["follow_up"]
+        ask_path = f"{plan_path}/follow-up/ask"
+        return_path = f"{plan_path}/follow-up/return"
+        assert (await auth_client.post(return_path, json={})).status_code == 409
+        unchanged = current_head
+        current_head = "c" * 40 if unchanged != "c" * 40 else "d" * 40
+        assert (await auth_client.post(ask_path, json={})).status_code == 409
+        assert send_review.await_count == sends_before_synthesis + 1
+        current_head = unchanged
+
+        async def relay(path: str, destination: str, expected: str, answer: str) -> None:
+            sent_before = send_review.await_count
+            sent = await auth_client.post(path, json={})
+            assert sent.is_success, sent.text
+            turn = sent.json()
+            assert turn["state"] == "running"
+            assert send_review.await_args.args[1] == destination
+            sent_prompt = send_review.await_args.args[2].data["content"][0]["text"]
+            assert expected in sent_prompt and current_head in sent_prompt
+            assert (await auth_client.post(path, json={})).json() == turn
+            assert send_review.await_count == sent_before + 1
+            question_echo(sent_prompt, destination)
+            envelope = {
+                "run_id": planned_run["id"],
+                "input_digest": turn["request_hash"],
+                "result": "answered",
+                "detail": answer,
+            }
+            save_assistant_message(
+                destination,
+                "```studio-review-follow-up-v1\n" + json.dumps(envelope) + "\n```",
+            )
+
+        evidence = "The guard returns before processing absent inputs."
+        await relay(ask_path, required["id"], synthesis["follow_up"]["question"], evidence)
+        assessment = "The source resolves the gap. A test result is still unavailable."
+        await relay(return_path, planning_id, evidence, assessment)
+        finished = (await auth_client.get(f"{plan_path}/report")).json()
+        assert finished["follow_up"]["specialist"]["detail"] == evidence
+        assert finished["follow_up"]["coordinator"]["detail"] == assessment
+        assert finished["reviewers"] == observed["reviewers"]
         return
 
     created = await create_reviewer(request, "alice", review, review.id)

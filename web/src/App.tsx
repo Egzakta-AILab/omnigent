@@ -69,10 +69,16 @@ const TaskDetailPage = withPageView(
 const SettingsPage = lazy(() =>
   import("@/pages/SettingsPage").then((m) => ({ default: m.SettingsPage })),
 );
+const CreatorModePage = lazy(() =>
+  import("@/studio/creator/CreatorModePage").then((m) => ({ default: m.CreatorModePage })),
+);
 const ReviewDiscussionPage = lazy(() =>
   import("@/studio/reviews/ReviewDiscussionPage").then((m) => ({
     default: m.ReviewDiscussionPage,
   })),
+);
+const IssueWorkspace = lazy(() =>
+  import("@/studio/IssueWorkspace").then((m) => ({ default: m.IssueWorkspace })),
 );
 
 // A release-feature route stays registered so a hard load never falls through
@@ -186,6 +192,8 @@ function AppRoutes({ basename }: AppProps) {
         <Route element={<AppShell />}>
           <Route path={prefix || "/"} element={<ChatPage />} />
           <Route path={`${prefix}/c/:conversationId`} element={<ChatPage />} />
+          <Route path={`${prefix}/creator`} element={<CreatorModePage />} />
+          <Route path={`${prefix}/work`} element={<IssueWorkspace />} />
           <Route path={`${prefix}/reviews/:runId/discussion`} element={<ReviewDiscussionPage />} />
           <Route
             path={`${prefix}/grid/:gridId`}

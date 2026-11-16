@@ -266,6 +266,7 @@ class SqlAlchemyProjectStore(ProjectStore):
         user_id: str | None,
         name: str | None = None,
         config: dict[str, Any] | None = None,
+        linear_issue: dict[str, str] | None = None,
     ) -> Project | None:
         """Update mutable fields of an owned project.
 
@@ -277,7 +278,6 @@ class SqlAlchemyProjectStore(ProjectStore):
         only uniqueness guard, so concurrent renames to the same name can both
         land.
         """
-        encoded_config = _encode_config(config) if config is not None else None
         updated_at = now_epoch()
 
         def write(session: Session) -> Project | None:
@@ -295,8 +295,20 @@ class SqlAlchemyProjectStore(ProjectStore):
                 row.name = name
                 changed = True
             if config is not None:
+                saved = _decode_config(row.config)
+                inherited = {
+                    key: saved[key]
+                    for key in ("template_project_id", "source_key", "linear_issue")
+                    if key in saved
+                }
+                encoded_config = _encode_config({**config, **inherited})
                 if row.config != encoded_config:
                     row.config = encoded_config
+                    changed = True
+            if linear_issue is not None:
+                saved = _decode_config(row.config)
+                if "linear_issue" not in saved:
+                    row.config = _encode_config({**saved, "linear_issue": linear_issue})
                     changed = True
             if changed:
                 row.updated_at = updated_at

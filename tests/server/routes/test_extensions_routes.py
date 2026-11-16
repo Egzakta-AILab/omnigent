@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -22,6 +23,7 @@ from omnigent.extensions import (
 from omnigent.runtime.agent_cache import AgentCache
 from omnigent.server.app import create_app
 from omnigent.server.auth import AuthProvider, UnifiedAuthProvider
+from omnigent.server.routes.extensions import create_extensions_router
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
 from omnigent.stores.artifact_store.local import LocalArtifactStore
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
@@ -125,6 +127,52 @@ def multi_user_app(db_uri: str, tmp_path: Path) -> FastAPI:
         permission_store=permission_store,
         auth_provider=UnifiedAuthProvider(source="header", local_single_user=False),
     )
+
+
+async def test_linear_read_requires_extension_and_keeps_rejected_key_private(monkeypatch):
+    manifest = replace(
+        _manifest("egzakta.linear"),
+        entrypoints=ExtensionEntrypoints(),
+        permissions=frozenset({ExtensionPermission.LINEAR_READ}),
+        pages=(),
+        primary_navigation=(),
+    )
+    app = FastAPI()
+    app.include_router(create_extensions_router(ExtensionPluginState(manifests=(manifest,))))
+    path = "/extensions/egzakta.linear/read"
+    token = "linear-test-key"
+    calls = []
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == "https://api.linear.app/graphql"
+        assert request.headers["authorization"] == token
+        query = json.loads(request.content)
+        assert "query OmnigentLinearIssue" in query["query"]
+        calls.append(query["variables"])
+        return httpx.Response(200, json={"data": {"issue": {"title": "Issue"}}})
+
+    original = httpx.AsyncClient
+    async with original(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        monkeypatch.setattr(
+            "omnigent.extensions.linear.httpx.AsyncClient",
+            lambda **kwargs: original(transport=httpx.MockTransport(upstream), **kwargs),
+        )
+        rejected = await client.post(path, json={"token": "sensitive invalid input"})
+        assert rejected.status_code == 422 and "sensitive invalid input" not in rejected.text
+        assert calls == []
+        issue = "1c86ef2e-b1c3-4a5f-a861-674d62a7aa00"
+        response = await client.post(path, json={"token": token, "issue": issue})
+        assert response.json() == {"issue": {"title": "Issue"}}
+        assert response.headers["cache-control"] == "no-store"
+        assert calls == [{"issue": issue}]
+
+    disabled = FastAPI()
+    disabled.include_router(create_extensions_router(ExtensionPluginState(manifests=())))
+    async with original(
+        transport=httpx.ASGITransport(app=disabled), base_url="http://test"
+    ) as client:
+        assert (await client.post(path, json={"token": token})).status_code == 404
+    assert len(calls) == 1
 
 
 async def test_catalog_serializes_only_public_v1_contributions(catalog_app: FastAPI) -> None:

@@ -2629,7 +2629,7 @@ describe("Sidebar project sections", () => {
     );
   });
 
-  it("offers a desktop New session shortcut while keeping the touch menu accessible", async () => {
+  it("offers a project New session shortcut and a named menu action", async () => {
     projectsMock.push("Customer X");
     mockConversations([
       conv("conv_filed", "Claude Code", { labels: { omni_project: "Customer X" } }),
@@ -2638,7 +2638,7 @@ describe("Sidebar project sections", () => {
 
     const shortcut = screen.getByRole("link", { name: "New session in Customer X" });
     expect(shortcut).toHaveAttribute("href", "/?project=Customer%20X");
-    expect(shortcut).toHaveClass("hidden", "[@media((hover:hover)_and_(pointer:fine))]:flex");
+    expect(shortcut).not.toHaveClass("hidden");
     const menuButton = screen.getByTestId("project-actions");
     expect(menuButton).not.toHaveClass("hidden");
     expect(menuButton).not.toHaveClass("sr-only");
@@ -2647,6 +2647,7 @@ describe("Sidebar project sections", () => {
       ctrlKey: false,
     });
     const menuItem = await screen.findByTestId("project-new-session-menu");
+    expect(menuItem).toHaveTextContent("New session in Customer X");
     expect(menuItem).not.toHaveClass("hidden");
     expect(menuItem).toHaveClass("[@media((hover:hover)_and_(pointer:fine))]:hidden");
     expect(menuItem.closest("a")).toHaveAttribute("href", "/?project=Customer%20X");

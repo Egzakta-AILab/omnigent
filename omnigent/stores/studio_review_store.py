@@ -78,7 +78,7 @@ from omnigent.studio.reviews.discussion import (
 )
 from omnigent.studio.reviews.evidence import (
     MAX_PATCH_CHUNKS,
-    MAX_REVIEW_PATCH_BYTES,
+    MAX_SAVED_REVIEW_PATCH_BYTES,
     PATCH_CHUNK_BYTES,
     patch_digest,
 )
@@ -522,7 +522,7 @@ class StudioReviewStore:
         key = hashlib.sha256(idempotency_key.encode()).digest()
         digest = _request_values(idempotency_key, request_hash)
         patch_bytes = patch.encode("utf-8")
-        if not 1 <= len(patch_bytes) <= MAX_REVIEW_PATCH_BYTES:
+        if not 1 <= len(patch_bytes) <= MAX_SAVED_REVIEW_PATCH_BYTES:
             raise ValueError("Review run diff exceeds the patch byte budget")
         patch_sha256 = patch_digest(patch)
 

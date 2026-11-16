@@ -273,6 +273,7 @@ export interface ServerInfo {
   studio_workspace_settings?: boolean;
   /** Private pull request review capture and execution are available. */
   studio_reviews?: boolean;
+  studio_creator?: boolean;
   /**
    * Which uploads Claude Code and Codex sessions receive as files. Null on
    * older servers, whose policy is the default extension list.
@@ -595,6 +596,7 @@ export async function resolveServerInfo(): Promise<ServerInfo> {
           workspace_repositories: data.workspace_repositories === true,
           studio_workspace_settings: data.studio_workspace_settings === true,
           studio_reviews: data.studio_reviews === true,
+          studio_creator: data.studio_creator === true,
           filesystem_attachments: parseFilesystemAttachments(data.filesystem_attachments),
           scheduled_task_projects: data.scheduled_task_projects === true,
           scheduled_task_inbox: data.scheduled_task_inbox === true,

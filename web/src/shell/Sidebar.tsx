@@ -51,6 +51,7 @@ import {
   GitForkIcon,
   GitPullRequestIcon,
   InboxIcon,
+  PuzzleIcon,
   ListChecksIcon,
   ListFilterIcon,
   LaptopIcon,
@@ -719,6 +720,7 @@ function SidebarImpl({
 }: SidebarProps) {
   const sidebarData = useSidebarData();
   const branding = useBranding();
+  const { pathname } = useLocation();
   const serverInfo = useServerInfo();
   const usagePageEnabled = isFeatureEnabled(serverInfo, "usage_page");
   const canvasEnabled = isFeatureEnabled(serverInfo, "canvas");
@@ -1293,6 +1295,23 @@ function SidebarImpl({
                   Automations
                 </Link>
               </Button>
+              {serverInfo !== "loading" && serverInfo.studio_creator && (
+                <Button
+                  asChild
+                  variant="ghost"
+                  className={cn(
+                    SIDEBAR_ROW,
+                    "w-full justify-start border-0 font-normal mobile-touch-target",
+                    SIDEBAR_HOVER_HIGHLIGHT,
+                    pathname.endsWith("/creator") && SIDEBAR_ACTIVE_HIGHLIGHT,
+                  )}
+                >
+                  <Link to="/creator" onClick={onNavClick}>
+                    <PuzzleIcon className="ui-icon text-muted-foreground" />
+                    Creator Mode
+                  </Link>
+                </Button>
+              )}
               <Button
                 asChild
                 variant="ghost"
@@ -3469,7 +3488,7 @@ function SectionHeader({
               active && SIDEBAR_ACTIVE_HIGHLIGHT,
               hasAction &&
                 !showsMarker &&
-                "pr-8 [@media((hover:hover)_and_(pointer:fine))]:pr-14 [@media((hover:hover)_and_(pointer:fine))]:md:pr-2 [@media((hover:hover)_and_(pointer:fine))]:md:group-hover/header:pr-14 [@media((hover:hover)_and_(pointer:fine))]:md:group-has-[[data-header-controls]:focus-within]/header:pr-14 [@media((hover:hover)_and_(pointer:fine))]:md:group-has-[[data-state=open]]/header:pr-14",
+                "pr-14 [@media((hover:hover)_and_(pointer:fine))]:md:pr-2 [@media((hover:hover)_and_(pointer:fine))]:md:group-hover/header:pr-14 [@media((hover:hover)_and_(pointer:fine))]:md:group-has-[[data-header-controls]:focus-within]/header:pr-14 [@media((hover:hover)_and_(pointer:fine))]:md:group-has-[[data-state=open]]/header:pr-14",
             )
           : cn(
               "group flex h-7 w-full items-center gap-1 border-0 pr-0 pl-2 text-left text-sm font-normal text-muted-foreground transition-colors hover:text-foreground",
@@ -6147,7 +6166,7 @@ function ProjectFolderActions({
             size="icon-xs"
             aria-label={`New session in ${projectName}`}
             data-testid="project-new-session"
-            className="hidden text-muted-foreground [@media((hover:hover)_and_(pointer:fine))]:flex"
+            className="text-muted-foreground"
           >
             <Link
               to={`/?project=${encodeURIComponent(projectName)}`}
@@ -6206,7 +6225,7 @@ function ProjectFolderMenuItems({
           }}
         >
           <MessageCirclePlusIcon className="size-3.5" />
-          New session
+          <span className="min-w-0 truncate">New session in {projectName}</span>
         </Link>
       </C.Item>
       <C.Item data-testid="rename-project" onSelect={actions.openRename}>

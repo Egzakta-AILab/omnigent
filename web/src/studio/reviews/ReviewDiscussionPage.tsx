@@ -1,11 +1,14 @@
-import { useRef, useState } from "react";
+import { ReadableMarkdown } from "@/components/ReadableMarkdown";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { useIsMobileViewport } from "@/hooks/useIsMobileViewport";
 import { useIdentityReady, useViewerId } from "@/hooks/useViewerId";
 import { copyText } from "@/lib/clipboard";
 import { randomUUID } from "@/lib/randomUUID";
 import { Link, useParams, useSearchParams } from "@/lib/routing";
+import { issueWorkspaceUrl } from "@/lib/studioIssue";
 import {
   changeReviewCollaborator,
   getReviewDiscussion,
@@ -19,7 +22,7 @@ import { InlinePublication } from "./InlinePublication";
 import { DiscussionQuestions, type QuestionAttempt } from "./DiscussionQuestions";
 import { ReviewDiff } from "./ReviewDiff";
 import { CreatorReviewPanels } from "./CreatorReviewPanels";
-import { CreatorPanelStudio } from "./CreatorPanelStudio";
+import { InstalledCreatorReviewPanel } from "./CreatorPanelPreview";
 import type { ReviewProofTarget } from "./creatorReviewBridge";
 
 function anchorKey(anchor: DiscussionAnchor) {
@@ -156,19 +159,33 @@ function DiscussionContent({
   const [anchor, setAnchor] = useState<DiscussionAnchor | null>(
     initial ? { kind: "finding", finding_key: initial.key } : null,
   );
-  const [body, setBody] = useState("");
+  const [replies, setReplies] = useState(() => new Map<string, string>());
   const [copyStatus, setCopyStatus] = useState("");
   const [focusedProof, setFocusedProof] = useState<ReviewProofTarget>();
   const [suggestedProof, setSuggestedProof] = useState<ReviewProofTarget>();
-  const attempt = useRef<{ fingerprint: string; id: string } | undefined>(undefined);
+  const replyAttempts = useRef(new Map<string, { text: string; id: string }>());
   const questionAttempt = useRef<QuestionAttempt | undefined>(undefined);
   const draftAttempt = useRef<DraftAttempt | undefined>(undefined);
+  const isMobile = useIsMobileViewport();
+  const [revealCitedLine, setRevealCitedLine] = useState(false);
+  const diffHeading = useRef<HTMLHeadingElement>(null);
+  const questionDrafts = useRef(new Map<string, string>());
+  const threadRef = useRef<HTMLElement>(null);
+  const publicationRef = useRef<HTMLElement>(null);
+  const openedFromFinding = initialFinding !== null && initial?.key === initialFinding;
+  useEffect(() => {
+    if (openedFromFinding) threadRef.current?.focus();
+  }, [openedFromFinding]);
   const send = useMutation({
     mutationFn: (message: Parameters<typeof postReviewDiscussionComment>[1]) =>
       postReviewDiscussionComment(discussion.id, message),
-    onSuccess: async () => {
-      attempt.current = undefined;
-      setBody("");
+    onSuccess: async (_, message) => {
+      replyAttempts.current.delete(anchorKey(message.anchor));
+      setReplies((current) => {
+        const next = new Map(current);
+        next.delete(anchorKey(message.anchor));
+        return next;
+      });
       await refresh();
     },
   });
@@ -191,6 +208,7 @@ function DiscussionContent({
       }
     : null;
   const activeKey = anchor ? anchorKey(anchor) : "";
+  const body = replies.get(activeKey) ?? "";
   const comments = discussion.comments.filter((item) => anchorKey(item.anchor) === activeKey);
   const publicationDrafts = discussion.publication_drafts ?? discussion.inline_drafts ?? [];
   const ranges = new Map(
@@ -208,14 +226,13 @@ function DiscussionContent({
     setFocusedProof(undefined);
     setSuggestedProof(undefined);
     setAnchor(next);
-    setBody("");
+    setRevealCitedLine(false);
     send.reset();
   }
 
   function showPanelProof(target: ReviewProofTarget, attach: boolean, alsoOpen = false) {
     if (send.isPending) return false;
     if (target.findingKey !== selectedFinding?.key) {
-      if (body.trim()) return false;
       select({ kind: "finding", finding_key: target.findingKey });
     }
     if (attach) setSuggestedProof(target);
@@ -224,8 +241,8 @@ function DiscussionContent({
   }
 
   return (
-    <div className="min-w-0 flex-1 overflow-y-auto">
-      <div className="mx-auto max-w-6xl space-y-4 p-4 md:p-6">
+    <div className="min-w-0 flex-1 overflow-y-auto max-md:scroll-pt-14">
+      <div className="mx-auto max-w-6xl space-y-4 p-4 pt-12 md:p-6">
         <header className="flex flex-wrap items-start justify-between gap-2">
           <div>
             <p className="text-sm text-muted-foreground">{discussion.project_name}</p>
@@ -240,6 +257,11 @@ function DiscussionContent({
             >
               {discussion.repository} #{discussion.pr_number}
             </a>
+            <Button asChild size="sm" variant="ghost">
+              <Link to={issueWorkspaceUrl(discussion.project_name, undefined, discussion.id)}>
+                Link to issue
+              </Link>
+            </Button>
             <p className="mt-1 font-mono text-xs text-muted-foreground">
               {discussion.base_sha.slice(0, 8)} → {discussion.head_sha.slice(0, 8)}
             </p>
@@ -256,6 +278,7 @@ function DiscussionContent({
             <Button
               size="sm"
               variant="outline"
+              className="mobile-touch-target"
               onClick={() => {
                 void copyText(window.location.href).then(
                   () => setCopyStatus("Review link copied."),
@@ -272,50 +295,11 @@ function DiscussionContent({
             )}
           </div>
         </header>
-        <Sharing discussion={discussion} refresh={refresh} />
-        <CreatorReviewPanels runId={discussion.id} onProof={showPanelProof} />
-        {discussion.creator_available && (
-          <CreatorPanelStudio
-            discussion={discussion}
-            viewerId={viewerId}
-            onProof={showPanelProof}
-          />
-        )}
-        {discussion.can_publish_inline && publicationDrafts.length > 0 && (
-          <InlinePublication runId={discussion.id} drafts={publicationDrafts} refresh={refresh} />
-        )}
         <div className="grid min-w-0 gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(320px,0.8fr)]">
-          <section className="min-w-0 space-y-3" aria-label="Review context">
-            <details className="rounded-md border p-3">
-              <summary className="cursor-pointer font-medium">Reviewer reports</summary>
-              <ul className="mt-2 space-y-2 text-sm">
-                {discussion.reports.map((report) => (
-                  <li key={report.key} className="space-y-1">
-                    <span className="font-medium">{report.label}</span>{" "}
-                    <Badge variant="outline">{report.state}</Badge>
-                    {report.summary && (
-                      <p className="whitespace-pre-wrap break-words">{report.summary}</p>
-                    )}
-                  </li>
-                ))}
-              </ul>
-            </details>
-            <h2 className="font-medium">Captured diff</h2>
-            {discussion.can_comment && (
-              <p className="text-sm text-muted-foreground">
-                Select a line number or drag across a range on one side to open a discussion.
-              </p>
-            )}
-            <ReviewDiff
-              patch={discussion.patch}
-              truncated={false}
-              source={source}
-              discussionRange={range}
-              onClearSource={() => select(null)}
-              onSelectRange={discussion.can_comment ? select : undefined}
-            />
-          </section>
-          <section className="min-w-0 space-y-3" aria-label="Internal discussion">
+          <section
+            className="min-w-0 space-y-3 lg:col-start-2 lg:row-start-1"
+            aria-label="Internal discussion"
+          >
             <h2 className="font-medium">Findings and line threads</h2>
             <ul className="space-y-1">
               {discussion.findings.map(({ key, finding }) => (
@@ -344,26 +328,68 @@ function DiscussionContent({
               ))}
             </ul>
             {anchor ? (
-              <section className="space-y-3 rounded-md border p-3" aria-label="Selected thread">
+              <section
+                ref={threadRef}
+                tabIndex={-1}
+                className="space-y-3 rounded-md border p-3"
+                aria-label="Selected thread"
+              >
                 <h3 className="break-words font-medium">
                   {range ? rangeLabel(range) : selectedFinding?.finding.title}
                 </h3>
                 {selectedFinding && (
-                  <>
-                    <p className="whitespace-pre-wrap break-words text-sm">
-                      {selectedFinding.finding.detail}
-                    </p>
-                    <FindingReproductions
-                      key={selectedFinding.key}
-                      run={discussion}
-                      findingKey={selectedFinding.key}
-                      viewerId={viewerId}
-                      canAttach={discussion.can_attach_evidence}
-                      canReReview={discussion.can_attach_evidence && !discussion.candidate}
-                      focusProof={focusedProof}
-                    />
-                  </>
+                  <ReadableMarkdown className="text-sm">
+                    {selectedFinding.finding.detail}
+                  </ReadableMarkdown>
                 )}
+                {source && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="mobile-touch-target md:hidden"
+                    onClick={() => {
+                      diffHeading.current?.focus();
+                      diffHeading.current?.scrollIntoView({ block: "start" });
+                      setRevealCitedLine(true);
+                    }}
+                  >
+                    View cited line
+                  </Button>
+                )}
+                <DiscussionQuestions
+                  key={activeKey}
+                  draftKey={activeKey}
+                  drafts={questionDrafts}
+                  discussion={discussion}
+                  anchor={anchor}
+                  questions={(discussion.questions ?? []).filter(
+                    (item) => anchorKey(item.anchor) === activeKey,
+                  )}
+                  answers={(discussion.agent_answers ?? []).filter(
+                    (item) => anchorKey(item.anchor) === activeKey,
+                  )}
+                  viewerId={viewerId}
+                  attempt={questionAttempt}
+                  refresh={refresh}
+                  suggestedProof={suggestedProof}
+                />
+                <InlineDrafts
+                  key={`draft-${activeKey}`}
+                  runId={discussion.id}
+                  anchor={anchor}
+                  drafts={(discussion.inline_drafts ?? []).filter(
+                    (draft) => anchorKey(draft.thread) === activeKey,
+                  )}
+                  suggestedBody={selectedFinding?.finding.detail}
+                  canEdit={discussion.can_draft_inline === true}
+                  attempt={draftAttempt}
+                  refresh={refresh}
+                  onReviewPublication={
+                    discussion.can_publish_inline
+                      ? () => publicationRef.current?.focus()
+                      : undefined
+                  }
+                />
                 {comments.length ? (
                   <ol className="divide-y divide-border">
                     {comments.map((comment) => (
@@ -379,33 +405,6 @@ function DiscussionContent({
                 ) : (
                   <p className="text-sm text-muted-foreground">No replies yet.</p>
                 )}
-                <InlineDrafts
-                  key={`draft-${activeKey}`}
-                  runId={discussion.id}
-                  anchor={anchor}
-                  drafts={(discussion.inline_drafts ?? []).filter(
-                    (draft) => anchorKey(draft.thread) === activeKey,
-                  )}
-                  suggestedBody={selectedFinding?.finding.detail}
-                  canEdit={discussion.can_draft_inline === true}
-                  attempt={draftAttempt}
-                  refresh={refresh}
-                />
-                <DiscussionQuestions
-                  key={activeKey}
-                  discussion={discussion}
-                  anchor={anchor}
-                  questions={(discussion.questions ?? []).filter(
-                    (item) => anchorKey(item.anchor) === activeKey,
-                  )}
-                  answers={(discussion.agent_answers ?? []).filter(
-                    (item) => anchorKey(item.anchor) === activeKey,
-                  )}
-                  viewerId={viewerId}
-                  attempt={questionAttempt}
-                  refresh={refresh}
-                  suggestedProof={suggestedProof}
-                />
                 {discussion.can_comment && (
                   <form
                     className="space-y-2"
@@ -413,10 +412,10 @@ function DiscussionContent({
                       event.preventDefault();
                       const text = body.trim();
                       if (!text || send.isPending) return;
-                      const fingerprint = JSON.stringify([activeKey, text]);
-                      if (attempt.current?.fingerprint !== fingerprint)
-                        attempt.current = { fingerprint, id: randomUUID() };
-                      send.mutate({ id: attempt.current.id, anchor, body: text });
+                      const attempt = replyAttempts.current.get(activeKey);
+                      const id = attempt?.text === text ? attempt.id : randomUUID();
+                      replyAttempts.current.set(activeKey, { text, id });
+                      send.mutate({ id, anchor, body: text });
                     }}
                   >
                     <textarea
@@ -426,7 +425,9 @@ function DiscussionContent({
                       maxLength={2000}
                       value={body}
                       disabled={send.isPending}
-                      onChange={(event) => setBody(event.target.value)}
+                      onChange={(event) =>
+                        setReplies(new Map(replies).set(activeKey, event.target.value))
+                      }
                     />
                     <Button type="submit" size="sm" disabled={!body.trim() || send.isPending}>
                       {send.isPending ? "Posting…" : "Post internal reply"}
@@ -434,12 +435,92 @@ function DiscussionContent({
                     {send.error && <p role="alert">{send.error.message}</p>}
                   </form>
                 )}
+                {selectedFinding && (
+                  <FindingReproductions
+                    key={selectedFinding.key}
+                    run={discussion}
+                    findingKey={selectedFinding.key}
+                    viewerId={viewerId}
+                    canAttach={discussion.can_attach_evidence}
+                    canReReview={discussion.can_attach_evidence && !discussion.candidate}
+                    focusProof={focusedProof}
+                  />
+                )}
               </section>
             ) : (
               <p className="text-sm text-muted-foreground">Choose a finding or a diff range.</p>
             )}
           </section>
+          <section
+            className="min-w-0 space-y-3 lg:col-start-1 lg:row-start-1"
+            aria-label="Review context"
+          >
+            <details className="rounded-md border p-3">
+              <summary className="cursor-pointer font-medium">Reviewer reports</summary>
+              <ul className="mt-2 space-y-2 text-sm">
+                {discussion.reports.map((report) => (
+                  <li key={report.key} className="space-y-1">
+                    <span className="font-medium">{report.label}</span>{" "}
+                    <Badge variant="outline">{report.state}</Badge>
+                    {report.summary && (
+                      <ReadableMarkdown className="text-sm">{report.summary}</ReadableMarkdown>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </details>
+            <div className="sticky top-14 z-10 flex items-center justify-between gap-2 bg-background md:static">
+              <h2 ref={diffHeading} tabIndex={-1} className="font-medium">
+                Captured diff
+              </h2>
+              {anchor && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="mobile-touch-target md:hidden"
+                  onClick={() => {
+                    setRevealCitedLine(false);
+                    threadRef.current?.focus();
+                    threadRef.current?.scrollIntoView({ block: "start" });
+                  }}
+                >
+                  Back to thread
+                </Button>
+              )}
+            </div>
+            {discussion.can_comment && (
+              <p className="text-sm text-muted-foreground">
+                Select a line number or drag across a range on one side to open a discussion.
+              </p>
+            )}
+            <ReviewDiff
+              patch={discussion.patch}
+              truncated={false}
+              source={source}
+              revealCitedLine={!isMobile || revealCitedLine}
+              discussionRange={range}
+              onClearSource={() => select(null)}
+              onSelectRange={discussion.can_comment ? select : undefined}
+            />
+          </section>
         </div>
+        <Sharing discussion={discussion} refresh={refresh} />
+        <CreatorReviewPanels runId={discussion.id} onProof={showPanelProof} />
+        {discussion.creator_available && (
+          <InstalledCreatorReviewPanel
+            discussion={discussion}
+            viewerId={viewerId}
+            onProof={showPanelProof}
+          />
+        )}
+        {discussion.can_publish_inline && publicationDrafts.length > 0 && (
+          <InlinePublication
+            sectionRef={publicationRef}
+            runId={discussion.id}
+            drafts={publicationDrafts}
+            refresh={refresh}
+          />
+        )}
       </div>
     </div>
   );

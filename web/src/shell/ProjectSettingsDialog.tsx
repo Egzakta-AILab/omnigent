@@ -537,15 +537,17 @@ export function ProjectSettingsDialog({
                 >
                   Repositories
                 </Button>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  disabled={!canManageWorkspace}
-                  onClick={() => setWorkspaceManager("profiles")}
-                >
-                  Reviewer profiles
-                </Button>
+                {info.studio_reviews === true && (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    disabled={!canManageWorkspace}
+                    onClick={() => setWorkspaceManager("profiles")}
+                  >
+                    Reviewer profiles
+                  </Button>
+                )}
               </div>
             </Field>
           )}

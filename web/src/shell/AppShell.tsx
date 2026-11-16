@@ -699,7 +699,7 @@ function AppShellImpl() {
   );
   const reviewerSessionHint =
     sessionLabels["omnigent.studio.review"] === "true" ||
-    /^Review PR #\d+\b/.test(activeSession?.title ?? activeConv?.title ?? "");
+    /^(?:Review|Plan review for) PR #\d+\b/.test(activeSession?.title ?? activeConv?.title ?? "");
   const terminalFirst = sessionLabels["omnigent.ui"] === "terminal";
   const {
     terminals,
@@ -2275,6 +2275,25 @@ function AppShellImpl() {
     setRightPanelOpenAnimated,
   ]);
 
+  const reviewPrRequested = searchParams.get("reviewPr") === "1";
+  const openedReviewPr = useRef<string | null>(null);
+  useEffect(() => {
+    if (!reviewPrRequested) {
+      openedReviewPr.current = null;
+      return;
+    }
+    if (!conversationId || openedReviewPr.current === conversationId) return;
+    openedReviewPr.current = conversationId;
+    openGithubTab();
+  }, [conversationId, openGithubTab, reviewPrRequested]);
+
+  const showReviewSession = !!(
+    serverConversationId &&
+    isOwnerLevel(permissionLevel) &&
+    (searchParams.get("view") === "review" ||
+      (reviewerSessionHint && serverInfo !== "loading" && serverInfo.studio_reviews))
+  );
+
   function openMainExecutionLog() {
     // Mobile FAB → "Execution logs" jumps straight to the main thread.
     // Children are reachable via the panel's tab switcher.
@@ -2759,16 +2778,12 @@ function AppShellImpl() {
                 >
                   <SubagentPanelOpenerContext.Provider value={openSubagentInPanel}>
                     <RenderErrorBoundary name="this page" resetKey={location.pathname}>
-                      {serverConversationId &&
-                      isOwnerLevel(permissionLevel) &&
-                      (searchParams.get("view") === "review" ||
-                        (reviewerSessionHint &&
-                          serverInfo !== "loading" &&
-                          serverInfo.studio_reviews)) ? (
+                      {serverConversationId && showReviewSession ? (
                         <ReviewerSessionView
                           sessionId={serverConversationId}
                           requestedView={searchParams.get("view")}
                           lastActivityAt={activeConv?.updated_at}
+                          onOpenPullRequest={railTabsAvailable.github ? openGithubTab : undefined}
                         >
                           <Outlet />
                         </ReviewerSessionView>
@@ -2821,6 +2836,7 @@ function AppShellImpl() {
                     closeSelectedTabRef={closeSelectedRailTabRef}
                     showFilesPanel={showFilesPanel}
                     showGithubTab={railTabsAvailable.github}
+                    reviewSession={showReviewSession}
                     showContentSearch={railTabsAvailable["content-search"]}
                     showBrowserTab={railTabsAvailable.browser}
                     onReveal={revealRightPanel}
@@ -2939,7 +2955,10 @@ function AppShellImpl() {
                   testId="github-panel-drawer"
                 >
                   <RenderErrorBoundary name="pull requests" resetKey={conversationId}>
-                    <PullRequestPanel conversationId={conversationId} />
+                    <PullRequestPanel
+                      conversationId={conversationId}
+                      reviewSession={showReviewSession}
+                    />
                   </RenderErrorBoundary>
                 </MobilePanelDrawer>
               )}

@@ -16,7 +16,7 @@ const CAPABILITY_LABELS: Record<CreatorPanelCapability, string> = {
 };
 
 export function useCreatorInstallation(
-  runId: string,
+  runId: string | null,
   viewerId: string | null,
   onCommitted: () => void,
 ) {
@@ -24,13 +24,14 @@ export function useCreatorInstallation(
   const queryKey = ["creator-installation", viewerId, runId] as const;
   const installation = useQuery({
     queryKey,
-    queryFn: ({ signal }) => getCreatorInstallation(runId, signal),
+    queryFn: ({ signal }) => getCreatorInstallation(runId!, signal),
+    enabled: !!runId,
     retry: false,
     gcTime: 0,
     refetchInterval: 5000,
   });
   const change = useMutation({
-    mutationFn: (action: CreatorPanelChange) => changeCreatorInstallation(runId, action),
+    mutationFn: (action: CreatorPanelChange) => changeCreatorInstallation(runId!, action),
     onMutate: () => queryClient.cancelQueries({ queryKey }),
     onSuccess: async (next) => {
       await queryClient.cancelQueries({ queryKey });

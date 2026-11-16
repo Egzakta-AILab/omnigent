@@ -62,6 +62,7 @@ from omnigent.extensions.assets import (
     parse_dev_bundle_overrides,
 )
 from omnigent.extensions.registry import plugin_state as load_extension_plugin_state
+from omnigent.extensions.review_panel import creator_pilot_enabled
 from omnigent.harness_plugins import (
     NativeHarnessProvider,
     native_provider_for_key,
@@ -299,6 +300,7 @@ class ServerInfoResponse(BaseModel):
     # absent on older servers, which clients treat as unsupported.
     session_pull_requests: bool = False
     studio_reviews: bool = False
+    studio_creator: bool = False
     workspace_repositories: bool = False
     studio_workspace_settings: bool = False
     # Absent on older servers, which clients treat as the default extensions.
@@ -3657,6 +3659,7 @@ def create_app(
                 "session_pull_requests": session_pull_requests.open_store(conversation_store)
                 is not None,
                 "studio_reviews": studio_review_store is not None,
+                "studio_creator": studio_review_store is not None and creator_pilot_enabled(),
                 "workspace_repositories": True,
                 "studio_workspace_settings": True,
                 "filesystem_attachments": {
@@ -4002,7 +4005,11 @@ def create_app(
 
     app.include_router(
         create_studio_workspace_router(
-            conversation_store, project_store, auth_provider, permission_store
+            conversation_store,
+            project_store,
+            auth_provider,
+            permission_store,
+            reviews_enabled=studio_review_store is not None,
         ),
         prefix="/v1",
         tags=["studio_workspace"],

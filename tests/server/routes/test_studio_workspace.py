@@ -34,6 +34,7 @@ from omnigent.stores.file_store.sqlalchemy_store import SqlAlchemyFileStore
 from omnigent.stores.host_store import HostStore
 from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
 from omnigent.stores.project_store.sqlalchemy_store import SqlAlchemyProjectStore
+from omnigent.stores.studio_review_store import StudioReviewStore
 
 ALICE = "alice@example.test"
 BOB = "bob@example.test"
@@ -48,6 +49,7 @@ class WorkspaceHarness:
     registry: HostRegistry
     connection: HostConnection
     frames: list[HostFsRequestFrame | HostFsWriteFrame | HostStatFrame]
+    reviews_enabled: bool
 
     @property
     def project_path(self) -> str:
@@ -64,8 +66,9 @@ class WorkspaceHarness:
 
 @pytest_asyncio.fixture
 async def workspace_harness(
-    runtime_init: None, db_uri: str, tmp_path: Path, monkeypatch
+    runtime_init: None, db_uri: str, tmp_path: Path, monkeypatch, request: pytest.FixtureRequest
 ) -> AsyncIterator[WorkspaceHarness]:
+    reviews_enabled = getattr(request, "param", True)
     monkeypatch.setenv("OMNIGENT_LOCAL_SINGLE_USER", "0")
     root = tmp_path / "workspace"
     root.mkdir()
@@ -96,6 +99,7 @@ async def workspace_harness(
         auth_provider=UnifiedAuthProvider(source="header"),
         permission_store=permissions,
         host_store=hosts,
+        studio_review_store=StudioReviewStore(db_uri) if reviews_enabled else None,
     )
     registry = app.state.host_registry
     connection = registry.register(
@@ -131,7 +135,9 @@ async def workspace_harness(
         base_url="http://test",
         headers={"X-Forwarded-Email": ALICE},
     ) as client:
-        yield WorkspaceHarness(client, project.id, source.id, root, registry, connection, frames)
+        yield WorkspaceHarness(
+            client, project.id, source.id, root, registry, connection, frames, reviews_enabled
+        )
 
 
 async def test_profile_editor_shared_across_project_and_session(
@@ -348,6 +354,7 @@ async def test_project_can_preview_files_and_profiles_without_saved_config(
     assert len(harness.frames) == before
 
 
+@pytest.mark.parametrize("workspace_harness", [True, False], indirect=True)
 async def test_project_pull_requests_bind_to_the_selected_nested_checkout(
     workspace_harness: WorkspaceHarness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -426,7 +433,14 @@ async def test_project_pull_requests_bind_to_the_selected_nested_checkout(
     )
     assert promoted.status_code == 200, promoted.text
     preview = await harness.client.get(f"{path}/preview", params={**params, "pr_url": url})
-    assert preview.json()["review_available"] is True
+    assert preview.json()["review_available"] is harness.reviews_enabled
+    if not harness.reviews_enabled:
+        editor = await harness.client.get(f"{harness.project_path}/review-profiles/editor")
+        assert editor.status_code == 404
+        review_runs = await harness.client.get(
+            f"{harness.project_path}/review-runs", params=params
+        )
+        assert review_runs.status_code == 404
 
     patch_params = {**params, "pr_url": url, "head_sha": head, "base_sha": base}
     patch = await harness.client.get(f"{path}/patch", params=patch_params)

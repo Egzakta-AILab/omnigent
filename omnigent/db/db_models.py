@@ -1654,7 +1654,7 @@ class SqlStudioReviewPatchChunk(OmnigentBase):
     position: Mapped[int] = mapped_column(SmallInteger, primary_key=True)
     payload: Mapped[bytes] = mapped_column(LargeBinary(12288), nullable=False)
     __table_args__ = (
-        CheckConstraint("position >= 0 AND position < 4", name="ck_review_patch_position"),
+        CheckConstraint("position >= 0 AND position < 64", name="ck_review_patch_position"),
     )
 
 

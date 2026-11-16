@@ -3,7 +3,7 @@ import { randomUUID } from "@/lib/randomUUID";
 interface CreatorAuthoringDraft {
   id: string;
   viewerId: string;
-  reviewId: string;
+  editorId: string;
   returnTo: string;
   brief: string;
   source: string;
@@ -23,6 +23,6 @@ export function readCreatorAuthoringDraft(viewerId: string | null, id: unknown) 
   return draft?.viewerId === viewerId && draft.id === id ? draft : undefined;
 }
 
-export function readCreatorEditorDraft(viewerId: string | null, reviewId: string) {
-  return draft?.viewerId === viewerId && draft.reviewId === reviewId ? draft : undefined;
+export function readCreatorEditorDraft(viewerId: string | null, editorId: string) {
+  return draft?.viewerId === viewerId && draft.editorId === editorId ? draft : undefined;
 }

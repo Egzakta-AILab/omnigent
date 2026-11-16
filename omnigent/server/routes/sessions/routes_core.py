@@ -9,6 +9,7 @@ import json
 import secrets
 import time
 from collections.abc import Awaitable, Callable
+from pathlib import PurePosixPath
 from typing import Any
 
 import httpx
@@ -216,6 +217,7 @@ from omnigent.server.schemas import (
     SessionCreateRequest,
     SessionEventInput,
     SessionForkRequest,
+    SessionGitOptions,
     SessionLabelsResponse,
     SessionList,
     SessionListItem,
@@ -1324,14 +1326,17 @@ def register_core_routes(
             raise OmnigentError("Review is not owned by the caller", code=ErrorCode.FORBIDDEN)
         if session_id == review.target.source_session_id:
             raise OmnigentError("A reviewer requires its own session", code=ErrorCode.CONFLICT)
-        from omnigent.server.routes.studio_reviews import _owned_source
+        from omnigent.server.routes._studio_project_workspace import (
+            require_studio_session,
+            uses_isolated_task_review,
+        )
 
         target = review.target
         source = None
         legacy_project = None
         if target.source_session_id is not None:
             # Use the source's current filing and keep the captured placement.
-            source = await _owned_source(
+            source = await require_studio_session(
                 target.source_session_id,
                 user_id,
                 conversation_store,
@@ -1346,21 +1351,38 @@ def register_core_routes(
         is_coordinator = review.run_role == "coordinator"
         task = "Review"
         if is_coordinator:
-            task = "Plan review for"
+            task = "Orchestrator"
         elif target.candidate is not None:
             task = "Re-review candidate for"
+        elif profile.role is not None:
+            task = profile.role.label
+        elif profile.skill is not None:
+            task = profile.skill
+        isolated = target.candidate is None and await uses_isolated_task_review(
+            project_store, target.source_project_id, user_id
+        )
+        workspace = target.workspace
+        if isolated:
+            assert target.repository_path is not None
+            workspace = str(PurePosixPath(workspace) / target.repository_path)
         body = SessionCreateRequest(
             agent_id=profile.agent_id,
             host_id=target.host_id,
-            workspace=target.workspace,
+            workspace=workspace,
             title=f"{task} PR #{target.pr_number}",
             labels={
-                **({} if is_coordinator else {"omnigent.studio.review": "true"}),
+                "omnigent.studio.review": "true",
                 **({PROJECT_LABEL_KEY: legacy_project} if legacy_project else {}),
             },
             model_override=profile.model,
             reasoning_effort=profile.reasoning_effort,
-            git=None,
+            git=(
+                SessionGitOptions(
+                    branch_name=f"studio-review/{session_id}", base_branch=target.head_sha
+                )
+                if isolated
+                else None
+            ),
         )
         if target.source_project_id is not None:
             body = body.model_copy(update={"project_id": target.source_project_id})

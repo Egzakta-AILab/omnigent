@@ -4,17 +4,20 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
-from typing import Literal
+from typing import Any, Literal
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.extensions import ExtensionManifest, ExtensionPluginState, ReviewPanelContribution
 from omnigent.extensions.assets import ASSET_SCRIPT, ASSET_STYLES, ResolvedBundle
+from omnigent.extensions.linear import LINEAR_EXTENSION_ID, LinearReadRequest, read_linear
 from omnigent.extensions.review_panel import creator_pilot_enabled
 from omnigent.server.auth import AuthProvider
 from omnigent.server.routes._auth_helpers import require_user
+from omnigent.server.routes._content_type import require_json_content_type
+from omnigent.server.routes._origin import require_trusted_origin
 from omnigent.stores.permission_store import PermissionStore
 
 
@@ -235,5 +238,31 @@ def create_extensions_router(
         if extension is None:
             raise OmnigentError("Extension not found", code=ErrorCode.NOT_FOUND)
         return extension
+
+    @router.post(
+        "/extensions/egzakta.linear/read",
+        dependencies=[Depends(require_json_content_type), Depends(require_trusted_origin)],
+    )
+    async def get_linear_board(request: Request, response: Response) -> dict[str, Any]:
+        require_user(request, auth_provider)
+        extension = by_id.get(LINEAR_EXTENSION_ID)
+        if (
+            extension is None
+            or extension.status != "enabled"
+            or "linear.read" not in extension.permissions
+        ):
+            raise HTTPException(404, "The Linear extension is unavailable")
+        payload = bytearray()
+        async for chunk in request.stream():
+            payload.extend(chunk)
+            if len(payload) > 4096:
+                raise HTTPException(413, "The Linear request is too large")
+        try:
+            body = LinearReadRequest.model_validate_json(payload)
+        except ValueError:
+            # FastAPI's default validation details can include the rejected input.
+            raise HTTPException(422, "Enter a valid Linear key, team and cursor") from None
+        response.headers["Cache-Control"] = "no-store"
+        return await read_linear(body)
 
     return router

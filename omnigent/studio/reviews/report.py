@@ -108,10 +108,44 @@ class ConsolidatedFinding(FrozenModel):
     finding_key: str | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
+class SynthesisConflict(FrozenModel):
+    finding_keys: tuple[str, str]
+    detail: _Summary
+
+
+class SpecialistFollowUp(FrozenModel):
+    review_id: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{32}$")]
+    finding_key: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")] | None = None
+    question: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=600)
+    ]
+
+
+class FollowUpTurn(FrozenModel):
+    state: ReportState | Literal["unknown"]
+    result: Literal["answered", "blocked"] | None = None
+    detail: _Summary | None = None
+
+
+class ReviewFollowUp(FrozenModel):
+    specialist: FollowUpTurn | None = None
+    coordinator: FollowUpTurn | None = None
+
+
+class ReviewSynthesis(FrozenModel):
+    state: ReportState | Literal["unknown"]
+    message_id: str | None = None
+    summary: str | None = None
+    conflicts: list[SynthesisConflict] = Field(default_factory=list)
+    follow_up: SpecialistFollowUp | None = None
+
+
 class ConsolidatedReviewReport(FrozenModel):
     reviewers: list[ReviewerRunReport]
     findings: list[ConsolidatedFinding]
     proposal: ReviewPlanProposal | None = None
+    synthesis: ReviewSynthesis | None = None
+    follow_up: ReviewFollowUp | None = None
 
 
 def consolidate_reports(
@@ -126,6 +160,15 @@ def consolidate_reports(
             _, sources = grouped.setdefault(finding.model_dump_json(), (finding, []))
             if entry.review_id not in sources:
                 sources.append(entry.review_id)
+    severity_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+    ranked = sorted(
+        grouped.items(),
+        key=lambda entry: (
+            severity_order[entry[1][0].severity],
+            entry[1][0].path,
+            entry[1][0].line,
+        ),
+    )
     return ConsolidatedReviewReport(
         reviewers=reports,
         findings=[
@@ -134,7 +177,7 @@ def consolidate_reports(
                 review_ids=sources,
                 finding_key=patch_digest(key) if include_finding_keys else None,
             )
-            for key, (finding, sources) in grouped.items()
+            for key, (finding, sources) in ranked
         ],
     )
 
@@ -155,8 +198,13 @@ def report_instructions(review: ReviewPass) -> str:
         f"{_MAX_FINDINGS} actionable findings. For each finding, supply title (up to 200 "
         "characters), detail (up to 2000 characters), "
         "severity (critical, high, medium, or low), path (repository-relative), "
-        "side (base or head), and line (a one-based line on that side of the supplied diff). "
-        "Keep the summary under 2000 characters. Use an empty findings array if you found none. "
+        "side (base or head), and line (a one-based line on that side of the captured diff). "
+        "Keep the summary under 2000 characters. Describe what changed and name the relevant "
+        "code paths, edge cases, and tests you inspected. Distinguish evidence you observed "
+        "from claims that still need repository context or execution. Include the most useful "
+        "follow-up check when it would resolve an uncertainty. If you find no actionable "
+        "issues, still report what you examined and why it appears consistent. Use an empty "
+        "findings array if you found none. "
         "Do not add extra JSON fields.\n"
         f"{_REPORT_FENCE}\n{json.dumps(example, indent=2)}\n```"
     )
@@ -303,18 +351,32 @@ def read_native_turn(
     claude_skill: str | None = None,
     accepts_input: Callable[[MessageData], bool] | None = None,
     accepts: Callable[[_Envelope], bool] | None = None,
+    recent_input: bool = False,
 ) -> tuple[ReportState, str | None, _Envelope | None]:
     """Read a native reply and optionally require its preceding input."""
 
     page = conversation_store.list_items(
         session_id,
-        order="asc" if accepts_input is not None else "desc",
+        order="asc" if accepts_input is not None and not recent_input else "desc",
         type="message",
         limit=_FIRST_TURN_MESSAGE_LIMIT if accepts_input is not None else _RECENT_MESSAGE_LIMIT,
     )
     items = page.data
     first_turn_closed = False
-    if accepts_input is not None:
+    if recent_input:
+        assert accepts_input is not None
+        first = 0
+        for index, item in enumerate(items):
+            data = item.data
+            if isinstance(data, MessageData) and data.role == "user" and not data.is_meta:
+                if accepts_input(data):
+                    items = items[first : index + 1]
+                    first_turn_closed = first > 0
+                    break
+                first = index + 1
+        else:
+            return "pending", None, None
+    elif accepts_input is not None:
         user_positions = [
             index
             for index, item in enumerate(items)
