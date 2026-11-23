@@ -10,7 +10,6 @@ import {
   MessagesSquareIcon,
   MinimizeIcon,
   PlusIcon,
-  SearchIcon,
   SlidersHorizontalIcon,
   TerminalIcon,
   XIcon,
@@ -982,7 +981,6 @@ function WorkspacePanelImpl({
   if (profileEditorSessionId !== null && profileEditorSessionId !== conversationId) {
     setProfileEditorSessionId(null);
   }
-  const terminalShown = selectedTerminalKey !== null && openTerminals.includes(selectedTerminalKey);
   const contentSearchInputRef = useRef<HTMLInputElement>(null);
   const [contentSearchFocusSession, setContentSearchFocusSession] = useState<string | null>(null);
   const railRef = useRef<HTMLElement | null>(null);

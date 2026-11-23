@@ -1746,7 +1746,12 @@ def _check_pr_revision(
     root: str, reference: PullRequestRef, *, head_sha: str, base_sha: str | None = None
 ) -> dict[str, Any]:
     """Return the PR's REST payload, raising when its head, or its base if given, moved."""
-    pr = _pr_api(root, reference, f"repos/{reference.repository}/pulls/{reference.number}", resource="the pull request details")
+    pr = _pr_api(
+        root,
+        reference,
+        f"repos/{reference.repository}/pulls/{reference.number}",
+        resource="the pull request details",
+    )
     moved_head = _api_string(pr, "head", "sha") != head_sha
     moved_base = base_sha is not None and _api_string(pr, "base", "sha") != base_sha
     if moved_head or moved_base:

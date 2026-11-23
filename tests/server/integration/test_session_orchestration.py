@@ -4752,5 +4752,3 @@ async def test_studio_reviewer_uses_private_session_and_original_runner(
     assert unavailable.value.code == ErrorCode.RUNNER_UNAVAILABLE
     assert wait_for_runner.await_args.kwargs["runner_id"] == created.runner_id
     assert [frame.session_id for frame in launches] == [conv.id]
-
-

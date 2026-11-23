@@ -272,7 +272,6 @@ def _studio_workspace_path_error(op: str, path: str) -> str | None:
     return None
 
 
-
 # Older servers omit a create's timeout_s and wait 150 s for its reply; finish inside that.
 _LEGACY_SERVER_CREATE_BUDGET_S = 140.0
 
@@ -4026,9 +4025,7 @@ class HostProcess:
         """
         from pathlib import Path
 
-        from omnigent.runtime.filesystem_registry import detect_git_root
         from omnigent.workspace_fs import (
-            WorkspaceReader,
             WorkspaceReaderError,
             read_repository_branches,
         )

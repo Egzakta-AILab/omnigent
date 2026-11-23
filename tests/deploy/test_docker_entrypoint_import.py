@@ -162,8 +162,9 @@ def test_resolve_config_defaults_to_no_remote_store(_entrypoint_env: None) -> No
     assert _resolve_config().artifact_store_uri is None
 
 
+@pytest.mark.parametrize("enabled", [True, False])
 def test_docker_app_exposes_studio_review_routes(
-    _entrypoint_env: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    _entrypoint_env: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, enabled: bool
 ) -> None:
     from fastapi.testclient import TestClient
 
@@ -173,9 +174,13 @@ def test_docker_app_exposes_studio_review_routes(
     monkeypatch.setenv("DATABASE_URL", database)
     monkeypatch.setenv("OMNIGENT_AUTH_PROVIDER", "header")
     monkeypatch.setenv("OMNIGENT_LOCAL_SINGLE_USER", "1")
+    monkeypatch.setenv("OMNIGENT_STUDIO_REVIEWS", "1" if enabled else "0")
     run_migrations(database)
     with TestClient(build_app().app) as client:
-        assert client.get("/v1/info").json()["studio_reviews"] is True
+        assert client.get("/v1/info").json()["studio_reviews"] is enabled
+        if not enabled:
+            assert client.get("/v1/studio/shared-reviews").status_code == 404
+            return
         assert client.get("/v1/studio/shared-reviews").json() == {
             "entries": [],
             "next_cursor": None,

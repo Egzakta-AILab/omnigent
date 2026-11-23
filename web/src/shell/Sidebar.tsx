@@ -1511,7 +1511,12 @@ function SidebarImpl({
                 </Button>
               )}
               {serverInfo !== "loading" && serverInfo.studio_creator && (
-                <Button asChild variant="ghost" className={cn(SIDEBAR_ROW, SIDEBAR_HOVER_HIGHLIGHT,
+                <Button
+                  asChild
+                  variant="ghost"
+                  className={cn(
+                    SIDEBAR_ROW,
+                    SIDEBAR_HOVER_HIGHLIGHT,
                     pathname.endsWith("/creator") && SIDEBAR_ACTIVE_HIGHLIGHT,
                   )}
                 >

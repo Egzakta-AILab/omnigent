@@ -24,7 +24,13 @@ import {
   useRef,
   useState,
 } from "react";
-import { Link, useLocation, useNavigate, useReplaceSearchParams, useSearchParams } from "@/lib/routing";
+import {
+  Link,
+  useLocation,
+  useNavigate,
+  useReplaceSearchParams,
+  useSearchParams,
+} from "@/lib/routing";
 import { useViewerId } from "@/hooks/useViewerId";
 import { readCreatorAuthoringDraft } from "@/lib/creatorAuthoringDraft";
 import { STUDIO_ISSUE_LABEL, linearIssueKey } from "@/lib/studioIssue";
@@ -97,7 +103,6 @@ import {
   FolderGit2Icon,
   FolderIcon,
   FolderOpenIcon,
-  XIcon,
   PlusIcon,
   ShuffleIcon,
   WandSparklesIcon,
@@ -5738,6 +5743,7 @@ function NewChatLandingContent({
   const [collapsedProject, setCollapsedProject] = useState<string | null>(null);
   const showProjectWorkspace = projectLanding && collapsedProject !== projectParam;
   const [mobileWorkspaceLocation, setMobileWorkspaceLocation] = useState<string | null>(null);
+  const location = useLocation();
   const mobileWorkspaceOpen = mobileWorkspaceLocation === location.key;
   const closeMobileWorkspace = () => setMobileWorkspaceLocation(null);
   const projectWorkspaceScope = JSON.stringify([
@@ -6455,10 +6461,13 @@ function NewChatLandingContent({
         composerInlineMentions(mentionedItems, mentionedSessions, selectedAgent?.harness ?? null),
         [message],
       );
-      const initialPrompt = prContext + workspacePaths.map((path) => `[Attached: ${path}]\n`).join("") + withSessionMentionHint(
-        expandMentionTokens(sanitizeInitialPrompt(message), liveMentions),
-        liveMentions.some((m) => m.marker.startsWith("[Session: ")),
-      );
+      const initialPrompt =
+        prContext +
+        workspacePaths.map((path) => `[Attached: ${path}]\n`).join("") +
+        withSessionMentionHint(
+          expandMentionTokens(sanitizeInitialPrompt(message), liveMentions),
+          liveMentions.some((m) => m.marker.startsWith("[Session: ")),
+        );
       // Native terminal agents open terminal-first: `omnigent.ui: terminal`
       // tells the UI to render the terminal wrapper, and `omnigent.wrapper`
       // selects which CLI bridge the runner launches — the values are the
@@ -7803,14 +7812,22 @@ function NewChatLandingContent({
                     />
                     {activeContext && (
                       <>
-                        <ComposerMentionChips
-                          items={activeContext.files.map((path) => ({ path, isDir: false }))}
-                          onRemove={(index) =>
-                            updateWorkspaceContext({
-                              files: activeContext.files.filter((_, i) => i !== index),
-                            })
-                          }
-                        />
+                        {activeContext.files.map((path) => (
+                          <Badge key={path} variant="secondary">
+                            {path}
+                            <button
+                              type="button"
+                              aria-label={`Remove ${path} from prompt`}
+                              onClick={() =>
+                                updateWorkspaceContext({
+                                  files: activeContext.files.filter((file) => file !== path),
+                                })
+                              }
+                            >
+                              <XIcon className="size-3" />
+                            </button>
+                          </Badge>
+                        ))}
                         {activeContext.pullRequest && (
                           <div className="px-3 pt-1">
                             <Badge variant="secondary">

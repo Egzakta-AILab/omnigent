@@ -10,6 +10,9 @@ revision at the start of this work. This checkout includes setup verification,
 private review records and native reviews in the PR panel. Development and
 acceptance use a local instance.
 
+For the proposed task handoff between developers, rack agents and QA, see
+[Working together in Egzakta Studio](team-workflow.md).
+
 ## Local checkout
 
 ### 1. Start Omnigent on your Mac
@@ -26,7 +29,16 @@ export PATH="$PWD/.omnigent/tools/bin:$HOME/.local/bin:$PATH"
 The `PATH` line selects the checkout's compatible `uv` and makes your agent
 CLIs visible to the host. `omnidev` starts the server, local execution host and
 web UI. It opens the browser when ready. If needed, copy the exact `ui` URL
-from its header. The port is selected at startup.
+from its header. The supervisor selects free ports and sets the Vite
+proxy target to the selected backend. For the verification commands below,
+set `OMNIGENT_URL` in the second terminal to the **server** URL printed
+in the same header. A standalone Vite process also reads this variable.
+
+```sh
+read -r "OMNIGENT_URL?Paste the server URL from omnidev: "
+export OMNIGENT_URL
+curl --fail --silent --show-error "$OMNIGENT_URL/v1/info"
+```
 
 Keep the terminal open while using Omnigent. Press `q` or `Ctrl+C` to stop it.
 Starting again from this checkout reuses its local conversations and review
@@ -335,7 +347,7 @@ start sessions, refresh accounts, probe MCP tools or call models.
 
 ```sh
 uv run --no-sync python scripts/verify_studio.py setup \
-  --mode local --server http://127.0.0.1:6767 \
+  --mode local --server "${OMNIGENT_URL:?set to the server URL printed by omnidev}" \
   --host-id YOUR_HOST_ID --workspace /absolute/path/to/KVARK \
   --harness codex-native --harness claude-native \
   --output .omnigent/studio/local-setup.json
@@ -528,7 +540,7 @@ and the exact server and PR URLs:
 
 ```sh
 uv run --no-sync python scripts/verify_studio.py review \
-  --mode local --server http://127.0.0.1:6767 --review-id YOUR_REVIEW_ID \
+  --mode local --server "${OMNIGENT_URL:?set to the server URL printed by omnidev}" --review-id YOUR_REVIEW_ID \
   --harness codex-native --pr https://github.com/YOUR_ORG/YOUR_REPO/pull/17 \
   --output .omnigent/studio/review-receipt.json
 ```
@@ -616,7 +628,7 @@ SHAs you expect it to have reviewed.
 
 ```sh
 uv run --no-sync python scripts/verify_studio.py review-run \
-  --mode local --server http://127.0.0.1:6767 --run-id RUN_ID \
+  --mode local --server "${OMNIGENT_URL:?set to the server URL printed by omnidev}" --run-id RUN_ID \
   --pr https://github.com/YOUR_ORG/YOUR_REPO/pull/17 \
   --base BASE_SHA --head HEAD_SHA --minimum-reviewers 2 --json
 ```
@@ -635,7 +647,7 @@ saved review run:
 
 ```sh
 uv run --no-sync python scripts/verify_studio.py reproduce \
-  --mode local --server http://127.0.0.1:6767 --run-id RUN_ID \
+  --mode local --server "${OMNIGENT_URL:?set to the server URL printed by omnidev}" --run-id RUN_ID \
   --pr https://github.com/YOUR_ORG/YOUR_REPO/pull/17 \
   --repository /path/to/repo --image python:3.12-alpine \
   --output .omnigent/studio/reproduction.json -- python path/to/check.py
@@ -674,7 +686,7 @@ head and on a temporary snapshot with the patch applied.
 
 ```sh
 uv run --no-sync python scripts/verify_studio.py reproduce \
-  --mode local --server http://127.0.0.1:6767 --run-id RUN_ID \
+  --mode local --server "${OMNIGENT_URL:?set to the server URL printed by omnidev}" --run-id RUN_ID \
   --pr https://github.com/your_org/your_repo/pull/17 \
   --repository /path/to/repo --image "$TEST_IMAGE_ID" \
   --fix-patch /path/to/proposed.patch \
@@ -708,7 +720,7 @@ about its failing head check, and the candidate that passed its fix comparison.
 
 ```sh
 uv run --no-sync python scripts/verify_studio.py lifecycle \
-  --mode local --server http://127.0.0.1:6767 \
+  --mode local --server "${OMNIGENT_URL:?set to the server URL printed by omnidev}" \
   --pr https://github.com/your_org/your_repo/pull/17 \
   --run-id RUN_ID --finding FINDING_KEY --question QUESTION_ID \
   --candidate CANDIDATE_RUN_ID --output .omnigent/studio/lifecycle.json
@@ -778,7 +790,7 @@ in the finding's **Reproductions** panel and run:
 
 ```sh
 uv run --no-sync python scripts/verify_studio.py attach-proof \
-  --mode local --server http://127.0.0.1:6767 \
+  --mode local --server "${OMNIGENT_URL:?set to the server URL printed by omnidev}" \
   --finding FINDING_KEY --receipt .omnigent/studio/reproduction.json
 ```
 
@@ -816,7 +828,7 @@ preview and a GitHub CLI login with read access to the repository.
 
 ```sh
 uv run --no-sync python scripts/verify_studio.py publication \
-  --mode local --server http://127.0.0.1:6767 \
+  --mode local --server "${OMNIGENT_URL:?set to the server URL printed by omnidev}" \
   --preview /path/to/publication-preview.json --draft DRAFT_ID \
   --author GITHUB_LOGIN --output .omnigent/studio/publication.json
 ```

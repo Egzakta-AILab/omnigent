@@ -307,13 +307,13 @@ from omnigent.stores.host_store import host_is_live
 from omnigent.stores.permission_store import PermissionStore, read_all_grants
 from omnigent.stores.project_store import ProjectStore
 from omnigent.stores.session_pull_request_store import SessionSummary
+from omnigent.studio.reviews.discussion import QuestionExecution
+from omnigent.studio.reviews.models import ReviewPass, ReviewProfile
 from omnigent.telemetry.surface import CLIENT_SURFACE_LABEL_KEY, resolve_session_surface
 from omnigent.util.claude_launch_args import (
     claude_legacy_launch_prompt,
     without_claude_session_id_arg,
 )
-from omnigent.studio.reviews.discussion import QuestionExecution
-from omnigent.studio.reviews.models import ReviewPass, ReviewProfile
 from omnigent.util.cost_plan import (
     reserved_cost_control_keys,
 )
@@ -1651,8 +1651,10 @@ def register_core_routes(
         reviewer_session_id: str | None = None,
     ) -> SessionResponse:
         agent_sibling = False
-        if source is not None and request.app.state.feature_flags.enabled(
-            Feature.SIBLING_SESSIONS
+        if (
+            source is not None
+            and review_profile is None
+            and request.app.state.feature_flags.enabled(Feature.SIBLING_SESSIONS)
         ):
             body.sibling_source_id = source.root_conversation_id
             agent_sibling = True
@@ -1690,7 +1692,7 @@ def register_core_routes(
                 body.sibling_source_id = sibling_source.id
                 body.project_id = sibling_source.project_id
         launching_task = None
-        if source is not None:
+        if source is not None and review_profile is None:
             from omnigent.server.scheduled.run_sharing import launching_automation
 
             # An agent's launch from an automation run's tree joins that automation's runs.
@@ -1723,7 +1725,7 @@ def register_core_routes(
             created_by_scheduled_task_id=(
                 source.labels.get(SCHEDULED_TASK_ORIGIN_LABEL_KEY) if source is not None else None
             ),
-            created_by=source,
+            created_by=source if review_profile is None else None,
             launched_by_scheduled_task_id=(
                 launching_task.id if launching_task is not None else None
             ),

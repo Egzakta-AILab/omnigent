@@ -80,6 +80,9 @@ const REPO = "/Users/corey/projects/alpha";
 let searchParams = new URLSearchParams("project=Alpha");
 const replaceSearchParamsMock = vi.fn();
 vi.mock("@/lib/routing", () => ({
+  Link: ({ to, children }: { to: string; children: React.ReactNode }) => (
+    <a href={to}>{children}</a>
+  ),
   useLocation: () => ({ hash: "", state: null }),
   useReplaceSearchParams: () => replaceSearchParamsMock,
   useNavigate: () => navigateMock,

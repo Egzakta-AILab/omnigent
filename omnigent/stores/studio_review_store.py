@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import time
 import uuid
@@ -257,6 +258,13 @@ def _operation(row: SqlStudioReviewOperation) -> ReviewOperation:
 
 class StudioReviewStore:
     """Review state in the existing operational database, never transcript storage."""
+
+    @classmethod
+    def from_deployment(cls, storage_location: str) -> StudioReviewStore | None:
+        """Open the review store when this server deploys the Studio review routes."""
+        if os.environ.get("OMNIGENT_STUDIO_REVIEWS", "1") == "0":
+            return None
+        return cls(storage_location)
 
     def __init__(self, storage_location: str) -> None:
         self.storage_location = storage_location

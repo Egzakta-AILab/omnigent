@@ -3274,19 +3274,18 @@ function AppShellImpl() {
                   <SubagentPanelOpenerContext.Provider value={openSubagentInPanel}>
                     <RenderErrorBoundary name="this page" resetKey={location.pathname}>
                       <ShellCommandContext.Provider value={shellCommandAction}>
-                      {serverConversationId && showReviewSession ? (
-                        <ReviewerSessionView
-                          sessionId={serverConversationId}
-                          requestedView={searchParams.get("view")}
-                          lastActivityAt={activeConv?.updated_at}
-                          onOpenPullRequest={railTabsAvailable.github ? openGithubTab : undefined}
-                        >
+                        {serverConversationId && showReviewSession ? (
+                          <ReviewerSessionView
+                            sessionId={serverConversationId}
+                            requestedView={searchParams.get("view")}
+                            lastActivityAt={activeConv?.updated_at}
+                            onOpenPullRequest={railTabsAvailable.github ? openGithubTab : undefined}
+                          >
+                            <Outlet />
+                          </ReviewerSessionView>
+                        ) : (
                           <Outlet />
-                        </ReviewerSessionView>
-                      ) : (
-                        <Outlet />
-                      )}
-
+                        )}
                       </ShellCommandContext.Provider>
                     </RenderErrorBoundary>
                   </SubagentPanelOpenerContext.Provider>
@@ -3392,6 +3391,7 @@ function AppShellImpl() {
               </div>
 
               <AppShellWorkspacePanels
+                reviewSession={showReviewSession}
                 conversationId={conversationId}
                 terminalFirst={terminalFirst}
                 panelOpen={panelOpen}

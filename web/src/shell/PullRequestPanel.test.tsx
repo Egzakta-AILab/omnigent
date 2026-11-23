@@ -1,8 +1,7 @@
+import { MemoryRouter } from "react-router-dom";
 import type { FileDiff } from "@pierre/diffs/react";
 import type { Comment } from "@/hooks/useComments";
 import { clearLocalReviewContexts, usePendingLocalReviewContexts } from "@/lib/localReviewContext";
-import { CapabilitiesProvider } from "@/lib/CapabilitiesContext";
-import { FALLBACK_SERVER_INFO } from "@/lib/capabilities";
 // Tests for PullRequestPanel — the stacked "Files changed" view. The GitHub data
 // hooks and the heavy MonacoDiffViewer are mocked; IntersectionObserver (absent
 // in jsdom) is stubbed to fire immediately so lazy sections mount.
@@ -286,15 +285,23 @@ function renderPanel(mobile = false, active?: boolean, workspaceRepositories = f
     client,
     ...render(<PullRequestPanel conversationId="conv_1" active={active} />, {
       wrapper: ({ children }) => (
-        <CapabilitiesProvider info={{ ...FALLBACK_SERVER_INFO, comment_anchor_metadata: true, workspace_repositories: workspaceRepositories === true }}>
+        <CapabilitiesProvider
+          info={{
+            ...FALLBACK_SERVER_INFO,
+            comment_anchor_metadata: true,
+            workspace_repositories: workspaceRepositories === true,
+          }}
+        >
           <QueryClientProvider client={client}>
-            {mobile ? (
-              <MobilePanelDrawer open title="Pull Requests" onClose={() => {}}>
-                {children}
-              </MobilePanelDrawer>
-            ) : (
-              children
-            )}
+            <MemoryRouter>
+              {mobile ? (
+                <MobilePanelDrawer open title="Pull Requests" onClose={() => {}}>
+                  {children}
+                </MobilePanelDrawer>
+              ) : (
+                children
+              )}
+            </MemoryRouter>
           </QueryClientProvider>
         </CapabilitiesProvider>
       ),

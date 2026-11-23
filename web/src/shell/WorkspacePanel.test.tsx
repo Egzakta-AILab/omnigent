@@ -344,15 +344,15 @@ function renderWorkspace(
   const Providers = ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={queryClient}>
       <CapabilitiesProvider info={initialOverrides.serverInfo ?? "loading"}>
-      <MemoryRouter initialEntries={[initialOverrides.initialPath ?? "/"]}>
-        {fileViewerContext ? (
-          <FileViewerContext.Provider value={fileViewerContext}>
-            {children}
-          </FileViewerContext.Provider>
-        ) : (
-          children
-        )}
-      </MemoryRouter>
+        <MemoryRouter initialEntries={[initialOverrides.initialPath ?? "/"]}>
+          {fileViewerContext ? (
+            <FileViewerContext.Provider value={fileViewerContext}>
+              {children}
+            </FileViewerContext.Provider>
+          ) : (
+            children
+          )}
+        </MemoryRouter>
       </CapabilitiesProvider>
     </QueryClientProvider>
   );

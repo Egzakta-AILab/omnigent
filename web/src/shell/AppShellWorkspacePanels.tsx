@@ -16,6 +16,7 @@ import { TerminalsPanel } from "./TerminalsPanel";
 export interface AppShellWorkspacePanelsProps {
   conversationId: string | undefined;
   terminalFirst: boolean;
+  reviewSession: boolean;
   panelOpen: boolean;
   panelInitialKey: string | null;
   setPanelInitialKey: (key: string | null) => void;
@@ -58,6 +59,7 @@ export interface AppShellWorkspacePanelsProps {
 export function AppShellWorkspacePanels({
   conversationId,
   terminalFirst,
+  reviewSession,
   panelOpen,
   panelInitialKey,
   setPanelInitialKey,
@@ -168,7 +170,7 @@ export function AppShellWorkspacePanels({
           testId="github-panel-drawer"
         >
           <RenderErrorBoundary name="pull requests" resetKey={conversationId}>
-            <PullRequestPanel conversationId={conversationId} />
+            <PullRequestPanel conversationId={conversationId} reviewSession={reviewSession} />
           </RenderErrorBoundary>
         </MobilePanelDrawer>
       )}

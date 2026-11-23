@@ -106,6 +106,9 @@ const SOURCE_SESSION: Awaited<ReturnType<typeof getSessionSlim>> = {
 let searchParams = new URLSearchParams("project=Alpha");
 const replaceSearchParamsMock = vi.fn();
 vi.mock("@/lib/routing", () => ({
+  Link: ({ to, children }: { to: string; children: React.ReactNode }) => (
+    <a href={to}>{children}</a>
+  ),
   useLocation: () => ({ hash: "", state: null }),
   useReplaceSearchParams: () => replaceSearchParamsMock,
   useNavigate: () => navigateMock,
@@ -793,7 +796,7 @@ describe("NewChatLandingScreen nested agent creation", () => {
       expect(useHosts).toHaveBeenCalledWith({ refetchOnFocus: true, sourceHostId: "host_1" });
       expect(screen.getByTestId("new-chat-landing-host-chip")).toHaveAttribute(
         "aria-label",
-        "Host: This machine, Online",
+        "Host: corey-laptop, Online",
       );
       fireEvent.change(screen.getByTestId("new-chat-landing-file-input"), {
         target: { files: [new File(["submitted"], "submitted.txt", { type: "text/plain" })] },
