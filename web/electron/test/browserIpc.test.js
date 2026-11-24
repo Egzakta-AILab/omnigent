@@ -162,7 +162,7 @@ describe("browser IPC Arca context", () => {
       }),
       getAgentNavigationHintForEvent: () => {
         hints++;
-        return "Run on Arca";
+        return "Connect managed host";
       },
     });
     const invoke = (agent) =>
@@ -171,7 +171,7 @@ describe("browser IPC Arca context", () => {
         {},
         { conversationId: "source", url: "http://localhost", opts: { agent } },
       );
-    assert.equal((await invoke(true)).error, "blocked Run on Arca");
+    assert.equal((await invoke(true)).error, "blocked Connect managed host");
     assert.equal((await invoke(false)).error, "blocked");
     allowed = true;
     assert.equal((await invoke(true)).ok, true);

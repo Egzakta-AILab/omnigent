@@ -4592,7 +4592,7 @@ describe("browser-view teardown on server change (src/main.js)", () => {
     );
   });
 
-  it("points old renderers at their visible Run on Arca action", async (t) => {
+  it("points older renderers at the host picker to reconnect their managed host", async (t) => {
     for (const [serverUrl, internalFeatures, expected] of [
       ["https://account.databricks.com/omnigent?o=123", true, true],
       ["https://account.databricks.com/omnigent?o=123", false, false],
@@ -4605,7 +4605,7 @@ describe("browser-view teardown on server change (src/main.js)", () => {
       const event = { sender: h.webContents, senderFrame: { url: serverUrl } };
       for (const url of ["http://localhost:5173", "https://127.0.0.1", "http://[::1]"]) {
         if (expected) {
-          assert.match(hint(event, url), /New session > Host > Run on Arca/);
+          assert.match(hint(event, url), /New session > Host and reconnect your managed host/);
         } else {
           assert.equal(hint(event, url), null);
         }
@@ -4640,7 +4640,10 @@ describe("browser-view teardown on server change (src/main.js)", () => {
     const hint = h.browserIpcDeps().getAgentNavigationHintForEvent;
     assert.equal(eligible(context), false);
     const event = { sender: h.webContents, senderFrame: { url: serverUrl } };
-    assert.match(hint(event, "http://localhost"), /New session > Host > Run on Arca/);
+    assert.match(
+      hint(event, "http://localhost"),
+      /New session > Host and reconnect your managed host/,
+    );
     assert.equal(
       hint(event, "https://preview.dev.localhost:23090/one"),
       hint(event, "http://localhost"),
@@ -6071,7 +6074,8 @@ describe("SSH connect IPC", () => {
 
       assert.equal(result.ok, connects);
       assert.equal(h.calls.sshConnects.length, connects ? 1 : 0);
-      if (!connects) assert.match(result.error, /Use Run on Arca instead/);
+      if (!connects)
+        assert.match(result.error, /Open New session > Host to connect your managed host/);
     });
   }
 

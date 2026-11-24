@@ -568,7 +568,7 @@ corrected without prompting from sandbox sessions. Both paths verify that the
 captured host ID matches the source session. Consent or auto-connect opt-in, the
 captured identity check, and the agent-context gate remain the trust boundaries.
 A decline briefly suppresses repeat prompts, while failed runs remain retryable.
-**Run on Arca** is hidden for an online remembered host only when the desktop
+**Connect managed host** is hidden for an online remembered host only when the desktop
 advertises preview recovery; older shells keep the action visible.
 
 The exception covers HTTP(S) `localhost`, `127.0.0.1`, `[::1]`, and
