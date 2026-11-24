@@ -39,6 +39,7 @@ def downgrade() -> None:
         sa.text("SELECT 1 FROM studio_inline_drafts WHERE publication_state <> 'draft' LIMIT 1")
     ):
         raise RuntimeError("Cannot downgrade while inline publication records exist")
-    op.drop_column("studio_inline_drafts", "provider_url")
-    op.drop_column("studio_inline_drafts", "publication_digest")
-    op.drop_column("studio_inline_drafts", "publication_state")
+    with op.batch_alter_table("studio_inline_drafts") as batch:
+        batch.drop_column("provider_url")
+        batch.drop_column("publication_digest")
+        batch.drop_column("publication_state")

@@ -27,5 +27,7 @@ def downgrade() -> None:
         sa.text("SELECT 1 FROM studio_review_passes WHERE run_role IS NOT NULL LIMIT 1")
     ):
         raise RuntimeError("Cannot downgrade while orchestrated review runs exist")
-    op.drop_column("studio_review_passes", "run_role")
-    op.drop_column("studio_review_runs", "plan_json")
+    with op.batch_alter_table("studio_review_passes") as batch:
+        batch.drop_column("run_role")
+    with op.batch_alter_table("studio_review_runs") as batch:
+        batch.drop_column("plan_json")
