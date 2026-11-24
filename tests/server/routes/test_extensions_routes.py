@@ -452,3 +452,158 @@ def test_extension_routes_are_mounted_before_spa_fallback(
     assert expected <= set(paths)
     spa_index = next(index for index, path in enumerate(paths) if path == "")
     assert all(paths.index(path) < spa_index for path in expected)
+
+
+async def test_studio_shared_issue_private_session_and_confirmation(db_uri, tmp_path, monkeypatch):
+    from uuid import uuid4
+
+    from omnigent.entities import MessageData, NewConversationItem
+    from omnigent.server.accounts_config import AccountsConfig
+    from omnigent.server.accounts_store import SqlAlchemyAccountStore
+    from omnigent.server.auth import LEVEL_OWNER
+    from omnigent.server.passwords import hash_password
+    from omnigent.stores.studio_tasks import StudioTaskStore
+
+    config = AccountsConfig(
+        cookie_secret=b"x" * 32,
+        session_ttl_hours=2,
+        base_url="http://test",
+        init_admin_password=None,
+        invite_ttl_seconds=300,
+        magic_ttl_seconds=300,
+    )
+    auth = UnifiedAuthProvider(source="accounts", accounts_config=config)
+    accounts = SqlAlchemyAccountStore(db_uri)
+    password = "fixture-only-password"
+    hashed = hash_password(password)
+    monkeypatch.setenv("OMNIGENT_WS_ALLOWED_ORIGINS", "http://test")
+    permissions = SqlAlchemyPermissionStore(db_uri)
+    accounts.create_user_with_password(_USER, hashed)
+    second = "second@example.test"
+    accounts.create_user_with_password(second, hashed)
+    accounts.create_user_with_password(_ADMIN, hashed, is_admin=True)
+    agents = SqlAlchemyAgentStore(db_uri)
+    conversations = SqlAlchemyConversationStore(db_uri)
+    source = conversations.create_conversation(
+        agent_id=agents.create(uuid4().hex, "agent", "bundle").id,
+        workspace=str(tmp_path),
+    )
+    conversations.append(
+        source.id,
+        [
+            NewConversationItem(
+                type="message",
+                response_id="turn",
+                data=MessageData(
+                    role="user", content=[{"type": "text", "text": "Private transcript fixture"}]
+                ),
+            )
+        ],
+    )
+    permissions.grant(_USER, source.id, LEVEL_OWNER)
+    manifest = replace(
+        _manifest(),
+        entrypoints=ExtensionEntrypoints(),
+        permissions=frozenset(
+            {
+                ExtensionPermission.STUDIO_TASKS,
+                ExtensionPermission.STUDIO_FLEET,
+                ExtensionPermission.STUDIO_INBOX,
+            }
+        ),
+    )
+    artifacts = LocalArtifactStore(str(tmp_path / "artifacts"))
+    app = create_app(
+        agent_store=agents,
+        file_store=SqlAlchemyFileStore(db_uri),
+        conversation_store=SqlAlchemyConversationStore(db_uri),
+        artifact_store=artifacts,
+        agent_cache=AgentCache(artifact_store=artifacts, cache_dir=tmp_path / "cache"),
+        extension_state=ExtensionPluginState((manifest,), {}),
+        permission_store=permissions,
+        studio_task_store=StudioTaskStore(db_uri),
+        account_store=accounts,
+        auth_provider=auth,
+    )
+    prefix = f"/v1/extensions/{manifest.id}/studio/v1"
+    key = {"linear_workspace": str(uuid4()), "linear_issue_id": str(uuid4())}
+    monkeypatch.delenv("OMNIGENT_STUDIO_LINEAR_TOKEN", raising=False)
+    async with (
+        _client(app, _USER) as alice,
+        _client(app, second) as bob,
+        _client(app, _ADMIN) as admin,
+    ):
+        for client, account in ((alice, _USER), (bob, second), (admin, _ADMIN)):
+            (
+                await client.post("/auth/login", json={"username": account, "password": password})
+            ).raise_for_status()
+        task = (await alice.post(f"{prefix}/tasks/getOrCreate", json=key)).json()
+        assert (await bob.post(f"{prefix}/tasks/getOrCreate", json=key)).json() == task
+        args = {"task_id": task["task_id"], "session_id": source.id}
+        assert (await alice.post(f"{prefix}/tasks/linkSession", json=args)).json()["session_ids"]
+        assert (await bob.post(f"{prefix}/tasks/list", json={})).json()["items"][0][
+            "session_ids"
+        ] == []
+        assert (
+            "Private transcript fixture"
+            in (await alice.get(f"/v1/sessions/{source.id}/items")).raise_for_status().text
+        )
+        assert (await bob.get(f"/v1/sessions/{source.id}/items")).status_code == 404
+        assert (await bob.get(f"/v1/sessions/{source.id}")).status_code == 404
+        assert (await alice.get(f"/v1/sessions/{source.id}")).status_code == 200
+        assert (await bob.post(f"{prefix}/tasks/linkSession", json=args)).status_code == 404
+        assert (await alice.post(f"{prefix}/reviews/listRuns", json={})).status_code == 403
+        assert (
+            await alice.post(f"{prefix}/tasks/list", json={"after": "bogus"})
+        ).status_code == 422
+        seat = {
+            "slot_id": "work",
+            "harness": "codex-native",
+            "enabled": True,
+            "encrypted_profile_ref": "secret-ref",
+        }
+        assert (await bob.post(f"{prefix}/fleet/adminSeats", json=seat)).status_code == 403
+        assert (
+            "encrypted_profile_ref"
+            not in (await admin.post(f"{prefix}/fleet/adminSeats", json=seat))
+            .raise_for_status()
+            .json()
+        )
+        comment = {
+            "task_id": task["task_id"],
+            "request_id": str(uuid4()),
+            "body": "Confirmed text",
+        }
+        assert (
+            await alice.post(
+                f"{prefix}/tasks/syncLinearConfirmed", json={**comment, "confirmed": True}
+            )
+        ).status_code == 422
+        path = f"{prefix}/tasks/confirmLinear"
+        assert (await alice.post(path, json=comment)).status_code == 403
+        browser_headers = {"Sec-Fetch-Site": "same-origin", "Origin": "http://test"}
+        async with _client(app) as cli:
+            token = alice.cookies[config.session_cookie_name]
+            assert (
+                await cli.post(
+                    path,
+                    json=comment,
+                    headers={**browser_headers, "Authorization": "Bearer " + token},
+                )
+            ).status_code == 403
+            cli.cookies.set(config.session_cookie_name, token)
+            assert (await cli.post(path, json=comment, headers=browser_headers)).status_code == 403
+        assert (
+            await alice.post(path, json=comment, headers={**browser_headers, "Origin": "null"})
+        ).status_code == 403
+        ticket = (
+            (await alice.post(path, json=comment, headers=browser_headers))
+            .raise_for_status()
+            .json()
+        )
+        confirm = {**comment, **ticket}
+        send = f"{prefix}/tasks/syncLinearConfirmed"
+        assert (await bob.post(send, json=confirm)).status_code == 403
+        assert (await alice.post(send, json={**confirm, "body": "changed"})).status_code == 403
+        assert (await alice.post(send, json=confirm)).status_code == 503
+        assert (await alice.post(send, json=confirm)).status_code == 403

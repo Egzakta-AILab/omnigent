@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 
 import httpx
 import jwt
+from starlette.responses import Response
 
 _logger = logging.getLogger(__name__)
 
@@ -161,6 +162,27 @@ def mint_session_cookie(
         provider,
         account_generation=account_generation,
         cli_login_ticket=cli_login_ticket,
+    )
+
+
+def browser_consent_proof(session_token: str, secret: bytes) -> str:
+    """Bind the private browser cookie to this exact signed login session."""
+    return hmac.new(
+        secret, b"studio-browser-consent-v1\x00" + session_token.encode(), hashlib.sha256
+    ).hexdigest()
+
+
+def set_browser_consent_cookie(
+    response: Response, name: str, session_token: str, secret: bytes, secure: bool, seconds: int
+) -> None:
+    response.set_cookie(
+        name + "_consent",
+        browser_consent_proof(session_token, secret),
+        max_age=seconds,
+        secure=secure,
+        httponly=True,
+        samesite="strict",
+        path="/",
     )
 
 

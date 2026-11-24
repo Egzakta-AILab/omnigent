@@ -166,6 +166,7 @@ from omnigent.server.routes.sessions import (
     set_server_runner_router,
 )
 from omnigent.server.routes.sharing import create_sharing_router
+from omnigent.server.routes.studio_rpc import create_studio_rpc_router
 from omnigent.server.routes.studio_workspace import create_studio_workspace_router
 from omnigent.server.routes.terminal_attach import create_terminal_attach_router
 from omnigent.server.routes.usage import create_usage_router
@@ -215,6 +216,7 @@ from omnigent.stores.proactive_agent_settings_store import ProactiveAgentSetting
 from omnigent.stores.project_store import ProjectStore
 from omnigent.stores.scheduled_task_store import ScheduledTaskStore
 from omnigent.stores.scheduled_task_store.dispatch import ScheduledTaskDispatchStore
+from omnigent.stores.studio_tasks import StudioTaskStore
 from omnigent.stores.user_settings_store import (
     open_user_settings_store,
     session_owner_title_instructions,
@@ -1931,6 +1933,7 @@ def create_app(
     proactive_agent_settings_store: ProactiveAgentSettingsStore | None = None,
     memory_store: MemoryStore | None = None,
     studio_review_store: "StudioReviewStore | None" = None,
+    studio_task_store: StudioTaskStore | None = None,
 ) -> FastAPI:
     """
     Build and return the FastAPI application with all routes mounted.
@@ -4374,6 +4377,19 @@ def create_app(
         create_harnesses_router(auth_provider=auth_provider),
         prefix="/v1",
         tags=["harnesses"],
+    )
+    app.include_router(
+        create_studio_rpc_router(
+            resolved_extension_state,
+            frozenset(extension_bundles),
+            studio_task_store,
+            studio_review_store,
+            conversation_store,
+            permission_store,
+            auth_provider,
+        ),
+        prefix="/v1",
+        tags=["studio"],
     )
     app.include_router(
         create_extensions_router(

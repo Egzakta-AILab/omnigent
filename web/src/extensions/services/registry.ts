@@ -1,6 +1,9 @@
 import type { ExtensionCatalogItem } from "../types";
 
+import { STUDIO_METHOD_PERMISSIONS } from "../../../../sdks/web-extension/src/studio";
+
 export const HOST_METHOD_PERMISSIONS = {
+  ...STUDIO_METHOD_PERMISSIONS,
   "navigation.openPage": "navigation",
   "navigation.openSession": "navigation",
   "navigation.openNewSession": "navigation",

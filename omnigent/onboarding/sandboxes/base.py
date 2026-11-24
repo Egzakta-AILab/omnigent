@@ -998,6 +998,9 @@ class SandboxHostLauncher(SandboxLifecycle):
     credential that must stay fresh on the owner's machine. ``None`` shows nothing.
     """
 
+    def bind_owner_context(self, owner: str, workspace_id: int) -> None:
+        """Bind the host's trusted owner and workspace before resolving credentials."""
+
     def list_profiles(self, context: SandboxProfileContext) -> list[ProviderSandboxProfile] | None:
         """Return only profiles currently authorized for the trusted caller context.
 

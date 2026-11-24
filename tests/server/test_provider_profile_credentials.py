@@ -60,7 +60,12 @@ class _CredentialProvider(FakeSandboxLauncher):
         self.credentials = credentials
         self.resolve: Callable[[], Mapping[str, object] | None] | None = None
         self.selected: ProviderSandboxProfile | None = None
+        self.bound_owner: tuple[str, int] | None = None
         credentials.launchers.append(self)
+
+    def bind_owner_context(self, owner: str, workspace_id: int) -> None:
+        assert self.resolve is None
+        self.bound_owner = owner, workspace_id
 
     @property
     def owner_credential_provider(self) -> str:
@@ -153,6 +158,7 @@ async def test_existing_owner_binding_supports_profile_io_and_credential_refresh
 ) -> None:
     with workspace_scope(41):
         launcher = build_owner_launcher(harness.deployment.default, harness.deployment, "alice")
+        assert harness.credentials.launchers[-1].bound_owner == ("alice", 41)
         context = SandboxProfileContext("alice", 41)
         assert await asyncio.to_thread(launcher.list_profiles, context) == [_PROFILE]
         harness.credentials.tokens[("alice", 41)] = "refreshed-token"

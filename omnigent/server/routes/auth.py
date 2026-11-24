@@ -55,6 +55,7 @@ from omnigent.server.oidc import (
     derive_code_challenge,
     generate_code_verifier,
     mint_session_cookie,
+    set_browser_consent_cookie,
 )
 from omnigent.server.oidc_access import OidcAdmissionPolicy, resolve_allowed_domains_path
 from omnigent.server.routes._oauth import NO_STORE_HEADERS, oauth_error
@@ -629,6 +630,14 @@ def create_auth_router(
                 )
             else:
                 resp = RedirectResponse(url=return_to, status_code=302)
+            set_browser_consent_cookie(
+                resp,
+                _session_cookie,
+                session_jwt,
+                config.cookie_secret,
+                _secure,
+                config.session_ttl_hours * 3600,
+            )
             resp.set_cookie(
                 key=_session_cookie,
                 value=session_jwt,
@@ -649,6 +658,14 @@ def create_auth_router(
 
         # Normal browser login — redirect back to the app.
         response = RedirectResponse(url=return_to, status_code=302)
+        set_browser_consent_cookie(
+            response,
+            _session_cookie,
+            session_jwt,
+            config.cookie_secret,
+            _secure,
+            config.session_ttl_hours * 3600,
+        )
         response.set_cookie(
             key=_session_cookie,
             value=session_jwt,
@@ -733,6 +750,13 @@ def create_auth_router(
         base_path = getattr(request.app.state, "base_path", "")
         redirect_url = config.logout_redirect_uri or f"{base_path}/"
         response = RedirectResponse(url=redirect_url, status_code=302)
+        response.delete_cookie(
+            _session_cookie + "_consent",
+            path="/",
+            secure=_secure,
+            httponly=True,
+            samesite="strict",
+        )
         response.delete_cookie(
             key=_session_cookie,
             path="/",
