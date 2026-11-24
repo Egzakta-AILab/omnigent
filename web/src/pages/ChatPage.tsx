@@ -1,3 +1,10 @@
+import {
+  Dialog as StudioDialog,
+  DialogContent as StudioDialogContent,
+  DialogTitle as StudioDialogTitle,
+} from "@/components/ui/dialog";
+import { SharedSessionTaskBrief } from "@/studio/IssueWorkspace";
+import { useStudioThreadPage } from "@/studio/SessionTaskThread";
 import { clearLocalReviewContexts, usePendingLocalReviewContexts } from "@/lib/localReviewContext";
 import { buildOutgoingMessage, carriesMessageContext } from "@/lib/outgoingComposerMessage";
 import { SelectionPopup } from "@/components/chat/SelectionPopup";
@@ -2601,6 +2608,8 @@ function ComposerImpl(
   ]);
   // No server session behind a temp id — gate goal/workspace fetches on it so
   // the create window issues no `/v1/sessions/temp:*` requests.
+  const [peopleSession, setPeopleSession] = useState<string | null>(null);
+  const threadPage = useStudioThreadPage();
   const composerSessionId = isTempConvId(conversationId) ? null : conversationId;
   // A send held while the host was offline goes out once the host is back.
   useReleaseHostHeldSends(composerSessionId);
@@ -4633,8 +4642,15 @@ function ComposerImpl(
               {/* "@"-file-mention browser - sessions gated by ``mentionEnabled``.
             Also shown (as a loading row) while the listing is still fetching,
             so "@" isn't silently dead during runner cold-boot or a drill-in. */}
-              {(mentionOpen || mentionListingPending) && (
+              {(mentionOpen ||
+                mentionListingPending ||
+                (mention && threadPage && composerSessionId && !isReadOnly)) && (
                 <FileMentionMenu
+                  onMentionPerson={
+                    threadPage && composerSessionId && !isReadOnly
+                      ? () => setPeopleSession(composerSessionId)
+                      : undefined
+                  }
                   currentDir={mentionDir}
                   query={mention?.query ?? ""}
                   fileQuery={mentionFilter}
@@ -4646,6 +4662,28 @@ function ComposerImpl(
                   sessionMenu={sessionMenu}
                   onAttachSession={attachSession}
                 />
+              )}
+              {peopleSession && peopleSession === composerSessionId && threadPage && (
+                <StudioDialog
+                  open
+                  onOpenChange={(open) => {
+                    if (!open) setPeopleSession(null);
+                  }}
+                >
+                  <StudioDialogContent>
+                    <StudioDialogTitle>Mention a teammate</StudioDialogTitle>
+                    <SharedSessionTaskBrief
+                      sessionId={peopleSession}
+                      threadOnly
+                      fallback={
+                        <p>
+                          Link this session to a shared task in Work to start a teammate
+                          conversation.
+                        </p>
+                      }
+                    />
+                  </StudioDialogContent>
+                </StudioDialog>
               )}
               {/* /btw side-chat overlay — transient question+answer panel,
             dismissed with Esc / ✕. Never persisted to the transcript. */}

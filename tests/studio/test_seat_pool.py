@@ -39,3 +39,48 @@ def test_pool_balances_concurrent_reservations_and_retries_only_quota(db_uri):
     assert pool.reserve("codex-native").slot_id == attempts[-1]
     with pytest.raises(PoolExhausted):
         pool.reserve("claude-native")
+
+
+def test_seat_fallback_uses_operator_provider_and_preserves_reference(db_uri, monkeypatch):
+    import json
+    from uuid import uuid4
+
+    import httpx
+    from fastapi import HTTPException
+
+    from omnigent.db.db_models import workspace_scope
+
+    tasks = StudioTaskStore(db_uri, clock=lambda: 1000000)
+    pool = SeatPool(db_uri, clock=tasks.clock)
+    base = {"slot_id": "primary", "harness": "claude-native", "enabled": True}
+    ref = uuid4().hex
+    tasks.admin_seat("operator", rpc.Seat(**base, encrypted_profile_ref=ref, weight=4))
+    switch = rpc.Seat(**base, routing_mode="fallback")
+    with pytest.raises(HTTPException, match="No fallback"):
+        tasks.admin_seat("operator", switch)
+    monkeypatch.setenv("OMNIGENT_STUDIO_LOCAL_FALLBACK", "1")
+    assert tasks.admin_seat("operator", switch)["weight"] == 4
+    modes = []
+
+    def admit(request):
+        body = json.loads(request.content)
+        modes.append(body["mode"])
+        if body["mode"] == "on_prem":
+            assert "reference" not in body
+            return httpx.Response(200, json={"profile": "local", "provider": "sparkle"})
+        assert body["reference"] == ref
+        return httpx.Response(200, json={"profile": "work"})
+
+    with httpx.Client(transport=httpx.MockTransport(admit)) as client:
+        assert pool.launch_profile("claude-native", uuid4().hex, client) == "local"
+        tasks.admin_seat("operator", rpc.Seat(**base, routing_mode="subscription"))
+        assert pool.launch_profile("claude-native", uuid4().hex, client) == "work"
+        tasks.admin_seat("operator", rpc.Seat(**{**base, "enabled": False}))
+        assert pool.launch_profile("claude-native", uuid4().hex, client) == "local"
+        assert modes == ["on_prem", "subscription", "on_prem"]
+    assert tasks.inventory("operator", rpc.Page(), True)["seats"][0]["usage_7d"] == 2
+    assert "usage_7d" not in tasks.inventory("operator", rpc.Page())["seats"][0]
+    with workspace_scope(45):
+        assert tasks.inventory("operator", rpc.Page(), True)["seats"] == []
+    tasks.clock = lambda: 2000000
+    assert tasks.inventory("operator", rpc.Page(), True)["seats"][0]["usage_7d"] == 0

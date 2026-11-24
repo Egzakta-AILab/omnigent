@@ -177,3 +177,33 @@ async def test_reaper_controls_dispatched_runner(db_uri, tmp_path, monkeypatch, 
     await fleet.reap(req, store)
     assert list(sessions.values()) == ["archived"]
     assert store.expired_sessions() == []
+
+
+@pytest.mark.parametrize(
+    "counts", [(1, 2, 1, 3), (False, 2, 1, 3), (1, 4, 1, 3), (1, 2, 2, 3), None]
+)
+def test_fleet_capacity_is_bounded_and_provider_owned(monkeypatch, counts):
+    calls = []
+    payload = (
+        dict(
+            zip(
+                ("bot_review_held", "other_held", "bot_review_limit", "other_limit"),
+                counts,
+                strict=True,
+            )
+        )
+        if counts is not None
+        else None
+    )
+
+    def resolve(request, actor, profile):
+        calls.append((actor, profile))
+        return SimpleNamespace(fleet_capacity=lambda: payload), {}
+
+    monkeypatch.setattr(fleet, "provider", resolve)
+    assert fleet.fleet_capacity(None, None) is None
+    actual = fleet.fleet_capacity(None, "configured-bot")
+    assert calls == [("configured-bot", "bot-review")]
+    assert actual == (
+        payload if counts and type(counts[0]) is int and counts == (1, 2, 1, 3) else None
+    )

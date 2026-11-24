@@ -1,3 +1,4 @@
+import { SessionTaskThread, TaskThreadDisclosure, useStudioThreadPage } from "./SessionTaskThread";
 import { ReadableMarkdown } from "@/components/ReadableMarkdown";
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -73,10 +74,13 @@ export function SessionTaskBrief({
 export function SharedSessionTaskBrief({
   sessionId,
   fallback,
+  threadOnly = false,
 }: {
   sessionId: string;
   fallback: React.ReactNode;
+  threadOnly?: boolean;
 }) {
+  const thread = useStudioThreadPage();
   const viewer = useViewerId();
   const server = getOmnigentServerIdentity();
   const query = useQuery({
@@ -106,7 +110,19 @@ export function SharedSessionTaskBrief({
         </p>
       </>
     );
+  if (threadOnly && query.isPending && query.fetchStatus === "fetching")
+    return <p role="status">Loading shared tasks…</p>;
   if (!query.data?.length) return fallback;
+  if (threadOnly)
+    return (
+      thread &&
+      query.data.map((task) => (
+        <section key={task.task_id}>
+          <p>{task.acceptance_check || task.linear_issue_id}</p>
+          <SessionTaskThread {...thread} sessionId={sessionId} taskId={task.task_id} />
+        </section>
+      ))
+    );
   return (
     <>
       {query.data.map((task) => (
@@ -139,6 +155,9 @@ export function SharedSessionTaskBrief({
               Review PR
             </Link>
           </div>
+          {thread && (
+            <TaskThreadDisclosure {...thread} sessionId={sessionId} taskId={task.task_id} />
+          )}
         </details>
       ))}
     </>

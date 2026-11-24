@@ -16,6 +16,7 @@ import type { SessionMenuView } from "@/hooks/useMentionBrowser";
 import type { SessionMention } from "@/lib/composerMentions";
 
 interface FileMentionMenuProps {
+  onMentionPerson?: () => void;
   /** Directory currently being browsed ("" = workspace root). */
   currentDir: string;
   /** Typed text after ``@``; its first match in each session title is tinted. */
@@ -74,6 +75,7 @@ export function MatchHighlight({ text, query }: { text: string; query: string })
  * keep-the-active-row-visible behaviour. Exported for direct unit testing.
  */
 export function FileMentionMenu({
+  onMentionPerson,
   currentDir,
   query = "",
   fileQuery = "",
@@ -93,7 +95,15 @@ export function FileMentionMenu({
   const sessions = sessionMenu?.rows ?? [];
   const category = sessionMenu?.category ?? null;
   const level = sessionMenu?.level ?? null;
-  if (entries.length === 0 && sessions.length === 0 && !category && !level && !loading) return null;
+  if (
+    entries.length === 0 &&
+    sessions.length === 0 &&
+    !category &&
+    !level &&
+    !loading &&
+    !onMentionPerson
+  )
+    return null;
   const sessionOffset = category ? 1 : 0;
   const fileOffset = sessionOffset + sessions.length;
   const showFiles = level === null && (entries.length > 0 || loading);
@@ -105,6 +115,16 @@ export function FileMentionMenu({
         className="mobile-menu-glass max-md:relative w-80 max-w-[calc(100vw-2rem)] shrink-0 overflow-hidden rounded-[12px] border border-border bg-popover p-2 shadow-menu dark:backdrop-blur-xl dark:backdrop-saturate-150"
       >
         <MobileMenuGlassSurface />
+        {onMentionPerson && (
+          <button
+            type="button"
+            className="block w-full rounded px-2 py-1 text-left text-sm hover:bg-accent"
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={onMentionPerson}
+          >
+            Mention a teammate…
+          </button>
+        )}
         <div ref={listRef} role="listbox" className="max-h-80 overflow-y-auto">
           {level && (
             <button

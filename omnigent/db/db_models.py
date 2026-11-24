@@ -2615,6 +2615,9 @@ class SqlStudioSeatSlot(OmnigentBase):
     slot_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     harness: Mapped[str] = mapped_column(String(32), nullable=False)
     encrypted_profile_ref: Mapped[str] = mapped_column(String(512), nullable=False)
+    routing_mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="subscription"
+    )
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
     weight: Mapped[int] = mapped_column(Integer, nullable=False)
     cooldown_until: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)

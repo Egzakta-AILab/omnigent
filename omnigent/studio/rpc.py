@@ -115,7 +115,11 @@ class FinishRound(LeaseRef):
 class Seat(Params):
     slot_id: Name
     harness: Literal["claude-native", "codex-native"]
-    encrypted_profile_ref: Annotated[str, StringConstraints(min_length=1, max_length=512)]
+    encrypted_profile_ref: (
+        Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=512)]
+        | None
+    ) = None
+    routing_mode: Literal["subscription", "fallback"] | None = None
     enabled: bool = Field(strict=True)
     weight: int = Field(default=1, ge=1, le=100)
 

@@ -289,6 +289,7 @@ def create_studio_rpc_router(
                         tasks,
                         actor,
                         rpc.FleetPage.model_validate(params),
+                        effective_admin(await asyncio.to_thread(permissions.is_admin, actor)),
                     )
                 if method == "dispatchFreeAgent":
                     return await fleet.dispatch(

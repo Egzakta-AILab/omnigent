@@ -35,6 +35,35 @@ T = TypeVar("T")
 USAGE_WINDOW = 7 * 86400
 
 
+def usage_counts(db: Session, now: int) -> dict[str | None, int]:
+    org = current_workspace_id()
+    return dict(
+        db.execute(
+            select(SqlStudioDispatch.slot_id, func.count())
+            .where(
+                SqlStudioDispatch.workspace_id == org,
+                SqlStudioDispatch.started_at > now - USAGE_WINDOW,
+                SqlStudioDispatch.started_at <= now,
+                SqlStudioDispatch.outcome.in_(("reserved", "admitted", "unknown")),
+            )
+            .group_by(SqlStudioDispatch.slot_id)
+        )
+        .tuples()
+        .all()
+    )
+
+
+def fallback_order() -> list[str]:
+    return [
+        tier
+        for tier, setting in (
+            ("api", "OMNIGENT_STUDIO_API_FALLBACK"),
+            ("on_prem", "OMNIGENT_STUDIO_LOCAL_FALLBACK"),
+        )
+        if os.getenv(setting) == "1"
+    ]
+
+
 class PoolExhausted(Exception):
     """No enabled subscription profile is available for this harness."""
 
@@ -56,6 +85,7 @@ class Reservation:
     attempt_id: str
     slot_id: str
     profile_ref: str = field(repr=False)
+    routing_mode: str = "subscription"
 
 
 class SeatPool:
@@ -65,7 +95,9 @@ class SeatPool:
             get_or_create_engine(uri), query_name_prefix="studio.seats", immediate=True
         )
 
-    def reserve(self, harness: str, group_id: str | None = None) -> Reservation:
+    def reserve(
+        self, harness: str, group_id: str | None = None, *, excluded: frozenset[str] = frozenset()
+    ) -> Reservation:
         def claim(db: Session) -> Reservation | None:
             org, now = current_workspace_id(), int(self.clock())
             slots = db.scalars(
@@ -78,20 +110,12 @@ class SeatPool:
                 .order_by(SqlStudioSeatSlot.slot_id)
                 .with_for_update()
             ).all()
-            eligible = [slot for slot in slots if slot.cooldown_until <= now]
-            counts = dict(
-                db.execute(
-                    select(SqlStudioDispatch.slot_id, func.count())
-                    .where(
-                        SqlStudioDispatch.workspace_id == org,
-                        SqlStudioDispatch.started_at > now - USAGE_WINDOW,
-                        SqlStudioDispatch.outcome.in_(("reserved", "admitted", "unknown")),
-                    )
-                    .group_by(SqlStudioDispatch.slot_id)
-                )
-                .tuples()
-                .all()
-            )
+            eligible = [
+                slot
+                for slot in slots
+                if slot.cooldown_until <= now and slot.slot_id not in excluded
+            ]
+            counts = usage_counts(db, now)
             slot = min(
                 eligible,
                 key=lambda s: (Fraction(counts.get(s.slot_id, 0), s.weight), s.slot_id),
@@ -109,7 +133,11 @@ class SeatPool:
                 )
             )
             return (
-                Reservation(attempt_id, slot.slot_id, slot.encrypted_profile_ref) if slot else None
+                Reservation(
+                    attempt_id, slot.slot_id, slot.encrypted_profile_ref, slot.routing_mode
+                )
+                if slot
+                else None
             )
 
         seat = run_write_transaction(self.write, "reserve", claim)
@@ -122,7 +150,10 @@ class SeatPool:
             org = current_workspace_id()
             if cooldown:
                 slot = db.get(SqlStudioSeatSlot, (org, seat.slot_id), with_for_update=True)
-                if slot and slot.encrypted_profile_ref == seat.profile_ref:
+                if slot and (slot.encrypted_profile_ref, slot.routing_mode) == (
+                    seat.profile_ref,
+                    seat.routing_mode,
+                ):
                     slot.cooldown_until = max(slot.cooldown_until, int(self.clock()) + cooldown)
             attempt = db.get(SqlStudioDispatch, (org, seat.attempt_id), with_for_update=True)
             if attempt is None or attempt.outcome != "reserved":
@@ -135,10 +166,15 @@ class SeatPool:
         self, harness: str, admit: Callable[[Reservation], T], group_id: str | None = None
     ) -> T:
         deadline = monotonic() + 9.0
+        skipped: set[str] = set()
         while monotonic() < deadline:
-            seat = self.reserve(harness, group_id)
+            seat = self.reserve(harness, group_id, excluded=frozenset(skipped))
             try:
                 result = admit(seat)
+            except PoolExhausted:
+                skipped.add(seat.slot_id)
+                self.finish(seat, "unavailable")
+                continue
             except SeatQuota as quota:
                 self.finish(seat, "quota", quota.retry_after)
                 continue
@@ -218,18 +254,34 @@ class SeatPool:
     ) -> tuple[str, str]:
         """Admit a subscription, then a hard-capped API key, then on-prem inference."""
 
-        def admit(seat: Reservation) -> str:
+        attempted_fallback = False
+
+        def admit(seat: Reservation) -> tuple[str, str]:
+            nonlocal attempted_fallback
+            if seat.routing_mode == "fallback":
+                if attempted_fallback:
+                    raise PoolExhausted
+                attempted_fallback = True
+                try:
+                    return self._fallback(harness, session_id, client)
+                except (AdmissionUnavailable, httpx.TransportError) as exc:
+                    raise PoolExhausted from exc
+            if seat.routing_mode != "subscription":
+                raise AdmissionUnavailable("Unknown seat routing mode")
             return admission_profile(
                 client, harness, session_id, "subscription", {"reference": seat.profile_ref}
-            )
+            ), "subscription"
 
         try:
-            return self.dispatch(harness, admit, group_id), "subscription"
+            return self.dispatch(harness, admit, group_id)
         except PoolExhausted:
-            pass
-        if os.getenv("OMNIGENT_STUDIO_API_FALLBACK") == "1" and (
-            allocation := self.reserve_paid(session_id)
-        ):
+            if attempted_fallback:
+                raise
+            return self._fallback(harness, session_id, client)
+
+    def _fallback(self, harness: str, session_id: str, client: httpx.Client) -> tuple[str, str]:
+        order = fallback_order()
+        if "api" in order and (allocation := self.reserve_paid(session_id)):
             pr, cents = allocation
             try:
                 return admission_profile(
@@ -241,7 +293,7 @@ class SeatPool:
                 ), "api"
             except (SeatQuota, AdmissionUnavailable, httpx.TransportError):
                 pass
-        if os.getenv("OMNIGENT_STUDIO_LOCAL_FALLBACK") == "1":
+        if "on_prem" in order:
             return admission_profile(client, harness, session_id, "on_prem", {}), "local"
         raise PoolExhausted
 

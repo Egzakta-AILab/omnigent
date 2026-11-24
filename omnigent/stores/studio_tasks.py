@@ -28,6 +28,7 @@ from omnigent.db.utils import (
     run_write_transaction,
 )
 from omnigent.studio import rpc
+from omnigent.studio.seat_pool import fallback_order, usage_counts
 
 T = TypeVar("T")
 Record = dict[str, Any]
@@ -77,6 +78,7 @@ def _lease(row: SqlStudioAgentLease, now: int) -> Record:
 def _seat(row: SqlStudioSeatSlot) -> Record:
     return {
         "slot_id": row.slot_id,
+        "routing_mode": row.routing_mode,
         "harness": row.harness,
         "enabled": row.enabled,
         "weight": row.weight,
@@ -443,7 +445,7 @@ class StudioTaskStore:
 
         self._change(actor, "require_task_pr", verify)
 
-    def inventory(self, actor: str, page: rpc.Page) -> Record:
+    def inventory(self, actor: str, page: rpc.Page, can_admin: bool = False) -> Record:
         def read(db: Session) -> Record:
             query = select(SqlStudioAgentLease).filter_by(
                 workspace_id=current_workspace_id(),
@@ -462,9 +464,17 @@ class StudioTaskStore:
                 .filter_by(workspace_id=current_workspace_id())
                 .order_by(SqlStudioSeatSlot.slot_id)
             )
+            counts = usage_counts(db, int(self.clock())) if can_admin else {}
             return {
+                "can_admin_seats": can_admin,
+                "fallback_order": fallback_order() if can_admin else [],
                 "leases": [_lease(row, int(self.clock())) for row in leases],
-                "seats": [_seat(row) for row in seats],
+                "seats": [
+                    {**_seat(row), "usage_7d": counts.get(row.slot_id, 0)}
+                    if can_admin
+                    else _seat(row)
+                    for row in seats
+                ],
             }
 
         return self._change(actor, "inventory", read)
@@ -474,12 +484,36 @@ class StudioTaskStore:
             row = db.get(
                 SqlStudioSeatSlot, (current_workspace_id(), value.slot_id), with_for_update=True
             )
+            if (
+                value.routing_mode == "fallback"
+                and not fallback_order()
+                and (row is None or row.routing_mode != "fallback")
+            ):
+                raise HTTPException(409, "No fallback tier is enabled")
             if row is None:
-                row = SqlStudioSeatSlot(**value.model_dump(), cooldown_until=0)
+                if not value.encrypted_profile_ref:
+                    raise HTTPException(422, "A new seat requires a profile reference")
+                row = SqlStudioSeatSlot(
+                    **value.model_dump(exclude={"routing_mode"}),
+                    routing_mode=value.routing_mode or "subscription",
+                    cooldown_until=0,
+                )
                 db.add(row)
             else:
-                row.enabled, row.harness, row.weight = value.enabled, value.harness, value.weight
-                row.encrypted_profile_ref = value.encrypted_profile_ref
+                if row.harness != value.harness and not value.encrypted_profile_ref:
+                    raise HTTPException(422, "Changing harness requires a profile reference")
+                mode = value.routing_mode or row.routing_mode
+                ref = value.encrypted_profile_ref or row.encrypted_profile_ref
+                if (ref, mode, value.harness) != (
+                    row.encrypted_profile_ref,
+                    row.routing_mode,
+                    row.harness,
+                ):
+                    row.cooldown_until = 0
+                row.enabled, row.harness = value.enabled, value.harness
+                if "weight" in value.model_fields_set:
+                    row.weight = value.weight
+                row.routing_mode, row.encrypted_profile_ref = mode, ref
             return _seat(row)
 
         return self._change(actor, "admin_seat", change)

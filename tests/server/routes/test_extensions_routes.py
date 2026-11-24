@@ -719,6 +719,18 @@ async def test_studio_shared_issue_private_session_and_confirmation(db_uri, tmp_
             .raise_for_status()
             .json()
         )
+        inventory = f"{prefix}/fleet/inventory"
+        public = (await bob.post(inventory, json={})).raise_for_status().json()
+        assert public["can_admin_seats"] is False and public["capacity"] is None
+        assert "usage_7d" not in public["seats"][0]
+        assert (await bob.post(inventory, json={"can_admin_seats": True})).status_code == 422
+        operator = (await admin.post(inventory, json={})).raise_for_status().json()
+        assert operator["can_admin_seats"] is True and operator["seats"][0]["usage_7d"] == 0
+        toggle = {k: v for k, v in seat.items() if k != "encrypted_profile_ref"}
+        toggle["enabled"] = False
+        path = f"{prefix}/fleet/adminSeats"
+        assert (await admin.post(path, json={**toggle, "slot_id": "new"})).status_code == 422
+        assert (await admin.post(path, json=toggle)).raise_for_status().json()["enabled"] is False
         comment = {
             "task_id": task["task_id"],
             "request_id": str(uuid4()),

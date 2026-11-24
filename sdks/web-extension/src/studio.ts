@@ -77,7 +77,25 @@ export interface StudioLease {
   fix_round: number;
   lease_expires_at: number;
 }
+export type StudioSeatRoutingMode = "subscription" | "fallback";
+export interface StudioFleetCapacity {
+  bot_review_held: number;
+  other_held: number;
+  bot_review_limit: 1;
+  other_limit: 3;
+}
+export interface StudioFleetInventory {
+  leases: StudioLease[];
+  seats: StudioSeat[];
+  hosts: StudioHost[];
+  previews: StudioPreview[];
+  can_admin_seats: boolean;
+  fallback_order: ("api" | "on_prem")[];
+  capacity: StudioFleetCapacity | null;
+}
 export interface StudioSeat {
+  routing_mode: StudioSeatRoutingMode;
+  usage_7d?: number;
   slot_id: string;
   harness: "claude-native" | "codex-native";
   enabled: boolean;
@@ -219,11 +237,8 @@ export function createStudioClient(request: StudioRequest) {
       }) => request<StudioHandoff>("studio.inbox.respond", params),
     },
     fleet: {
-      inventory: (page: StudioPage & {task_id?:string} = {}) =>
-        request<{ leases: StudioLease[]; seats: StudioSeat[]; hosts:StudioHost[]; previews:StudioPreview[] }>(
-          "studio.fleet.inventory",
-          page,
-        ),
+      inventory: (page: StudioPage & { task_id?: string } = {}) =>
+        request<StudioFleetInventory>("studio.fleet.inventory", page),
       dispatchFreeAgent: (params:LeaseRef & TaskRef & {harness:StudioHarness}) => request<StudioLease>("studio.fleet.dispatchFreeAgent", params),
       wakeWorkspace: (params:{host_id:string}) => request<{host_id:string;running:boolean|null}>("studio.fleet.wakeWorkspace",params),
       stopWorkspace: (params:{host_id:string}) => request<{host_id:string;running:boolean|null}>("studio.fleet.stopWorkspace",params),
@@ -236,7 +251,8 @@ export function createStudioClient(request: StudioRequest) {
         request<StudioLease>("studio.fleet.finishRound", params),
       adminSeats: (
         params: Pick<StudioSeat, "slot_id" | "harness" | "enabled"> & {
-          encrypted_profile_ref: string;
+          encrypted_profile_ref?: string;
+          routing_mode?: StudioSeatRoutingMode;
           weight?: number;
         },
       ) => request<StudioSeat>("studio.fleet.adminSeats", params),

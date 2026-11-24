@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import sqlite3
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
@@ -14,6 +15,7 @@ from fastapi import HTTPException, Request
 from omnigent.db.db_models import current_workspace_id
 from omnigent.db.utils import builtin_agent_id
 from omnigent.native.native_coding_agents import native_coding_agent_for_harness
+from omnigent.onboarding.sandboxes.types import SandboxError
 from omnigent.server.managed_hosts import build_owner_launcher
 from omnigent.server.provider_sandbox_profiles import select_provider_profile
 from omnigent.stores.host_store import host_is_live
@@ -94,10 +96,48 @@ def allocate(
     }
 
 
+def fleet_capacity(request: Request, principal: str | None) -> dict[str, int] | None:
+    if not principal:
+        return None
+    try:
+        launcher, _ = provider(request, principal, "bot-review")
+        read = getattr(launcher, "fleet_capacity", None)
+        if not callable(read):
+            return None
+        result = read()
+    except (
+        HTTPException,
+        SandboxError,
+        OSError,
+        sqlite3.Error,
+        RuntimeError,
+        ValueError,
+        httpx.HTTPError,
+    ):
+        return None
+    expected = {"bot_review_held", "other_held", "bot_review_limit", "other_limit"}
+    if (
+        not isinstance(result, dict)
+        or result.keys() != expected
+        or any(type(v) is not int for v in result.values())
+    ):
+        return None
+    if (
+        result["bot_review_limit"] != 1
+        or result["other_limit"] != 3
+        or not 0 <= result["bot_review_held"] <= 1
+        or not 0 <= result["other_held"] <= 3
+    ):
+        return None
+    return result
+
+
 async def inventory(
-    request: Request, tasks: StudioTaskStore, actor: str, page: rpc.FleetPage
+    request: Request, tasks: StudioTaskStore, actor: str, page: rpc.FleetPage, can_admin: bool
 ) -> dict[str, Any]:
-    result = await asyncio.to_thread(tasks.inventory, actor, page)
+    result = await asyncio.to_thread(tasks.inventory, actor, page, can_admin)
+    principal = os.getenv("OMNIGENT_STUDIO_DISPATCH_ACCOUNT")
+    result["capacity"] = await asyncio.to_thread(fleet_capacity, request, principal)
     hosts = getattr(request.app.state, "host_store", None)
     result["hosts"] = [
         {
@@ -110,7 +150,7 @@ async def inventory(
         for h in (await asyncio.to_thread(hosts.list_hosts, actor) if hosts else [])
     ]
     result["previews"] = []
-    if page.task_id and (principal := os.getenv("OMNIGENT_STUDIO_DISPATCH_ACCOUNT")):
+    if page.task_id and principal:
         prs = await asyncio.to_thread(tasks.task_prs, page.task_id)
         if prs:
             try:
