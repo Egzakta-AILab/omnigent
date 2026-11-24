@@ -28,4 +28,5 @@ def downgrade() -> None:
         sa.text("SELECT 1 FROM studio_review_runs WHERE owner_generation IS NOT NULL LIMIT 1")
     ):
         raise RuntimeError("Cannot discard captured review owner identities")
-    op.drop_column("studio_review_runs", "owner_generation")
+    with op.batch_alter_table("studio_review_runs") as batch:
+        batch.drop_column("owner_generation")

@@ -37,5 +37,7 @@ def downgrade() -> None:
         )
     ):
         raise RuntimeError("Cannot downgrade while publication confirmations exist")
-    op.drop_column("studio_inline_drafts", "publication_confirmed_by")
-    op.drop_column("studio_review_collaborators", "can_publish")
+    with op.batch_alter_table("studio_inline_drafts") as batch:
+        batch.drop_column("publication_confirmed_by")
+    with op.batch_alter_table("studio_review_collaborators") as batch:
+        batch.drop_column("can_publish")

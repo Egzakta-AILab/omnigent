@@ -37,6 +37,7 @@ from omnigent.db.db_models import (
 )
 from omnigent.db.utils import (
     get_or_create_engine,
+    is_postgresql_family,
     make_named_managed_session_maker,
     run_write_transaction,
 )
@@ -1146,7 +1147,7 @@ class StudioReviewStore:
             # Users store generations as text while review grants use UUID bytes.
             owner_generation = (
                 func.encode(grant.owner_generation, "hex")
-                if session.get_bind().dialect.name == "postgresql"
+                if is_postgresql_family(session.get_bind().dialect.name)
                 else func.nullif(func.lower(func.hex(grant.owner_generation)), "")
             )
             query = (

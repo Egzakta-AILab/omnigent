@@ -33,4 +33,5 @@ def downgrade() -> None:
         sa.text("SELECT 1 FROM studio_review_questions WHERE check_job_json IS NOT NULL LIMIT 1")
     ):
         raise RuntimeError("Cannot downgrade while sandbox check dispatches exist")
-    op.drop_column("studio_review_questions", "check_job_json")
+    with op.batch_alter_table("studio_review_questions") as batch:
+        batch.drop_column("check_job_json")

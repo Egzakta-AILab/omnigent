@@ -7,6 +7,7 @@ import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 import sqlalchemy as sa
@@ -576,9 +577,9 @@ def test_operation_cannot_be_moved_to_another_pass(store: StudioReviewStore) -> 
     )
 
 
-def test_actual_keyset_query_uses_owner_session_index(
-    store: StudioReviewStore, db_uri: str
-) -> None:
+def test_sqlite_keyset_query_uses_owner_session_index(tmp_path: Path) -> None:
+    db_uri = f"sqlite:///{tmp_path / 'review-plan.db'}"
+    store = StudioReviewStore(db_uri)
     for number in range(3):
         _capture(store, key=f"plan-{number}")
     first = store.list_page(owner_user_id=OWNER, source_session_id=SESSION, limit=1)
