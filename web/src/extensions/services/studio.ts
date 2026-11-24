@@ -4,13 +4,26 @@ import {
 } from "../../../../sdks/web-extension/src/studio";
 import { ExtensionHostServiceError } from "./errors";
 
-export interface LinearPreview {
+export interface ExistingIssuePreview {
   linear_workspace: string;
   linear_issue_id: string;
   body: string;
   change?: "status" | "assignee";
   value?: string;
 }
+interface FailureIssuePreview {
+  kind: "failureIssue";
+  candidate_id: string;
+  scenario_id: string;
+  head_sha: string;
+  request_id: string;
+  linear_workspace: string;
+  team: string;
+  recipient: string;
+  title: string;
+  body: string;
+}
+export type LinearPreview = ExistingIssuePreview | FailureIssuePreview;
 export type ConfirmLinear = (preview: LinearPreview, signal: AbortSignal) => Promise<boolean>;
 
 type HostMethod = (params: unknown, signal: AbortSignal) => Promise<unknown>;
@@ -161,6 +174,40 @@ export function studioHostMethods(
     return post(
       "tasks/syncLinearConfirmed",
       { ...approved, confirmation_token: requiredString(grant.confirmation_token) },
+      signal,
+    );
+  };
+  methods["studio.releases.createIssueConfirmed"] = async (params, signal) => {
+    if (extensionId !== "egzakta.release") {
+      throw new ExtensionHostServiceError("PermissionDenied", "Release extension required");
+    }
+    const input = object(params);
+    const intent = {
+      candidate_id: requiredString(input.candidate_id),
+      scenario_id: requiredString(input.scenario_id),
+      head_sha: requiredString(input.head_sha),
+      request_id: requiredString(input.request_id),
+    };
+    const preview = object(await post("releases/previewIssue", intent, signal));
+    const approval = { ...intent, preview_digest: requiredString(preview.preview_digest) };
+    signal.throwIfAborted();
+    const accepted = await confirm(
+      {
+        kind: "failureIssue",
+        ...intent,
+        linear_workspace: requiredString(preview.linear_workspace),
+        team: requiredString(preview.team),
+        title: requiredString(preview.title),
+        body: requiredString(preview.body),
+        recipient: requiredString(preview.recipient),
+      },
+      signal,
+    );
+    if (!accepted) throw new ExtensionHostServiceError("Cancelled", "Issue creation cancelled");
+    const grant = object(await post("releases/confirmIssue", approval, signal));
+    return post(
+      "releases/createIssueConfirmed",
+      { ...approval, confirmation_token: requiredString(grant.confirmation_token) },
       signal,
     );
   };

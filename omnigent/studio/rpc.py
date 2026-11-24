@@ -64,6 +64,21 @@ class Response(Params):
     message: Text | None = None
 
 
+class ReleaseFailure(Params):
+    candidate_id: Name
+    scenario_id: Name
+    head_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
+    request_id: UUID4
+
+
+class BoundReleaseFailure(ReleaseFailure):
+    preview_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class ConfirmedReleaseFailure(BoundReleaseFailure):
+    confirmation_token: str = Field(min_length=1, max_length=256)
+
+
 class LinearComment(TaskRef):
     request_id: UUID4
     body: Text

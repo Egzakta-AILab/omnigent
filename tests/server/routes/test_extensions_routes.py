@@ -757,3 +757,94 @@ async def test_studio_shared_issue_private_session_and_confirmation(db_uri, tmp_
         assert (await alice.post(send, json={**confirm, "body": "changed"})).status_code == 403
         assert (await alice.post(send, json=confirm)).status_code == 503
         assert (await alice.post(send, json=confirm)).status_code == 403
+
+
+async def test_release_issue_consent_requires_owning_extension_and_interactive_login(
+    db_uri, tmp_path, monkeypatch
+):
+    from unittest.mock import Mock
+    from uuid import uuid4
+
+    from omnigent.server.accounts_config import AccountsConfig
+    from omnigent.server.accounts_store import SqlAlchemyAccountStore
+    from omnigent.server.passwords import hash_password
+    from omnigent.stores.studio_tasks import StudioTaskStore
+
+    config = AccountsConfig(
+        cookie_secret=b"x" * 32,
+        session_ttl_hours=2,
+        base_url="http://test",
+        init_admin_password=None,
+        invite_ttl_seconds=300,
+        magic_ttl_seconds=300,
+    )
+    auth = UnifiedAuthProvider(source="accounts", accounts_config=config)
+    accounts = SqlAlchemyAccountStore(db_uri)
+    password = uuid4().hex
+    accounts.create_user_with_password(_USER, hash_password(password))
+    permissions = SqlAlchemyPermissionStore(db_uri)
+    manifest = replace(
+        _manifest("egzakta.release"),
+        distribution="egzakta-release",
+        entrypoints=ExtensionEntrypoints(),
+        permissions=frozenset({ExtensionPermission.STUDIO_RELEASES}),
+    )
+    other = replace(manifest, id="another.release", distribution="another-release")
+    handler = Mock()
+    handler.invoke.return_value = {"confirmation_token": uuid4().hex}
+    monkeypatch.setattr(
+        "omnigent.server.routes.studio_rpc.load_studio_handlers",
+        lambda state: {"egzakta.release": handler},
+    )
+    monkeypatch.setenv("OMNIGENT_WS_ALLOWED_ORIGINS", "http://test")
+    artifacts = LocalArtifactStore(str(tmp_path / "artifacts"))
+    app = create_app(
+        agent_store=SqlAlchemyAgentStore(db_uri),
+        file_store=SqlAlchemyFileStore(db_uri),
+        conversation_store=SqlAlchemyConversationStore(db_uri),
+        artifact_store=artifacts,
+        agent_cache=AgentCache(artifact_store=artifacts, cache_dir=tmp_path / "cache"),
+        extension_state=ExtensionPluginState((manifest, other), {}),
+        permission_store=permissions,
+        studio_task_store=StudioTaskStore(db_uri),
+        account_store=accounts,
+        auth_provider=auth,
+    )
+    prefix = "/v1/extensions/egzakta.release/studio/v1/releases"
+    intent = {
+        "candidate_id": "rc",
+        "scenario_id": "qa-01",
+        "head_sha": "a" * 40,
+        "request_id": str(uuid4()),
+        "preview_digest": "b" * 64,
+    }
+    browser = {"Origin": "http://test", "Sec-Fetch-Site": "same-origin"}
+    async with _client(app, _USER) as ui, _client(app) as cli:
+        (
+            await ui.post("/auth/login", json={"username": _USER, "password": password})
+        ).raise_for_status()
+        assert (await ui.post(prefix + "/confirmIssue", json=intent)).status_code == 403
+        assert (
+            await cli.post(
+                prefix + "/confirmIssue",
+                json=intent,
+                headers={
+                    **browser,
+                    "Authorization": "Bearer " + ui.cookies[config.session_cookie_name],
+                },
+            )
+        ).status_code == 403
+        assert (
+            await ui.post(
+                prefix.replace("egzakta.release", "another.release") + "/confirmIssue",
+                json=intent,
+                headers=browser,
+            )
+        ).status_code == 403
+        assert (
+            await ui.post(prefix + "/createIssueConfirmed", json=intent, headers=browser)
+        ).status_code == 422
+        handler.invoke.assert_not_called()
+        (await ui.post(prefix + "/confirmIssue", json=intent, headers=browser)).raise_for_status()
+        method, bound_intent, context = handler.invoke.call_args.args
+        assert method == "confirmIssue" and bound_intent == intent and context.actor == _USER

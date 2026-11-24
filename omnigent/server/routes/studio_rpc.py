@@ -162,6 +162,23 @@ def create_studio_rpc_router(
 
         try:
             if studio_package_method(scope, method):
+                if scope == "releases" and method in (
+                    "previewIssue",
+                    "confirmIssue",
+                    "createIssueConfirmed",
+                ):
+                    if extension_id != "egzakta.release":
+                        raise HTTPException(403, "Release extension required")
+                    if method == "confirmIssue" and (
+                        auth is None or not auth.has_browser_consent(request)
+                    ):
+                        raise HTTPException(403, "Confirm from the authenticated Studio web page")
+                    contract = {
+                        "previewIssue": rpc.ReleaseFailure,
+                        "confirmIssue": rpc.BoundReleaseFailure,
+                        "createIssueConfirmed": rpc.ConfirmedReleaseFailure,
+                    }[method]
+                    params = contract.model_validate(params).model_dump(mode="json")
                 context = StudioRpcContext(
                     actor,
                     current_workspace_id(),

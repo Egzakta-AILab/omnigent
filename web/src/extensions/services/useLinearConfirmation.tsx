@@ -33,6 +33,8 @@ export function useLinearConfirmation() {
   }, []);
   useEffect(() => () => pending.current?.(false), []);
 
+  const create = preview && "kind" in preview ? preview : null;
+  const existing = preview && "linear_issue_id" in preview ? preview : null;
   const dialog = preview && (
     <Dialog
       open
@@ -43,12 +45,27 @@ export function useLinearConfirmation() {
       <DialogContent>
         <DialogHeader>
           <DialogTitle>
-            {preview.change ? "Apply this Linear change?" : "Post this comment to Linear?"}
+            {create
+              ? "Create Linear issue"
+              : existing?.change
+                ? "Apply this Linear change?"
+                : "Post this comment to Linear?"}
           </DialogTitle>
           <DialogDescription>
-            Workspace {preview.linear_workspace} · Issue {preview.linear_issue_id}
+            Workspace {preview.linear_workspace} ·{" "}
+            {create ? `Team ${create.team}` : `Issue ${existing?.linear_issue_id}`}
           </DialogDescription>
         </DialogHeader>
+        {create && (
+          <div>
+            <strong>{create.title}</strong>
+            <p>
+              Candidate {create.candidate_id} · Scenario {create.scenario_id}
+            </p>
+            <p>Tested commit {create.head_sha}</p>
+            <p>Inbox recipient {create.recipient}</p>
+          </div>
+        )}
         <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words text-sm">
           {preview.body}
         </pre>
@@ -57,7 +74,7 @@ export function useLinearConfirmation() {
             Cancel
           </Button>
           <Button onClick={() => pending.current?.(true)}>
-            {preview.change ? "Apply change" : "Post comment"}
+            {create ? "Create Linear issue" : existing?.change ? "Apply change" : "Post comment"}
           </Button>
         </DialogFooter>
       </DialogContent>

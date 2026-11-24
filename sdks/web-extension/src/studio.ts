@@ -29,6 +29,7 @@ export const STUDIO_METHOD_PERMISSIONS = {
   "studio.reviews.listRuns": "studio.reviews",
   "studio.releases.getCandidate": "studio.releases",
   "studio.releases.recordScenario": "studio.releases",
+  "studio.releases.createIssueConfirmed": "studio.releases",
   "studio.releases.signOff": "studio.releases",
   "studio.releases.list": "studio.releases",
 } as const;
@@ -268,6 +269,13 @@ export function createStudioClient(request: StudioRequest) {
         request<PackagePayload>("studio.releases.getCandidate", params),
       recordScenario: (params: PackagePayload & { candidate_id: string }) =>
         request<PackagePayload>("studio.releases.recordScenario", params),
+      createIssueConfirmed: (params: {
+        candidate_id: string;
+        scenario_id: string;
+        head_sha: string;
+        request_id: string;
+      }) =>
+        request<PackagePayload>("studio.releases.createIssueConfirmed", params),
       signOff: (params: PackagePayload & { candidate_id: string }) =>
         request<PackagePayload>("studio.releases.signOff", params),
       list: (page: StudioPage = {}) =>
