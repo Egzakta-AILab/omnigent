@@ -65,7 +65,11 @@ def _handoff(row: SqlStudioTaskHandoff) -> Record:
 def _lease(row: SqlStudioAgentLease, now: int) -> Record:
     if row.state == "active" and row.lease_expires_at <= now:
         row.state = "unknown"
+    evidence = json.loads(row.round_evidence_json or "{}")
+    receipts = evidence.get("results", [])
     return {
+        "native_bound": bool(row.session_id or evidence.get("acceptance")),
+        "last_result": receipts[-1] if receipts else None,
         "idempotency_key": str(UUID(row.idempotency_key)),
         "task_id": str(UUID(row.task_id)),
         "harness": row.harness,
@@ -73,6 +77,65 @@ def _lease(row: SqlStudioAgentLease, now: int) -> Record:
         "fix_round": row.fix_round,
         "lease_expires_at": row.lease_expires_at,
     }
+
+
+def _escalate(db: Session, row: SqlStudioAgentLease, receipts: list[Record]) -> None:
+    task = _require_task(db, UUID(row.task_id))
+    evidence = [
+        f"Dispatch {UUID(row.idempotency_key)} failed all three rounds.",
+        f"Native harness: {row.harness}.",
+    ]
+    for result in receipts:
+        evidence.append(
+            f"Round {result['round']}: {result['status']} at {result['commit_sha']} "
+            f"(output SHA-256 {result['output_digest']})."
+        )
+    for pr in _task(task)["pull_requests"][: 10 - len(receipts)]:
+        evidence.append(f"{pr['repository']}#{pr['number']} at {pr['head_sha']}")
+    card = rpc.Handoff(
+        task_id=UUID(row.task_id),
+        schema_version="studio-handoff@1",
+        request_id=uuid4(),
+        recipient=row.actor,
+        question=(
+            "The free agent reached its three-round limit. "
+            "Review the evidence and choose the next action."
+        ),
+        evidence=evidence,
+    )
+    db.add(
+        SqlStudioTaskHandoff(
+            request_id=card.request_id.hex,
+            task_id=row.task_id,
+            schema_version=card.schema_version,
+            sender="Studio Fleet",
+            sender_generation=None,
+            recipient=row.actor,
+            recipient_generation=row.actor_generation,
+            packet_json=card.model_dump_json(),
+        )
+    )
+
+
+def _current_native_turn(db: Session, turn: Record, now: int) -> SqlStudioAgentLease | None:
+    row = db.get(SqlStudioAgentLease, (current_workspace_id(), turn["key"]), with_for_update=True)
+    if (
+        row is None
+        or row.session_id != turn["session_id"]
+        or row.fix_round + 1 != turn["round"]
+        or _lease(row, now)["state"] != "active"
+    ):
+        return None
+    if row.actor_generation:
+        account = db.get(SqlUser, (current_workspace_id(), row.actor), with_for_update=True)
+        if (
+            not account
+            or account.deleted_at is not None
+            or account.account_generation != row.actor_generation
+        ):
+            row.state = "unknown"
+            return None
+    return row
 
 
 def _seat(row: SqlStudioSeatSlot) -> Record:
@@ -300,6 +363,10 @@ class StudioTaskStore:
                 raise HTTPException(404, "Dispatch not found")
             _lease(row, now)
             if isinstance(value, rpc.FinishRound):
+                if _lease(row, now)["native_bound"]:
+                    raise HTTPException(
+                        409, "Native rounds require a completed verification receipt"
+                    )
                 if value.round == row.fix_round:
                     if value.passed != (row.state == "passed"):
                         raise HTTPException(409, "Round result differs from its receipt")
@@ -307,40 +374,24 @@ class StudioTaskStore:
                 if row.state != "active" or value.round != row.fix_round + 1:
                     raise HTTPException(409, "Dispatch round is closed or out of sequence")
                 row.fix_round = value.round
+                record = json.loads(row.round_evidence_json or "{}")
+                record.setdefault("results", []).append(
+                    {
+                        "source": "manual",
+                        "ci_url": None,
+                        "round": value.round,
+                        "status": "unverified" if value.passed else "check_failed",
+                        "commit_sha": None,
+                        "base_sha": None,
+                        "output_digest": None,
+                    }
+                )
+                row.round_evidence_json = json.dumps(record)
                 if value.passed:
                     row.state = "passed"
                 elif value.round == 3:
                     row.state = "escalated"
-                    task = _require_task(db, UUID(row.task_id))
-                    evidence = [
-                        f"Dispatch {UUID(row.idempotency_key)} failed all three rounds.",
-                        f"Native harness: {row.harness}.",
-                    ]
-                    for pr in _task(task)["pull_requests"][:10]:
-                        evidence.append(f"{pr['repository']}#{pr['number']} at {pr['head_sha']}")
-                    card = rpc.Handoff(
-                        task_id=UUID(row.task_id),
-                        schema_version="studio-handoff@1",
-                        request_id=uuid4(),
-                        recipient=actor,
-                        question=(
-                            "The free agent reached its three-round limit. "
-                            "Review the evidence and choose the next action."
-                        ),
-                        evidence=evidence,
-                    )
-                    db.add(
-                        SqlStudioTaskHandoff(
-                            request_id=card.request_id.hex,
-                            task_id=row.task_id,
-                            schema_version=card.schema_version,
-                            sender="Studio Fleet",
-                            sender_generation=None,
-                            recipient=actor,
-                            recipient_generation=registration,
-                            packet_json=card.model_dump_json(),
-                        )
-                    )
+                    _escalate(db, row, [])
 
             if row.state == "active":
                 row.lease_expires_at = now + LEASE_SECONDS
@@ -368,11 +419,19 @@ class StudioTaskStore:
                 raise HTTPException(409, "A shared acceptance check is required")
             row.session_id = uuid4().hex
             row.session_start = "pending"
+            seed = {
+                "acceptance": task.acceptance_check,
+                "prs": _task(task)["pull_requests"],
+                "results": [],
+                "followup": None,
+            }
+            row.round_evidence_json = json.dumps(seed)
             return {
                 **receipt,
                 "launch": True,
                 "session_id": row.session_id,
-                "acceptance_check": task.acceptance_check,
+                "native_bound": True,
+                "turn": {**seed, "key": row.idempotency_key, "round": 1},
             }
 
         return self._change(actor, "begin_agent", claim)
@@ -392,12 +451,79 @@ class StudioTaskStore:
             if queued:
                 row.session_start = None
                 row.session_id = None
+                row.round_evidence_json = None
                 return
             row.session_start = "started" if started else "unknown"
             if not started:
                 row.state = "unknown"
 
         self._change(actor, "complete_agent", complete)
+
+    def running_turns(self, after: str | None = None) -> list[Record]:
+        with self.read("running_turns") as db:
+            query = (
+                select(SqlStudioAgentLease)
+                .filter_by(
+                    workspace_id=current_workspace_id(), state="active", session_start="started"
+                )
+                .where(
+                    SqlStudioAgentLease.lease_expires_at > int(self.clock()),
+                    SqlStudioAgentLease.round_evidence_json.is_not(None),
+                )
+            )
+            if after:
+                query = query.where(SqlStudioAgentLease.idempotency_key > after)
+            rows = db.scalars(query.order_by(SqlStudioAgentLease.idempotency_key).limit(50))
+            return [
+                {
+                    **json.loads(row.round_evidence_json or "{}"),
+                    "session_id": row.session_id,
+                    "key": row.idempotency_key,
+                    "round": row.fix_round + 1,
+                }
+                for row in rows
+                if row.session_id
+            ]
+
+    def record_native_round(self, turn: Record, receipt: Record) -> None:
+        def record(db: Session) -> None:
+            row = _current_native_turn(db, turn, int(self.clock()))
+            if row is None:
+                return
+            seed = json.loads(row.round_evidence_json or "{}")
+            if not seed.get("acceptance"):
+                return
+            row.fix_round = turn["round"]
+            seed["results"].append(receipt)
+            seed["followup"] = None
+            if receipt["status"] == "verified":
+                row.state = "passed"
+            elif receipt["status"] != "check_failed":
+                row.state = "unknown"
+            elif row.fix_round == 3:
+                row.state = "escalated"
+                _escalate(db, row, seed["results"])
+            else:
+                seed["followup"] = "pending"
+                row.lease_expires_at = int(self.clock()) + LEASE_SECONDS
+            row.round_evidence_json = json.dumps(seed)
+
+        run_write_transaction(self.write, "native_round", record)
+
+    def claim_followup(self, turn: Record) -> bool:
+        def claim(db: Session) -> bool:
+            row = _current_native_turn(db, turn, int(self.clock()))
+            if row is None:
+                return False
+            seed = json.loads(row.round_evidence_json or "{}")
+            if seed.get("followup") != "pending":
+                return False
+            # Claim before posting. An ambiguous delivery is never replayed.
+            seed["followup"] = "claimed"
+            row.round_evidence_json = json.dumps(seed)
+            return True
+
+        return run_write_transaction(self.write, "claim_native_followup", claim)
 
     def task_prs(self, task_id: UUID) -> list[Record]:
         with self.read("task_previews") as db:

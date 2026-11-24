@@ -18,9 +18,10 @@ from omnigent.native.native_coding_agents import native_coding_agent_for_harness
 from omnigent.onboarding.sandboxes.types import SandboxError
 from omnigent.server.managed_hosts import build_owner_launcher
 from omnigent.server.provider_sandbox_profiles import select_provider_profile
+from omnigent.stores.conversation_store import ConversationStore
 from omnigent.stores.host_store import host_is_live
 from omnigent.stores.studio_tasks import StudioTaskStore
-from omnigent.studio import rpc
+from omnigent.studio import lease_turns, rpc
 from omnigent.studio.pooled_hosts import PROVIDER
 from omnigent.studio.preview_receipts import read_previews
 
@@ -192,6 +193,33 @@ async def bot_client(request: Request) -> AsyncIterator[tuple[str, httpx.AsyncCl
         yield bot, client
 
 
+async def reconcile_turns(
+    request: Request, tasks: StudioTaskStore, conversations: ConversationStore
+) -> None:
+    after = None
+    while turns := await asyncio.to_thread(tasks.running_turns, after):
+        for turn in turns:
+            if turn.get("followup") == "pending":
+                if await asyncio.to_thread(tasks.claim_followup, turn):
+                    async with bot_client(request) as (_, client):
+                        try:
+                            response = await client.post(
+                                "/v1/sessions/" + turn["session_id"] + "/events",
+                                json=lease_turns.message(turn),
+                            )
+                            response.raise_for_status()
+                        except httpx.HTTPError:
+                            # Native persisted input is authoritative after an ambiguous reply.
+                            pass
+                continue
+            receipt = await asyncio.to_thread(lease_turns.observe, conversations, turn)
+            if receipt:
+                await asyncio.to_thread(tasks.record_native_round, turn, receipt)
+        if len(turns) < 50:
+            break
+        after = turns[-1]["key"]
+
+
 async def reap(request: Request, tasks: StudioTaskStore, only: str | None = None) -> None:
     expired = await asyncio.to_thread(tasks.expired_sessions, "", only)
     if not expired:
@@ -228,7 +256,7 @@ async def dispatch(
         _, snapshot = await asyncio.to_thread(provider, request, bot, "free-agent")
         result = await asyncio.to_thread(tasks.begin_agent, actor, value)
         if result.pop("launch"):
-            acceptance = result.pop("acceptance_check")
+            turn = result.pop("turn")
             session_id = result.pop("session_id")
             marker = _lease_creation.set((current_workspace_id(), bot, session_id))
             try:
@@ -240,13 +268,7 @@ async def dispatch(
                         "sandbox_provider": PROVIDER,
                         "sandbox_profile_id": "free-agent",
                         "sandbox_profile_revision": snapshot["revision"],
-                        "initial_input": {
-                            "type": "message",
-                            "data": {
-                                "role": "user",
-                                "content": [{"type": "input_text", "text": acceptance}],
-                            },
-                        },
+                        "initial_input": lease_turns.message(turn),
                     },
                 )
                 if (

@@ -2602,6 +2602,7 @@ class SqlStudioAgentLease(OmnigentBase):
     state: Mapped[str] = mapped_column(String(16), nullable=False)
     session_id: Mapped[str | None] = mapped_column(Uuid16())
     session_start: Mapped[str | None] = mapped_column(String(32))
+    round_evidence_json: Mapped[str | None] = mapped_column(Text)
     fix_round: Mapped[int] = mapped_column(Integer, nullable=False)
     lease_expires_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
     __table_args__ = (CheckConstraint("fix_round BETWEEN 0 AND 3", name="ck_studio_lease_round"),)

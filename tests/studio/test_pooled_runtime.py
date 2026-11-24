@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
@@ -7,6 +8,12 @@ from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from omnigent.db.db_models import current_workspace_id
+from omnigent.entities.conversation import (
+    FunctionCallData,
+    FunctionCallOutputData,
+    MessageData,
+    NewConversationItem,
+)
 from omnigent.host.frames import (
     CAP_STUDIO_SEAT,
     HostHelloFrame,
@@ -23,7 +30,7 @@ from omnigent.stores.host_store import HostStore
 from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
 from omnigent.stores.sandbox_profile_store import SandboxProfileStore
 from omnigent.stores.studio_tasks import LEASE_SECONDS, StudioTaskStore
-from omnigent.studio import fleet, rpc
+from omnigent.studio import fleet, lease_turns, rpc
 from omnigent.studio.credential_agent import write_private
 
 
@@ -103,6 +110,60 @@ async def test_reaper_controls_dispatched_runner(db_uri, tmp_path, monkeypatch, 
     runner = FastAPI()
     sessions = {}
     busy = True
+    conversations = SqlAlchemyConversationStore(db_uri)
+    agent = SqlAlchemyAgentStore(db_uri).create(uuid4().hex, "test-native", "bundle").id
+    deliveries = []
+
+    def deliver(sid, body):
+        rnd = len(deliveries) + 1
+        deliveries.append(body["data"]["stable_id"])
+        assert "org dev test-int" in body["data"]["content"][0]["text"]
+        assert "Verify the change" in body["data"]["content"][0]["text"]
+        response_id = str(rnd)
+        result = {"status": "check_failed", "round": rnd, "lease_id": value.idempotency_key.hex}
+        receipt = {
+            "status": "check_failed",
+            "commit_sha": "c" * 40,
+            "base_sha": "b" * 40,
+            "output_digest": "a" * 64,
+        }
+        items = [
+            ("message", MessageData(role="user", content=body["data"]["content"])),
+            (
+                "function_call",
+                FunctionCallData(
+                    agent="native",
+                    name="shell",
+                    arguments=json.dumps({"command": lease_turns.COMMAND}),
+                    call_id=response_id,
+                ),
+            ),
+            (
+                "function_call_output",
+                FunctionCallOutputData(call_id=response_id, output=json.dumps(receipt)),
+            ),
+            (
+                "message",
+                MessageData(
+                    role="assistant",
+                    agent="native",
+                    content=[
+                        {
+                            "type": "output_text",
+                            "text": lease_turns.FENCE + "\n" + json.dumps(result) + "\n```",
+                        }
+                    ],
+                ),
+            ),
+        ]
+        conversations.append(
+            sid,
+            [
+                NewConversationItem(type=kind, response_id=response_id, data=data)
+                for kind, data in items
+            ],
+        )
+
     token_file = tmp_path / "bot"
     write_private(token_file, uuid4().hex)
     monkeypatch.setenv("OMNIGENT_STUDIO_DISPATCH_ACCOUNT", "bot")
@@ -121,6 +182,10 @@ async def test_reaper_controls_dispatched_runner(db_uri, tmp_path, monkeypatch, 
         sid = fleet.agent_session_id("bot")
         assert sid and fleet.agent_session_id("bot") is None
         assert (await request.json())["sandbox_profile_id"] == "free-agent"
+        conversations.create_conversation(
+            conversation_id=sid, agent_id=agent, workspace=str(tmp_path)
+        )
+        deliver(sid, (await request.json())["initial_input"])
         sessions[sid] = "active"
         return {"id": sid}
 
@@ -132,7 +197,11 @@ async def test_reaper_controls_dispatched_runner(db_uri, tmp_path, monkeypatch, 
 
     @runner.post("/v1/sessions/{sid}/events")
     async def stop(sid: str, request: Request):
-        assert (await request.json()) == {"type": "stop_session"}
+        body = await request.json()
+        if body["type"] == "message":
+            deliver(sid, body)
+            return {"queued": True}
+        assert body == {"type": "stop_session"}
         sessions[sid] = "stopped"
         return {"status": "stopped"}
 
@@ -161,15 +230,24 @@ async def test_reaper_controls_dispatched_runner(db_uri, tmp_path, monkeypatch, 
     await fleet.dispatch(req, store, "human", value)
     assert len(sessions) == 1
     if termination == "round":
-        for rnd in (1, 2, 3):
-            result = store.update_lease(
+        with pytest.raises(HTTPException, match="Native rounds"):
+            store.update_lease(
                 "human",
-                rpc.FinishRound(idempotency_key=value.idempotency_key, round=rnd, passed=False),
+                rpc.FinishRound(idempotency_key=value.idempotency_key, round=1, passed=True),
             )
-        assert result["state"] == "escalated"
-        store.update_lease(
-            "human", rpc.FinishRound(idempotency_key=value.idempotency_key, round=3, passed=False)
+        import asyncio
+
+        for _ in range(6):
+            await asyncio.gather(
+                *(fleet.reconcile_turns(req, store, conversations) for _ in range(2))
+            )
+        lease = store.inventory("human", rpc.Page())["leases"][0]
+        assert (lease["state"], lease["fix_round"], lease["last_result"]["source"]) == (
+            "escalated",
+            3,
+            "native",
         )
+        assert len(set(deliveries)) == len(deliveries) == 3
         cards = store.inbox("human", rpc.Page())
         assert len(cards) == 1 and str(value.idempotency_key) in cards[0]["evidence"][0]
     else:

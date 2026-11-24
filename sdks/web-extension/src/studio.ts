@@ -70,6 +70,16 @@ export type StudioHarness =
   | "pi-native"
   | "opencode-native";
 export interface StudioLease {
+  native_bound: boolean;
+  last_result: {
+    source: "native" | "manual";
+    round: number;
+    status: "verified" | "check_failed" | "unverified" | "env_blocked";
+    commit_sha: string | null;
+    base_sha: string | null;
+    output_digest: string | null;
+    ci_url: string | null;
+  } | null;
   idempotency_key: string;
   task_id: string;
   harness: StudioHarness;

@@ -107,7 +107,10 @@ def create_studio_rpc_router(
             raise HTTPException(403, "Fleet worker required")
         if not tasks:
             raise fleet.unavailable("Studio dispatch store is unavailable")
-        await fleet.reap(request, tasks)
+        try:
+            await fleet.reconcile_turns(request, tasks, conversations)
+        finally:
+            await fleet.reap(request, tasks)
         return {"processed": True}
 
     @router.post("/extensions/{extension_id}/studio/v1/{scope}/{method}")

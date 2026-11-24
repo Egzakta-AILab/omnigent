@@ -119,7 +119,11 @@ def native_result(
 
 
 def command_receipts(
-    store: ConversationStore, session_id: str, reply_id: str
+    store: ConversationStore,
+    session_id: str,
+    reply_id: str,
+    *,
+    tool_names: frozenset[str] = frozenset({"Bash"}),
 ) -> list[tuple[str, str]]:
     """Bind the reported command and observed text to a completed native tool receipt."""
     reply = store.get_item(session_id, reply_id)
@@ -143,7 +147,11 @@ def command_receipts(
             continue
         if isinstance(data, FunctionCallOutputData) and not data.subagent_return_id:
             outputs[data.call_id] = data.output
-        if isinstance(data, FunctionCallData) and data.name == "Bash" and data.call_id in outputs:
+        if (
+            isinstance(data, FunctionCallData)
+            and data.name in tool_names
+            and data.call_id in outputs
+        ):
             try:
                 args = json.loads(data.arguments)
             except ValueError:
