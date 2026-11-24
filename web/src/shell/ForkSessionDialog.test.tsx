@@ -337,11 +337,11 @@ afterEach(cleanup);
 describe("ForkSessionDialog", () => {
   it.each([
     ["managed snapshot", null, true],
-    ["Arclet host", "arclet", true],
-    ["Databricks Sandbox host", "lakebox", true],
+    ["Daytona host", "daytona", true],
+    ["Modal Sandbox host", "modal", true],
     ["managed snapshot", null, false],
-    ["Arclet host", "arclet", false],
-    ["Databricks Sandbox host", "lakebox", false],
+    ["Daytona host", "daytona", false],
+    ["Modal Sandbox host", "modal", false],
   ])("offers supported destinations to a %s source (%s, reuse: %s)", (source, provider, reuse) => {
     useSessionMock.mockReturnValue({
       session: {
@@ -354,14 +354,14 @@ describe("ForkSessionDialog", () => {
     setHosts([
       host({ sandbox_provider: provider }),
       host({ host_id: "host_2", name: "laptop" }),
-      host({ host_id: "unrelated", sandbox_provider: "arclet" }),
+      host({ host_id: "unrelated", sandbox_provider: "daytona" }),
     ]);
     renderDialog({
       sourceHostId: "host_1",
       sourceWorkspace: "/Users/a/repo",
       info: {
         managed_sandboxes_enabled: true,
-        sandbox_providers: ["lakebox", "arclet"],
+        sandbox_providers: ["modal", "daytona"],
         sibling_sessions: reuse,
       },
     });
@@ -381,7 +381,7 @@ describe("ForkSessionDialog", () => {
       );
     }
     expect(screen.getByTestId("fork-session-sandbox-option")).toBeInTheDocument();
-    expect(screen.getByTestId("fork-session-sandbox-option-arclet")).toBeInTheDocument();
+    expect(screen.getByTestId("fork-session-sandbox-option-daytona")).toBeInTheDocument();
   });
 
   it("does not expose an actionable form before the source snapshot resolves", () => {
@@ -1342,7 +1342,7 @@ describe("ForkSessionDialog", () => {
       setHosts([host({ status: "offline" })]);
       renderDialog({
         ...RECOVERY,
-        info: { managed_sandboxes_enabled: true, sandbox_provider: "arclet" },
+        info: { managed_sandboxes_enabled: true, sandbox_provider: "daytona" },
       });
 
       expect(screen.getByTestId("fork-session-submit")).toHaveAttribute("aria-disabled", "true");
@@ -2264,11 +2264,11 @@ describe("ForkSessionDialog", () => {
 
     it.each([
       // The first provider row keeps the bare test id; later rows add the provider.
-      ["a fresh Arclet", "arclet", "fork-session-sandbox-option-arclet"],
-      ["another sandbox provider", "lakebox", "fork-session-sandbox-option"],
+      ["a fresh Daytona", "daytona", "fork-session-sandbox-option-daytona"],
+      ["another sandbox provider", "modal", "fork-session-sandbox-option"],
       ["the same sandbox", null, "fork-session-host-option-host_1"],
     ])(
-      "forks an Arclet source onto %s beside the connected hosts",
+      "forks an Daytona source onto %s beside the connected hosts",
       async (_name, provider, row) => {
         launchRunnerMock.mockResolvedValue({ runnerId: "fork-runner" });
         useSessionMock.mockReturnValue({
@@ -2282,9 +2282,9 @@ describe("ForkSessionDialog", () => {
           isLoading: false,
           error: null,
         } as unknown as ReturnType<typeof useSession>);
-        // The source Arclet and another machine are both valid targets.
+        // The source Daytona and another machine are both valid targets.
         setHosts([
-          host({ sandbox_provider: "arclet" }),
+          host({ sandbox_provider: "daytona" }),
           host({ host_id: "host_2", name: "laptop" }),
         ]);
         forkSessionMock.mockResolvedValue({
@@ -2295,7 +2295,7 @@ describe("ForkSessionDialog", () => {
           info: {
             managed_sandboxes_enabled: true,
             request_managed_sandbox_host_id: true,
-            sandbox_providers: ["lakebox", "arclet"],
+            sandbox_providers: ["modal", "daytona"],
             sibling_sessions: true,
           },
         });
@@ -2348,29 +2348,24 @@ describe("ForkSessionDialog", () => {
       },
     );
 
-    it("forks a Databricks Sandbox source onto a connected host and starts it there", async () => {
+    it("forks a Modal Sandbox source onto a connected host and starts it there", async () => {
       useSessionMock.mockReturnValue({
         session: { hostId: "host_1", labels: { "omnigent.host_type": "managed" } },
         isLoading: false,
         error: null,
       } as unknown as ReturnType<typeof useSession>);
-      setHosts([
-        host({ sandbox_provider: "lakebox" }),
-        host({ host_id: "host_2", name: "laptop" }),
-      ]);
+      setHosts([host({ sandbox_provider: "modal" }), host({ host_id: "host_2", name: "laptop" })]);
       forkSessionMock.mockResolvedValue({
         id: "conv_fork",
       } as unknown as Awaited<ReturnType<typeof forkSession>>);
       launchRunnerMock.mockResolvedValue({ runnerId: "r1" });
       renderDialog({
         ...CODING,
-        info: { managed_sandboxes_enabled: true, sandbox_providers: ["lakebox"] },
+        info: { managed_sandboxes_enabled: true, sandbox_providers: ["modal"] },
       });
 
       // A fresh sandbox from the source's provider is the default; pick the laptop instead.
-      expect(screen.getByTestId("fork-session-host-select")).toHaveTextContent(
-        "Databricks Sandbox",
-      );
+      expect(screen.getByTestId("fork-session-host-select")).toHaveTextContent("Modal Sandbox");
       openHostSelect();
       fireEvent.click(screen.getByTestId("fork-session-host-option-host_2"));
       fireEvent.change(screen.getByTestId("workspace-path-input"), {
@@ -2391,12 +2386,12 @@ describe("ForkSessionDialog", () => {
     it.each([
       [
         "defaults a sandbox source to a fresh sandbox from its own provider",
-        "arclet",
-        "Arclet Sandbox",
+        "daytona",
+        "Daytona Sandbox",
       ],
       [
         "reuses the source sandbox when the server no longer offers that provider",
-        "modal",
+        "retired-provider",
         "Same sandbox",
       ],
     ])("%s", async (_name, sourceProvider, expected) => {
@@ -2413,7 +2408,7 @@ describe("ForkSessionDialog", () => {
         ...CODING,
         info: {
           managed_sandboxes_enabled: true,
-          sandbox_providers: ["lakebox", "arclet"],
+          sandbox_providers: ["modal", "daytona"],
           sibling_sessions: true,
         },
       });
@@ -2445,7 +2440,7 @@ describe("ForkSessionDialog", () => {
         isLoading: false,
         error: null,
       } as unknown as ReturnType<typeof useSession>);
-      const source = host({ sandbox_provider: "arclet" });
+      const source = host({ sandbox_provider: "daytona" });
       const laptop = host({ host_id: "host_2", name: "laptop" });
       let sourceLoaded = false;
       // The picker's connected hosts load first; the full list with the source sandbox later.
@@ -2459,7 +2454,7 @@ describe("ForkSessionDialog", () => {
       );
       const { refresh } = renderDialog({
         ...CODING,
-        info: { managed_sandboxes_enabled: true, sandbox_providers: ["lakebox", "arclet"] },
+        info: { managed_sandboxes_enabled: true, sandbox_providers: ["modal", "daytona"] },
       });
 
       await act(async () => {});
@@ -2468,7 +2463,7 @@ describe("ForkSessionDialog", () => {
       sourceLoaded = true;
       refresh();
       await act(async () => {});
-      expect(screen.getByTestId("fork-session-host-select")).toHaveTextContent("Arclet Sandbox");
+      expect(screen.getByTestId("fork-session-host-select")).toHaveTextContent("Daytona Sandbox");
     });
 
     it("keeps the same-provider default when server capabilities arrive after hosts", async () => {
@@ -2477,7 +2472,10 @@ describe("ForkSessionDialog", () => {
         isLoading: false,
         error: null,
       } as unknown as ReturnType<typeof useSession>);
-      setHosts([host({ sandbox_provider: "arclet" }), host({ host_id: "host_2", name: "laptop" })]);
+      setHosts([
+        host({ sandbox_provider: "daytona" }),
+        host({ host_id: "host_2", name: "laptop" }),
+      ]);
       const props: Parameters<typeof renderDialog>[0] = { ...CODING, info: "loading" };
       const { refresh } = renderDialog(props);
 
@@ -2485,10 +2483,10 @@ describe("ForkSessionDialog", () => {
       // Hosts are known but the offered providers aren't, so nothing is chosen yet.
       expect(screen.getByTestId("fork-session-host-select")).not.toHaveTextContent("laptop");
 
-      props.info = { managed_sandboxes_enabled: true, sandbox_providers: ["lakebox", "arclet"] };
+      props.info = { managed_sandboxes_enabled: true, sandbox_providers: ["modal", "daytona"] };
       refresh();
       await act(async () => {});
-      expect(screen.getByTestId("fork-session-host-select")).toHaveTextContent("Arclet Sandbox");
+      expect(screen.getByTestId("fork-session-host-select")).toHaveTextContent("Daytona Sandbox");
     });
 
     it.each([true, false])(

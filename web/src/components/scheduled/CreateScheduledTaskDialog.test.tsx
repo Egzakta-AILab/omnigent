@@ -1,3 +1,4 @@
+import * as editorLinks from "@/lib/editorLinks";
 import { testAgent } from "@/test/agentFixtures";
 // Tests for the manual create dialog: submit stays disabled until the required
 // fields are filled, the workspace-without-host pairing rule surfaces inline,
@@ -1014,7 +1015,7 @@ describe("agent picker readiness (needs-setup badges)", () => {
           info={{
             ...SERVER_INFO_OFFLINE_FALLBACK,
             managed_sandboxes_enabled: true,
-            sandbox_provider: "arclet",
+            sandbox_provider: "company",
             picker: {
               restrictToAgentNames: new Set(
                 empty ? ["not-installed"] : ["polly", "claude-native-ui", "pi-native-ui"],
@@ -1070,7 +1071,7 @@ describe("agent picker readiness (needs-setup badges)", () => {
         expect(picker).toHaveTextContent("No agents");
         fireEvent.change(screen.getByTestId("task-name-input"), { target: { value: "Nightly" } });
         fireEvent.change(screen.getByTestId("task-prompt-input"), { target: { value: "Do it" } });
-        expect(screen.getByTestId("task-host-trigger")).toHaveTextContent("Arclet Sandbox");
+        expect(screen.getByTestId("task-host-trigger")).toHaveTextContent("Company Sandbox");
         expect(screen.getByTestId("create-scheduled-task-submit")).toBeDisabled();
       } else {
         expect(picker).toHaveAttribute("data-effective", "ag_pi");
@@ -1582,9 +1583,9 @@ describe("CreateScheduledTaskDialog sandbox mode", () => {
             managed_sandboxes_enabled: true,
             scheduled_task_harness_settings: true,
             scheduled_task_sandbox_workspaces: true,
-            sandbox_provider: "arclet",
+            sandbox_provider: "company",
             sandbox_provider_capabilities: {
-              arclet: {
+              company: {
                 repo_catalog: [
                   { name: "universe", url: universe },
                   { name: "runtime", url: runtime },
@@ -1682,9 +1683,9 @@ describe("CreateScheduledTaskDialog sandbox mode", () => {
             ...SERVER_INFO_OFFLINE_FALLBACK,
             managed_sandboxes_enabled: true,
             scheduled_task_sandbox_workspaces: supported,
-            sandbox_provider: "arclet",
+            sandbox_provider: "company",
             sandbox_provider_capabilities: {
-              arclet: {
+              company: {
                 repo_catalog: [{ name: "runtime", url: "https://github.com/example/runtime" }],
               },
             },
@@ -4315,9 +4316,13 @@ describe("CreateScheduledTaskDialog trigger template", () => {
   });
 
   it.each([
-    ["arclet", true],
+    ["company", true],
     ["modal", false],
   ])("on a %s sandbox, hides the tools warning: %s", (provider, hidden) => {
+    // The dialog takes tool availability from the host SSH resolver.
+    const sshTarget = vi
+      .spyOn(editorLinks, "inferHostSshTarget")
+      .mockImplementation((host) => (host?.sandbox_provider === "company" ? "fixture-host" : null));
     renderTrigger("jira", {
       managed_sandboxes_enabled: true,
       sandbox_provider: provider,
@@ -4334,11 +4339,12 @@ describe("CreateScheduledTaskDialog trigger template", () => {
     fireEvent.click(screen.getByTestId("task-host-sandbox-option"));
 
     if (hidden) {
-      expect(screen.getByTestId("task-host-trigger")).toHaveTextContent("Arclet Sandbox");
+      expect(screen.getByTestId("task-host-trigger")).toHaveTextContent("Company Sandbox");
       expect(screen.queryByTestId("task-trigger-tools-note")).toBeNull();
     } else {
       expect(screen.getByTestId("task-trigger-tools-note")).toBeInTheDocument();
     }
+    sshTarget.mockRestore();
     // The untrusted-source warning is about the source, not the tools, so it stays.
     expect(screen.getByTestId("task-trigger-untrusted-note")).toBeInTheDocument();
   });

@@ -3791,7 +3791,7 @@ describe("desktop Arclet credential preflight", () => {
   });
 });
 
-describe("Run on Arca (flag-gated)", () => {
+describe("Managed desktop host connection", () => {
   beforeEach(() => {
     setupLandingMocks();
     mockHosts([]);
@@ -3820,7 +3820,7 @@ describe("Run on Arca (flag-gated)", () => {
     fireEvent.click(chip);
   }
 
-  it("offers the Arca option only when the desktop shell reports the flag", async () => {
+  it("offers the remote host option only when the desktop shell reports the flag", async () => {
     renderLanding();
     await openHostMenu();
     expect(await screen.findByTestId("new-chat-landing-run-on-arca")).toBeTruthy();
@@ -4415,7 +4415,7 @@ describe("NewChatLandingScreen", () => {
       "min-h-0",
       "max-w-[800px]",
       "px-4",
-      "pb-[max(16px,env(safe-area-inset-bottom))]",
+      "pb-[max(20px,env(safe-area-inset-bottom))]",
       "md:pb-16",
     );
     expect(landingContent?.firstElementChild).toHaveClass("flex-1", "md:flex-none");
@@ -13499,12 +13499,16 @@ describe("managed sandbox gateway preview", () => {
     } as unknown as ReturnType<typeof useSandboxModelOptions>);
   }
 
-  function renderGatewaySandbox() {
+  function renderGatewaySandbox(provider?: string) {
     return renderLanding({
       managed_sandboxes_enabled: true,
       request_managed_sandbox_host_id: true,
       sandbox_provider: "arclet",
       sandbox_provider_capabilities: { arclet: { default_models: true } },
+      ...(provider && {
+        sandbox_provider: provider,
+        sandbox_provider_capabilities: { [provider]: { default_models: true } },
+      }),
     });
   }
 
@@ -13838,9 +13842,13 @@ describe("managed sandbox gateway preview", () => {
       displayName: "GPT 6 Luna",
       supportedReasoningEfforts: [{ reasoningEffort: "ultra" }],
     };
-    writeModelCatalogCache(sandboxSessionCatalogKey("arclet", "codex-native", "a2"), [luna], false);
     writeModelCatalogCache(
-      sandboxSessionCatalogKey("arclet", "claude-native", "a1"),
+      sandboxSessionCatalogKey("daytona", "codex-native", "a2"),
+      [luna],
+      false,
+    );
+    writeModelCatalogCache(
+      sandboxSessionCatalogKey("daytona", "claude-native", "a1"),
       [{ id: "opus", displayName: "Opus" }],
       false,
     );
@@ -13849,7 +13857,7 @@ describe("managed sandbox gateway preview", () => {
       ok: true,
       json: async () => ({ id: "conv_new" }),
     } as Response);
-    renderGatewaySandbox();
+    renderGatewaySandbox("daytona");
     selectAgent("a1");
     openAgentModels("a1");
     expect(screen.queryByTestId(`new-chat-landing-agent-model-${astra.id}`)).toBeNull();
@@ -13867,7 +13875,7 @@ describe("managed sandbox gateway preview", () => {
     const { body } = await submitAndReadBody();
     expect(body).toMatchObject({
       agent_id: "a2",
-      sandbox_provider: "arclet",
+      sandbox_provider: "daytona",
       model_override: luna.id,
       reasoning_effort: "ultra",
     });
@@ -13876,13 +13884,17 @@ describe("managed sandbox gateway preview", () => {
   it("does not offer another agent's saved catalog", async () => {
     getCurrentUserIdMock.mockReturnValue("alice");
     const luna = { id: "gpt-6-luna", displayName: "GPT 6 Luna" };
-    writeModelCatalogCache(sandboxSessionCatalogKey("arclet", "codex-native", "a3"), [luna], false);
+    writeModelCatalogCache(
+      sandboxSessionCatalogKey("daytona", "codex-native", "a3"),
+      [luna],
+      false,
+    );
     preview();
     authenticatedFetchMock.mockResolvedValue({
       ok: true,
       json: async () => ({ id: "conv_new" }),
     } as Response);
-    renderGatewaySandbox();
+    renderGatewaySandbox("daytona");
     selectAgent("a2");
     openAgentModels("a2");
     expect(screen.queryByTestId(`new-chat-landing-agent-model-${luna.id}`)).toBeNull();

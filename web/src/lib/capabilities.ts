@@ -113,7 +113,7 @@ export interface ServerInfo {
    */
   needs_setup: boolean;
   /**
-   * True when the server has the lakebox CLI. Gates the Lakebox-specific UI
+   * True when the server has the managed host CLI. Gates the managed sandbox-specific UI
    * hints, such as the connect tab in the CLI command snippets. False in
    * builds that exclude those modules, which show provider-agnostic hints.
    */
