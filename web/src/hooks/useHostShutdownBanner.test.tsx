@@ -1,6 +1,6 @@
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { useArcaShutdownBanner } from "./useArcaShutdownBanner";
+import { useHostShutdownBanner } from "./useHostShutdownBanner";
 import { resetArcaWarningStorageForTests } from "@/lib/arcaShutdownWarning";
 
 const MON_5PM = new Date(2026, 9, 5, 17, 0);
@@ -40,10 +40,10 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-describe("useArcaShutdownBanner", () => {
+describe("useHostShutdownBanner", () => {
   it("disables hosts and eligibility when the feature is off", () => {
     state.enabled = false;
-    const view = renderHook(() => useArcaShutdownBanner());
+    const view = renderHook(() => useHostShutdownBanner());
     expect(state.hostsEnabled).toBe(false);
     expect(view.result.current.showForHost("arca")).toBe(false);
     state.enabled = true;
@@ -53,7 +53,7 @@ describe("useArcaShutdownBanner", () => {
   });
 
   it("dismisses the banner until the next day, then offers it again", () => {
-    const view = renderHook(() => useArcaShutdownBanner());
+    const view = renderHook(() => useHostShutdownBanner());
     expect(view.result.current.showForHost("arca")).toBe(true);
     act(() => view.result.current.dismissToday());
     expect(view.result.current.showForHost("arca")).toBe(false);
@@ -65,7 +65,7 @@ describe("useArcaShutdownBanner", () => {
 
   it("ignores the unused opt-out storage key", () => {
     localStorage.setItem("omnigent:arca-shutdown:opted-out", "true");
-    const view = renderHook(() => useArcaShutdownBanner());
+    const view = renderHook(() => useHostShutdownBanner());
     expect(view.result.current.showForHost("arca")).toBe(true);
   });
 });

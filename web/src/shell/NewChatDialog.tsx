@@ -617,11 +617,11 @@ export function ConnectHostInstructions({
   /** After the desktop shell connects a machine over SSH, with its host id. */
   onSshConnected?: (hostId: string) => void;
 }) {
-  // Managed servers add the Lakebox connect path. Other builds show only the
+  // Managed servers add the managed sandbox connect path. Other builds show only the
   // plain `omni host` command. Driven by /v1/info.
   const info = useServerInfo();
   // "loading" counts as no managed hints until the probe resolves, so the
-  // Lakebox option never flashes in.
+  // managed sandbox option stays hidden until then.
   const databricksFeatures = info !== "loading" && info.databricks_features;
   const quotedServerUrl = quoteShellArgument(serverUrl);
   const sshConnectAvailable = useSshConnectAvailable();
@@ -2301,6 +2301,14 @@ function forgetKeptLinkedPrompt(
   }
 }
 
+function MobileHostMenu(props: React.ComponentProps<typeof DropdownMenu>) {
+  return (
+    <MobileHeaderControlPortal sessionId={null}>
+      <DropdownMenu {...props} />
+    </MobileHeaderControlPortal>
+  );
+}
+
 function NewChatWorkspaceControls({
   children,
   disabled,
@@ -2726,7 +2734,7 @@ function NewChatLandingContent({
     if (!syncsParkedDraftRef.current || submittedRef.current) return;
     writeLandingDraft(draftState, { ...draftRef.current, fromLink: true });
   }, [message, draftState]);
-  const [checkingDbcert, setCheckingDbcert] = useState(false);
+  const [checkingCertificate, setCheckingCertificate] = useState(false);
   const [mcpAuthorizing, setMcpAuthorizing] = useState(false);
   // Composer text captured when voice dictation starts, so Esc can revert to it.
   const voiceSnapshotRef = useRef("");
@@ -2766,7 +2774,7 @@ function NewChatLandingContent({
   // Drag-and-drop — as in the in-session composer, a file dropped anywhere on
   // the landing surface attaches here. Declared after ``landingSurface``.
   const isDragActive = useFileDropTarget(landingSurface, (droppedFiles) => {
-    if (!checkingDbcert) addFiles(droppedFiles);
+    if (!checkingCertificate) addFiles(droppedFiles);
   });
 
   // Gates the sandbox host option: only servers whose sandbox
@@ -2898,15 +2906,12 @@ function NewChatLandingContent({
   // Defer the connect until the dropdown has actually closed (set on select,
   // consumed in the menu's onOpenChange) — connecting while the menu is open
   // looks janky. A ref so the close handler sees it synchronously.
-  const pendingConnectRef = useRef(false);
-  // The desktop shell reports whether Arca is enabled. When it is, the picker
-  // offers connecting the user's Arca instance as a host.
+  const pendingConnectRef = useRef<(() => Promise<void>) | null>(null);
+  // Offer the managed host only when the desktop shell enables it.
   const [arcaEnabled, setArcaEnabled] = useState(false);
   const [arcaPreviewRecovery, setArcaPreviewRecovery] = useState(false);
-  const [connectingArca, setConnectingArca] = useState(false);
+  const [connectingManagedHost, setConnectingManagedHost] = useState(false);
   const [arcaError, setArcaError] = useState<string | null>(null);
-  // Mirrors pendingConnectRef for the Arca row: connect after the menu closes.
-  const pendingArcaConnectRef = useRef(false);
   // Sandbox repository inputs — composed into the managed create's
   // `workspace` string (`<url>[#<branch>]`); both blank = empty
   // server-created workspace.
@@ -5924,27 +5929,29 @@ function NewChatLandingContent({
     ? displayNameForHost(selectedHost, thisMachineHostId, navigator.userAgent)
     : null;
   // The Arca row is remembered by host ID, never inferred from its machine hostname.
-  // A recovery-capable desktop restores preview identity on demand. Older
-  // shells keep Run on Arca visible because reconnecting is their only recovery.
   const arcaHostId = arcaEnabled ? readArcaHostId() : null;
   const arcaHostOnline = arcaHostId !== null && onlineHosts.some((h) => h.host_id === arcaHostId);
-  const showArcaOption =
+  const showManagedConnection =
     arcaEnabled &&
-    (siblingMayUseOtherHosts || arcaHostId === siblingSource?.hostId) &&
+    // Restricted siblings select the existing host row, even on older desktop shells.
+    siblingMayUseOtherHosts &&
+    // Older shells still need the setup action to recover a connected host.
     (!arcaPreviewRecovery || !arcaHostOnline);
   const hostLabel = connectingThisMachine
     ? "Connecting…"
-    : connectingArca
+    : connectingManagedHost
       ? "Connecting to Arca…"
       : sandboxSelected
         ? selectedSandboxLabel
-        : (selectedHostDisplayName ?? "No host selected");
+        : selectedHost?.status
+          ? `${selectedHostDisplayName ?? "No host selected"}, ${selectedHost.status === "online" ? "Online" : "Offline"}`
+          : (selectedHostDisplayName ?? "No host selected");
   const hostTooltipRows =
-    connectingThisMachine || connectingArca
+    connectingThisMachine || connectingManagedHost
       ? [
           {
             label: "Host",
-            value: connectingArca ? "Arca" : localMachineLabel(navigator.userAgent),
+            value: connectingManagedHost ? "Managed host" : localMachineLabel(navigator.userAgent),
           },
           { label: "Status", value: "Connecting…" },
         ]
@@ -5962,11 +5969,7 @@ function NewChatLandingContent({
               },
             ]
           : [{ label: "Host", value: "None" }];
-  const hostChipStatus =
-    sandboxSelected || connectingThisMachine || connectingArca ? undefined : selectedHost?.status;
-  const hostChipLabel = hostChipStatus
-    ? `Host: ${hostLabel}, ${hostChipStatus === "online" ? "Online" : "Offline"}`
-    : `Host: ${hostLabel}`;
+  const hostChipLabel = `Host: ${hostLabel}`;
   const worktreeControlAvailable =
     !sandboxSelected &&
     workspaceIsGit &&
@@ -6149,12 +6152,12 @@ function NewChatLandingContent({
     }
   }
 
-  // Connect the user's Arca instance as a host, then select it. The bridge
+  // Connect the user's managed host as a host, then select it. The bridge
   // resolves once the remote daemon starts. The daemon registers a moment
   // later, so poll the host list briefly for the host that came online.
-  async function connectArca() {
-    if (connectingArca) return;
-    setConnectingArca(true);
+  async function connectManagedHost() {
+    if (connectingManagedHost) return;
+    setConnectingManagedHost(true);
     setArcaError(null);
     const onlineBefore = new Set(
       allHosts.filter((h) => h.status === "online").map((h) => h.host_id),
@@ -6197,7 +6200,7 @@ function NewChatLandingContent({
         });
         const fresh = hostList.find((h) => h.status === "online" && !onlineBefore.has(h.host_id));
         if (fresh) {
-          // Remember which host is the Arca instance so the picker can tag it.
+          // Remember which host is the managed host instance so the picker can tag it.
           writeArcaHostId(fresh.host_id);
           selectHost(fresh.host_id);
           return;
@@ -6213,7 +6216,7 @@ function NewChatLandingContent({
         "Arca started, but the host hasn't appeared yet — it should show up in the host list shortly.",
       );
     } finally {
-      setConnectingArca(false);
+      setConnectingManagedHost(false);
     }
   }
 
@@ -6315,7 +6318,7 @@ function NewChatLandingContent({
         const skipCheck = new Promise<null>((resolve) => {
           skipDbcertCheckRef.current = () => resolve(null);
         });
-        setCheckingDbcert(true);
+        setCheckingCertificate(true);
         setDbcertRequired(false);
         const credentials = await Promise.race([
           getDesktopFeatures().then((features) =>
@@ -6337,7 +6340,7 @@ function NewChatLandingContent({
           window.location.href !== createLocation
         )
           return;
-        setCheckingDbcert(false);
+        setCheckingCertificate(false);
         if (credentials !== null && !credentials.ok) {
           setCreateError(credentials.error);
           return;
@@ -7024,7 +7027,7 @@ function NewChatLandingContent({
       if (createAttemptRef.current === createAttempt) {
         createAttemptRef.current = null;
         skipDbcertCheckRef.current = null;
-        setCheckingDbcert(false);
+        setCheckingCertificate(false);
         setCreating(false);
       }
     }
@@ -7072,14 +7075,14 @@ function NewChatLandingContent({
     managedSandboxesEnabled ||
     showDisabledSandboxWithDocs ||
     cloudHosts.length > 0 ||
-    showArcaOption;
+    showManagedConnection;
   const renderHostMenuItem = (host: Host) => {
     const reconnect = isReconnectRow(host);
     return (
       <DropdownMenuItem
         key={host.host_id}
         onSelect={() => {
-          if (reconnect) pendingConnectRef.current = true;
+          if (reconnect) pendingConnectRef.current = connectThisMachine;
           else selectHost(host.host_id);
         }}
         disabled={reconnect ? connectingThisMachine : host.status !== "online"}
@@ -7164,7 +7167,7 @@ function NewChatLandingContent({
   );
 
   const workspaceControls = (
-    <NewChatWorkspaceControls disabled={checkingDbcert}>
+    <NewChatWorkspaceControls disabled={checkingCertificate}>
       {/* Keep the tray mounted while the execution target changes. */}
       {sandboxSelected && (
         <ComposerWorkspaceBar
@@ -7626,7 +7629,7 @@ function NewChatLandingContent({
         {/* Drop cue, spanning the landing surface. */}
         {isDragActive && landingSurface ? <FileDropOverlay container={landingSurface} /> : null}
         <fieldset
-          disabled={checkingDbcert}
+          disabled={checkingCertificate}
           className={cn(
             "relative flex min-w-0 flex-col gap-0 max-md:w-[calc(100%-1rem)]",
             COMPOSER_COLUMN_WIDTH,
@@ -7931,245 +7934,242 @@ function NewChatLandingContent({
                       )}
                     </div>
                     {/* Host chip */}
-                    <MobileHeaderControlPortal sessionId={null}>
-                      <DropdownMenu
-                        onOpenChange={(open) => {
-                          setHostMenuOpen(open);
-                          if (!open) setOfflineHostLimit(0);
-                          // Run a requested "connect this machine" only once the menu
-                          // has closed.
-                          if (!open && pendingConnectRef.current) {
-                            pendingConnectRef.current = false;
-                            void connectThisMachine();
-                          }
-                          if (!open && pendingArcaConnectRef.current) {
-                            pendingArcaConnectRef.current = false;
-                            void connectArca();
-                          }
-                        }}
+                    <MobileHostMenu
+                      onOpenChange={(open) => {
+                        setHostMenuOpen(open);
+                        if (!open) setOfflineHostLimit(0);
+                        // Run a requested "connect this machine" only once the menu
+                        // has closed.
+                        if (!open && pendingConnectRef.current) {
+                          const connect = pendingConnectRef.current;
+                          pendingConnectRef.current = null;
+                          void connect();
+                        }
+                      }}
+                    >
+                      <ComposerMenuTooltip
+                        menuOpen={hostMenuOpen}
+                        content={<ComposerConfigTooltipRows rows={hostTooltipRows} />}
+                        variant="session-info"
+                        testId="new-chat-landing-host-tooltip"
+                        className="shrink-0"
+                        // Two short rows: size to the text, wrapping at the pill's width.
+                        contentClassName="w-max max-w-64"
                       >
-                        <ComposerMenuTooltip
-                          menuOpen={hostMenuOpen}
-                          content={<ComposerConfigTooltipRows rows={hostTooltipRows} />}
-                          variant="session-info"
-                          testId="new-chat-landing-host-tooltip"
-                          className="shrink-0"
-                          // Two short rows: size to the text, wrapping at the pill's width.
-                          contentClassName="w-max max-w-64"
-                        >
-                          <DropdownMenuTrigger asChild>
-                            <ComposerHostTrigger
-                              appearance={isMobileViewport ? "header" : "composer"}
-                              disabled={checkingDbcert}
-                              label={hostChipLabel}
-                              status={
-                                sandboxSelected ? undefined : (selectedHost?.status ?? "offline")
-                              }
-                              cloud={isCloudHost}
-                              className={cn(
-                                connectingThisMachine &&
-                                  "w-auto gap-1 pr-2 after:animate-pulse after:text-xs after:font-normal after:content-['Connecting…']",
-                              )}
-                              testIdPrefix="new-chat-landing"
-                              data-testid="new-chat-landing-host-chip"
-                            />
-                          </DropdownMenuTrigger>
-                        </ComposerMenuTooltip>
-                        <DropdownMenuContent
-                          align="start"
-                          sideOffset={6}
-                          className="composer-host-menu min-w-[220px] max-w-[min(360px,calc(100vw-24px))]"
-                          data-testid="new-chat-landing-host-menu"
-                        >
-                          {hasCloudOptions && (
-                            <div className="px-2 py-1 text-xs leading-[18px] text-muted-foreground/75">
-                              Cloud
-                            </div>
-                          )}
-                          {/* Server-provisioned sandbox — only advertised when
-                    /v1/info reports managed_sandboxes_enabled. Pinned
-                    first, above the connected-host list. */}
-                          {(managedSandboxesEnabled || showDisabledSandboxWithDocs) &&
-                            (managedSandboxesEnabled ? (
-                              sandboxProviderRows.map((provider, index) => (
-                                <DropdownMenuItem
-                                  key={provider ?? "default"}
-                                  onSelect={() => selectSandbox(provider)}
-                                  // First row keeps the original testid; later
-                                  // rows get a scoped one.
-                                  data-testid={
-                                    index === 0
-                                      ? "new-chat-landing-sandbox-option"
-                                      : `new-chat-landing-sandbox-option-${provider}`
-                                  }
-                                  data-active={
-                                    sandboxSelected && sandboxProvider === provider
-                                      ? "true"
-                                      : undefined
-                                  }
-                                  className="mobile-touch-target text-sm data-[active=true]:bg-muted dark:data-[active=true]:bg-muted/50"
-                                >
-                                  <span className="flex items-center gap-1">
-                                    <span className="flex size-4 shrink-0 items-center justify-center">
-                                      <MonitorCloudIcon className="size-3.5 text-muted-foreground" />
-                                    </span>
-                                    <span className="text-sm">{sandboxOptionLabel(provider)}</span>
-                                  </span>
-                                </DropdownMenuItem>
-                              ))
-                            ) : (
+                        <DropdownMenuTrigger asChild>
+                          <ComposerHostTrigger
+                            appearance={isMobileViewport ? "header" : "composer"}
+                            disabled={checkingCertificate}
+                            label={hostChipLabel}
+                            status={
+                              sandboxSelected ? undefined : (selectedHost?.status ?? "offline")
+                            }
+                            cloud={isCloudHost}
+                            className={cn(
+                              connectingThisMachine &&
+                                "w-auto gap-1 pr-2 after:animate-pulse after:text-xs after:font-normal after:content-['Connecting…']",
+                            )}
+                            testIdPrefix="new-chat-landing"
+                            data-testid="new-chat-landing-host-chip"
+                          />
+                        </DropdownMenuTrigger>
+                      </ComposerMenuTooltip>
+                      <DropdownMenuContent
+                        align="start"
+                        sideOffset={6}
+                        className="composer-host-menu min-w-[220px] max-w-[min(360px,calc(100vw-24px))]"
+                        data-testid="new-chat-landing-host-menu"
+                      >
+                        {hasCloudOptions && (
+                          <div className="px-2 py-1 text-xs leading-[18px] text-muted-foreground/75">
+                            Cloud
+                          </div>
+                        )}
+                        {/* Server-provisioned sandbox — only advertised when
+                  /v1/info reports managed_sandboxes_enabled. Pinned
+                  first, above the connected-host list. */}
+                        {(managedSandboxesEnabled || showDisabledSandboxWithDocs) &&
+                          (managedSandboxesEnabled ? (
+                            sandboxProviderRows.map((provider, index) => (
                               <DropdownMenuItem
-                                aria-disabled="true"
-                                onSelect={(e) => e.preventDefault()}
-                                className="mobile-touch-target flex items-center justify-between px-2 py-1.5 text-sm text-muted-foreground opacity-60"
-                                data-testid="new-chat-landing-sandbox-option-disabled"
+                                key={provider ?? "default"}
+                                onSelect={() => selectSandbox(provider)}
+                                // First row keeps the original testid; later
+                                // rows get a scoped one.
+                                data-testid={
+                                  index === 0
+                                    ? "new-chat-landing-sandbox-option"
+                                    : `new-chat-landing-sandbox-option-${provider}`
+                                }
+                                data-active={
+                                  sandboxSelected && sandboxProvider === provider
+                                    ? "true"
+                                    : undefined
+                                }
+                                className="mobile-touch-target text-sm data-[active=true]:bg-muted dark:data-[active=true]:bg-muted/50"
                               >
                                 <span className="flex items-center gap-1">
                                   <span className="flex size-4 shrink-0 items-center justify-center">
                                     <MonitorCloudIcon className="size-3.5 text-muted-foreground" />
                                   </span>
-                                  <span className="text-sm">New Sandbox</span>
+                                  <span className="text-sm">{sandboxOptionLabel(provider)}</span>
                                 </span>
-                                <Tooltip>
-                                  <TooltipTrigger asChild>
-                                    <button
-                                      type="button"
-                                      className="inline-flex size-4 items-center justify-center rounded-sm text-muted-foreground/80 hover:text-foreground"
-                                      aria-label="Why New Sandbox is unavailable"
-                                      onClick={(e) => e.stopPropagation()}
-                                      onKeyDown={(e) => {
-                                        if (e.key === "Enter" || e.key === " ") e.stopPropagation();
-                                      }}
-                                    >
-                                      <CircleHelpIcon className="size-3.5" />
-                                    </button>
-                                  </TooltipTrigger>
-                                  <TooltipContent className="max-w-64">
-                                    {newSandboxTooltipContent}
-                                  </TooltipContent>
-                                </Tooltip>
                               </DropdownMenuItem>
-                            ))}
-                          {cloudHosts.map(renderHostMenuItem)}
-                          {showArcaOption && (
+                            ))
+                          ) : (
                             <DropdownMenuItem
-                              className="mobile-touch-target"
-                              onSelect={() => {
-                                pendingArcaConnectRef.current = true;
-                              }}
-                              disabled={connectingArca}
-                              data-testid="new-chat-landing-run-on-arca"
+                              aria-disabled="true"
+                              onSelect={(e) => e.preventDefault()}
+                              className="mobile-touch-target flex items-center justify-between px-2 py-1.5 text-sm text-muted-foreground opacity-60"
+                              data-testid="new-chat-landing-sandbox-option-disabled"
                             >
-                              <span className="flex size-4 shrink-0 items-center justify-center">
-                                <MonitorCloudIcon className="size-3.5 text-muted-foreground" />
+                              <span className="flex items-center gap-1">
+                                <span className="flex size-4 shrink-0 items-center justify-center">
+                                  <MonitorCloudIcon className="size-3.5 text-muted-foreground" />
+                                </span>
+                                <span className="text-sm">New Sandbox</span>
                               </span>
-                              <span>{connectingArca ? "Connecting to Arca…" : "Run on Arca"}</span>
-                            </DropdownMenuItem>
-                          )}
-                          {hasCloudOptions && <DropdownMenuSeparator />}
-                          <div className="px-2 py-1 text-xs leading-[18px] text-muted-foreground/75">
-                            My machines
-                          </div>
-                          {localHosts.length === 0 &&
-                            !showConnectThisMachine &&
-                            myMachinesEmptyText && (
-                              <div className="px-2 py-1.5 text-sm text-muted-foreground">
-                                {myMachinesEmptyText}
-                              </div>
-                            )}
-                          {localHosts.map(renderHostMenuItem)}
-                          {/* Desktop shell, no active host and machine not listed:
-                    show the disconnected local-machine state inline. */}
-                          {showConnectThisMachine && (
-                            <DropdownMenuItem
-                              onSelect={() => {
-                                pendingConnectRef.current = true;
-                              }}
-                              disabled={connectingThisMachine}
-                              data-testid="new-chat-landing-run-on-this-machine"
-                              className="mobile-touch-target group gap-1 text-sm"
-                            >
-                              <span className="flex size-4 shrink-0 items-center justify-center">
-                                <span
-                                  aria-hidden
-                                  className="size-2 rounded-full border-[1.5px] border-muted-foreground"
-                                />
-                              </span>
-                              <span className="min-w-0 flex-1 truncate text-sm">
-                                {localMachineLabel(navigator.userAgent)}
-                              </span>
-                              <span
-                                className="inline-flex h-6 shrink-0 items-center rounded-md px-2 text-xs font-medium text-muted-foreground group-hover:text-foreground"
-                                data-testid="new-chat-landing-use-this-machine"
-                              >
-                                {connectingThisMachine ? <ConnectingText /> : "Use this machine"}
-                              </span>
-                            </DropdownMenuItem>
-                          )}
-                          {otherOfflineHosts.length > 0 && (
-                            <>
-                              <DropdownMenuSeparator />
-                              <DropdownMenuItem
-                                aria-expanded={offlineHostLimit > 0}
-                                onSelect={(event) => {
-                                  event.preventDefault();
-                                  setOfflineHostLimit((limit) => (limit > 0 ? 0 : 5));
-                                }}
-                                className="mobile-touch-target text-muted-foreground"
-                              >
-                                {offlineHostLimit > 0 ? (
-                                  <ChevronDownIcon className="size-4" />
-                                ) : (
-                                  <ChevronRightIcon className="size-4" />
-                                )}
-                                Offline hosts ({otherOfflineHosts.length})
-                              </DropdownMenuItem>
-                              {offlineHostLimit > 0 && (
-                                <>
-                                  <div
-                                    role="group"
-                                    aria-label="Offline hosts"
-                                    className="max-h-48 overflow-y-auto"
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <button
+                                    type="button"
+                                    className="inline-flex size-4 items-center justify-center rounded-sm text-muted-foreground/80 hover:text-foreground"
+                                    aria-label="Why New Sandbox is unavailable"
+                                    onClick={(e) => e.stopPropagation()}
+                                    onKeyDown={(e) => {
+                                      if (e.key === "Enter" || e.key === " ") e.stopPropagation();
+                                    }}
                                   >
-                                    {otherOfflineHosts
-                                      .slice(0, offlineHostLimit)
-                                      .map(renderHostMenuItem)}
-                                  </div>
-                                  {offlineHostLimit < otherOfflineHosts.length && (
-                                    <DropdownMenuItem
-                                      onSelect={(event) => {
-                                        event.preventDefault();
-                                        setOfflineHostLimit((limit) => limit + 5);
-                                      }}
-                                      className="mobile-touch-target text-muted-foreground"
-                                    >
-                                      Show more ({otherOfflineHosts.length - offlineHostLimit}{" "}
-                                      remaining)
-                                    </DropdownMenuItem>
-                                  )}
-                                </>
+                                    <CircleHelpIcon className="size-3.5" />
+                                  </button>
+                                </TooltipTrigger>
+                                <TooltipContent className="max-w-64">
+                                  {newSandboxTooltipContent}
+                                </TooltipContent>
+                              </Tooltip>
+                            </DropdownMenuItem>
+                          ))}
+                        {cloudHosts.map(renderHostMenuItem)}
+                        {showManagedConnection && (
+                          <DropdownMenuItem
+                            className="mobile-touch-target"
+                            onSelect={() => {
+                              pendingConnectRef.current = connectManagedHost;
+                            }}
+                            disabled={connectingManagedHost}
+                            data-testid="new-chat-landing-connect-managed-host"
+                          >
+                            <span className="flex size-4 shrink-0 items-center justify-center">
+                              <MonitorCloudIcon className="size-3.5 text-muted-foreground" />
+                            </span>
+                            <span>
+                              {connectingManagedHost ? "Connecting…" : "Connect managed host"}
+                            </span>
+                          </DropdownMenuItem>
+                        )}
+                        {hasCloudOptions && <DropdownMenuSeparator />}
+                        <div className="px-2 py-1 text-xs leading-[18px] text-muted-foreground/75">
+                          My machines
+                        </div>
+                        {localHosts.length === 0 &&
+                          !showConnectThisMachine &&
+                          myMachinesEmptyText && (
+                            <div className="px-2 py-1.5 text-sm text-muted-foreground">
+                              {myMachinesEmptyText}
+                            </div>
+                          )}
+                        {localHosts.map(renderHostMenuItem)}
+                        {/* Desktop shell, no active host and machine not listed:
+                  show the disconnected local-machine state inline. */}
+                        {showConnectThisMachine && (
+                          <DropdownMenuItem
+                            onSelect={() => {
+                              pendingConnectRef.current = connectThisMachine;
+                            }}
+                            disabled={connectingThisMachine}
+                            data-testid="new-chat-landing-run-on-this-machine"
+                            className="mobile-touch-target group gap-1 text-sm"
+                          >
+                            <span className="flex size-4 shrink-0 items-center justify-center">
+                              <span
+                                aria-hidden
+                                className="size-2 rounded-full border-[1.5px] border-muted-foreground"
+                              />
+                            </span>
+                            <span className="min-w-0 flex-1 truncate text-sm">
+                              {localMachineLabel(navigator.userAgent)}
+                            </span>
+                            <span
+                              className="inline-flex h-6 shrink-0 items-center rounded-md px-2 text-xs font-medium text-muted-foreground group-hover:text-foreground"
+                              data-testid="new-chat-landing-use-this-machine"
+                            >
+                              {connectingThisMachine ? <ConnectingText /> : "Use this machine"}
+                            </span>
+                          </DropdownMenuItem>
+                        )}
+                        {otherOfflineHosts.length > 0 && (
+                          <>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuItem
+                              aria-expanded={offlineHostLimit > 0}
+                              onSelect={(event) => {
+                                event.preventDefault();
+                                setOfflineHostLimit((limit) => (limit > 0 ? 0 : 5));
+                              }}
+                              className="mobile-touch-target text-muted-foreground"
+                            >
+                              {offlineHostLimit > 0 ? (
+                                <ChevronDownIcon className="size-4" />
+                              ) : (
+                                <ChevronRightIcon className="size-4" />
                               )}
-                            </>
-                          )}
-                          {siblingMayUseOtherHosts && (
-                            <>
-                              <DropdownMenuSeparator />
-                              {/* Persistent escape hatch: open the connect-a-host
-                    instructions. Present even with zero hosts so a fresh user
-                    is never stuck. */}
-                              <DropdownMenuItem
-                                onSelect={() => setConnectOpen(true)}
-                                data-testid="new-chat-landing-connect-host"
-                                className="mobile-touch-target composer-host-connect text-muted-foreground"
-                              >
-                                <PlusIcon className="size-4" />
-                                Connect new host
-                              </DropdownMenuItem>
-                            </>
-                          )}
-                        </DropdownMenuContent>
-                      </DropdownMenu>
-                    </MobileHeaderControlPortal>
+                              Offline hosts ({otherOfflineHosts.length})
+                            </DropdownMenuItem>
+                            {offlineHostLimit > 0 && (
+                              <>
+                                <div
+                                  role="group"
+                                  aria-label="Offline hosts"
+                                  className="max-h-48 overflow-y-auto"
+                                >
+                                  {otherOfflineHosts
+                                    .slice(0, offlineHostLimit)
+                                    .map(renderHostMenuItem)}
+                                </div>
+                                {offlineHostLimit < otherOfflineHosts.length && (
+                                  <DropdownMenuItem
+                                    onSelect={(event) => {
+                                      event.preventDefault();
+                                      setOfflineHostLimit((limit) => limit + 5);
+                                    }}
+                                    className="mobile-touch-target text-muted-foreground"
+                                  >
+                                    Show more ({otherOfflineHosts.length - offlineHostLimit}{" "}
+                                    remaining)
+                                  </DropdownMenuItem>
+                                )}
+                              </>
+                            )}
+                          </>
+                        )}
+                        {siblingMayUseOtherHosts && (
+                          <>
+                            <DropdownMenuSeparator />
+                            {/* Persistent escape hatch: open the connect-a-host
+                  instructions. Present even with zero hosts so a fresh user
+                  is never stuck. */}
+                            <DropdownMenuItem
+                              onSelect={() => setConnectOpen(true)}
+                              data-testid="new-chat-landing-connect-host"
+                              className="mobile-touch-target composer-host-connect text-muted-foreground"
+                            >
+                              <PlusIcon className="size-4" />
+                              Connect new host
+                            </DropdownMenuItem>
+                          </>
+                        )}
+                      </DropdownMenuContent>
+                    </MobileHostMenu>
 
                     {noExecutionTargetSelected ? (
                       <ComposerPermissionPicker
@@ -8261,7 +8261,7 @@ function NewChatLandingContent({
                           loading={pickerLoading}
                           interactiveWhileLoading={pickerInteractiveWhileLoading}
                           disabledLabel={
-                            checkingDbcert
+                            checkingCertificate
                               ? "Checking certificate"
                               : noExecutionTargetSelected
                                 ? "No host selected"
@@ -8536,7 +8536,7 @@ function NewChatLandingContent({
             </p>
           )}
 
-          {checkingDbcert && (
+          {checkingCertificate && (
             <div
               className="flex items-center gap-2 text-sm text-muted-foreground"
               data-testid="new-chat-landing-dbcert-status"
@@ -8588,8 +8588,8 @@ function NewChatLandingContent({
               <button
                 type="button"
                 className="underline underline-offset-2 hover:no-underline disabled:opacity-60"
-                onClick={() => void connectArca()}
-                disabled={connectingArca}
+                onClick={() => void connectManagedHost()}
+                disabled={connectingManagedHost}
                 data-testid="new-chat-landing-arca-error-retry"
               >
                 Try again

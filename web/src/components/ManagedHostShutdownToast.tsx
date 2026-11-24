@@ -1,3 +1,4 @@
+import { useHostShutdownWarningsEnabled } from "@/hooks/useHostShutdownBanner";
 import { useEffect, useReducer, useRef, useState } from "react";
 import { toast } from "sonner";
 import { useHosts } from "@/hooks/useHosts";
@@ -18,7 +19,11 @@ import { ArcaExtendActions, useCanExtendArca } from "./ArcaExtendActions";
 
 const OVERNIGHT_COMMAND = "arca extend overnight";
 
-export function ArcaShutdownToast() {
+export function ManagedHostShutdownToast() {
+  return useHostShutdownWarningsEnabled() ? <ActiveShutdownToast /> : null;
+}
+
+function ActiveShutdownToast() {
   const { data: hosts } = useHosts();
   const now = useNow();
   const desktopExtend = useCanExtendArca();

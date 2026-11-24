@@ -15,7 +15,7 @@ import {
 import { isFeatureEnabled } from "@/lib/capabilities";
 import { useServerInfo } from "@/lib/CapabilitiesContext";
 
-export function useMarkArcaBannerWhenVisible(day: string) {
+export function useMarkShutdownBannerWhenVisible(day: string) {
   useEffect(() => {
     const markIfVisible = () => {
       if (document.visibilityState !== "visible") return;
@@ -30,8 +30,13 @@ export function useMarkArcaBannerWhenVisible(day: string) {
   }, [day]);
 }
 
-export function useArcaShutdownBanner() {
+export function useHostShutdownWarningsEnabled() {
   const enabled = isFeatureEnabled(useServerInfo(), "arca_shutdown_warnings");
+  return enabled;
+}
+
+export function useHostShutdownBanner() {
+  const enabled = useHostShutdownWarningsEnabled();
   const { data: hosts } = useHosts({ enabled });
   const warningDay = useNowSelector((now) => (isWarningWindow(now) ? dateKey(now) : ""), {
     enabled,

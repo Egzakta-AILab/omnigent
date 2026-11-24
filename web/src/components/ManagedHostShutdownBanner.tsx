@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { AlertTriangleIcon, CheckIcon, CopyIcon } from "lucide-react";
-import { useMarkArcaBannerWhenVisible } from "@/hooks/useArcaShutdownBanner";
+import { useMarkShutdownBannerWhenVisible } from "@/hooks/useHostShutdownBanner";
 import { offersWorkweek } from "@/lib/arcaShutdownWarning";
 import { copyText } from "@/lib/clipboard";
 import { cn } from "@/lib/utils";
@@ -47,14 +47,14 @@ function CommandCopyButton({ command }: { command: string }) {
   );
 }
 
-export function ArcaShutdownBanner({
+export function ManagedHostShutdownBanner({
   warning,
   hasTasks = false,
 }: {
   warning: { day: string; dismissToday: () => void };
   hasTasks?: boolean;
 }) {
-  useMarkArcaBannerWhenVisible(warning.day);
+  useMarkShutdownBannerWhenVisible(warning.day);
   const commands = ["arca extend overnight"];
   if (offersWorkweek(new Date(`${warning.day}T12:00:00`))) commands.push("arca extend workweek");
   const desktopExtend = useCanExtendArca();

@@ -1,8 +1,8 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { toast } from "sonner";
-import { ArcaShutdownBanner } from "./ArcaShutdownBanner";
-import { useArcaShutdownBanner } from "@/hooks/useArcaShutdownBanner";
+import { ManagedHostShutdownBanner } from "./ManagedHostShutdownBanner";
+import { useHostShutdownBanner } from "@/hooks/useHostShutdownBanner";
 import {
   isDismissedToday,
   isWarnedToday,
@@ -33,8 +33,8 @@ vi.mock("@/lib/clipboard", () => ({ copyText: vi.fn() }));
 vi.mock("sonner", () => ({ toast: { dismiss: vi.fn() } }));
 
 function Banner({ hostId = "arca" }: { hostId?: string }) {
-  const warning = useArcaShutdownBanner();
-  return warning.showForHost(hostId) ? <ArcaShutdownBanner warning={warning} /> : null;
+  const warning = useHostShutdownBanner();
+  return warning.showForHost(hostId) ? <ManagedHostShutdownBanner warning={warning} /> : null;
 }
 
 beforeEach(() => {
@@ -56,7 +56,7 @@ afterEach(() => {
   delete (window as unknown as { omnigentDesktop?: unknown }).omnigentDesktop;
 });
 
-describe("ArcaShutdownBanner", () => {
+describe("ManagedHostShutdownBanner", () => {
   it("copies the selected command and briefly confirms it", async () => {
     render(<Banner />);
     fireEvent.click(screen.getByRole("button", { name: "Copy arca extend overnight" }));

@@ -3823,7 +3823,7 @@ describe("Managed desktop host connection", () => {
   it("offers the remote host option only when the desktop shell reports the flag", async () => {
     renderLanding();
     await openHostMenu();
-    expect(await screen.findByTestId("new-chat-landing-run-on-arca")).toBeTruthy();
+    expect(await screen.findByTestId("new-chat-landing-connect-managed-host")).toBeTruthy();
   });
 
   it("hides the Arca option when the flag is off or unknown (old shell)", async () => {
@@ -3832,7 +3832,7 @@ describe("Managed desktop host connection", () => {
     await openHostMenu();
     // The menu is open (the escape hatch renders), but no Arca entry.
     await screen.findByTestId("new-chat-landing-connect-host");
-    expect(screen.queryByTestId("new-chat-landing-run-on-arca")).toBeNull();
+    expect(screen.queryByTestId("new-chat-landing-connect-managed-host")).toBeNull();
   });
 
   it("lists the remembered online host under My machines and hides Run on Arca", async () => {
@@ -3855,20 +3855,20 @@ describe("Managed desktop host connection", () => {
     expect(screen.queryByText("Cloud")).toBeNull();
     expect(row.querySelector(".bg-success")).not.toBeNull();
     expect(row.querySelector("svg")).toBeNull();
-    expect(screen.queryByTestId("new-chat-landing-run-on-arca")).toBeNull();
+    expect(screen.queryByTestId("new-chat-landing-connect-managed-host")).toBeNull();
     fireEvent.click(row);
     await waitFor(() => expect(localStorage.getItem("omnigent:last-host-choice")).toBe("arca-1"));
   });
 
-  it("keeps Run on Arca visible in an older shell without preview recovery", async () => {
+  it("restricts legacy desktop setup for nested agents while keeping the source selectable", async () => {
     vi.mocked(getDesktopFeatures).mockResolvedValue({ databricksInternalFeatures: true });
     localStorage.setItem("omnigent:arca-host-id", "arca-1");
     mockHosts([{ host_id: "arca-1", name: "remote-box", owner: "me", status: "online" }]);
-    renderLanding();
+    const standalone = renderLanding();
     await openHostMenu();
 
-    expect(await screen.findByTestId("new-chat-landing-run-on-arca")).toHaveTextContent(
-      /^Run on Arca$/,
+    expect(await screen.findByTestId("new-chat-landing-connect-managed-host")).toHaveTextContent(
+      /^Connect managed host$/,
     );
     // The host row itself still lists under My machines.
     const row = await screen.findByTestId("new-chat-landing-host-arca-1");
@@ -3876,6 +3876,25 @@ describe("Managed desktop host connection", () => {
       screen.getByText("My machines").compareDocumentPosition(row) &
         Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
+
+    standalone.unmount();
+    const sourceHost = useHostsMock().data![0];
+    authenticatedFetchMock.mockImplementation(async (url) => {
+      if (String(url).startsWith("/v1/sessions/source?")) {
+        return Response.json({ id: "source", host_id: sourceHost.host_id, labels: {} });
+      }
+      return Response.json({}, { status: 404 });
+    });
+    renderLanding(
+      { sibling_sessions: true, sibling_session_destinations: "current_host" },
+      "/?sibling=source",
+    );
+    await openHostMenu();
+    expect(screen.queryByRole("menuitem", { name: "Connect managed host" })).toBeNull();
+    const sameHost = screen.getByTestId(`new-chat-landing-host-${sourceHost.host_id}`);
+    expect(sameHost).toBeEnabled();
+    fireEvent.click(sameHost);
+    expect(localStorage.getItem("omnigent:last-host-choice")).toBe(sourceHost.host_id);
   });
 
   it("recaptures an already-running host through the same reconnect action", async () => {
@@ -3888,7 +3907,7 @@ describe("Managed desktop host connection", () => {
     });
     renderLanding();
     await openHostMenu();
-    fireEvent.click(await screen.findByText("Run on Arca"));
+    fireEvent.click(await screen.findByText("Connect managed host"));
     await waitFor(() =>
       expect(localStorage.getItem("omnigent:last-host-choice")).toBe("actual-arca"),
     );
@@ -3907,10 +3926,10 @@ describe("Managed desktop host connection", () => {
     });
     renderLanding();
     await openHostMenu();
-    fireEvent.click(await screen.findByText("Run on Arca"));
+    fireEvent.click(await screen.findByText("Connect managed host"));
     await waitFor(() => expect(connectArcaHost).toHaveBeenCalledTimes(1));
     await openHostMenu();
-    fireEvent.click(await screen.findByText("Run on Arca"));
+    fireEvent.click(await screen.findByText("Connect managed host"));
     await waitFor(() => expect(connectArcaHost).toHaveBeenCalledTimes(2));
     expect(localStorage.getItem("omnigent:last-host-choice")).toBe("arca-1");
   });
@@ -3927,8 +3946,8 @@ describe("Managed desktop host connection", () => {
       renderLanding();
       await openHostMenu();
 
-      expect(await screen.findByTestId("new-chat-landing-run-on-arca")).toHaveTextContent(
-        /^Run on Arca$/,
+      expect(await screen.findByTestId("new-chat-landing-connect-managed-host")).toHaveTextContent(
+        /^Connect managed host$/,
       );
       // A stopped instance is reached through Run on Arca, not a dead Cloud row.
       expect(screen.queryByTestId("new-chat-landing-host-arca-1")).toBeNull();
@@ -3939,8 +3958,8 @@ describe("Managed desktop host connection", () => {
     renderLanding();
     await openHostMenu();
 
-    const item = await screen.findByTestId("new-chat-landing-run-on-arca");
-    expect(item).toHaveTextContent(/^Run on Arca$/);
+    const item = await screen.findByTestId("new-chat-landing-connect-managed-host");
+    expect(item).toHaveTextContent(/^Connect managed host$/);
     expect(screen.queryByTestId("new-chat-landing-arca-subtitle")).toBeNull();
   });
 
@@ -3950,7 +3969,7 @@ describe("Managed desktop host connection", () => {
     vi.mocked(connectArcaHost).mockResolvedValue(result);
     renderLanding();
     await openHostMenu();
-    fireEvent.click(await screen.findByTestId("new-chat-landing-run-on-arca"));
+    fireEvent.click(await screen.findByTestId("new-chat-landing-connect-managed-host"));
     await waitFor(() => expect(vi.mocked(connectArcaHost)).toHaveBeenCalled());
     expect(screen.queryByTestId("new-chat-landing-arca-error")).toBeNull();
   }
@@ -3978,7 +3997,7 @@ describe("Managed desktop host connection", () => {
     });
     renderLanding();
     await openHostMenu();
-    fireEvent.click(await screen.findByTestId("new-chat-landing-run-on-arca"));
+    fireEvent.click(await screen.findByTestId("new-chat-landing-connect-managed-host"));
 
     const err = await screen.findByTestId("new-chat-landing-arca-error");
     expect(err.textContent).toContain("Couldn't reach the Arca instance.");
@@ -3994,7 +4013,7 @@ describe("Managed desktop host connection", () => {
     vi.mocked(connectArcaHost).mockResolvedValue({ ok: true, alreadyRunning: true });
     renderLanding();
     await openHostMenu();
-    fireEvent.click(await screen.findByTestId("new-chat-landing-run-on-arca"));
+    fireEvent.click(await screen.findByTestId("new-chat-landing-connect-managed-host"));
 
     // No 30s poll, no error — an explanatory toast instead.
     await waitFor(() =>
@@ -4017,7 +4036,7 @@ describe("Managed desktop host connection", () => {
     ]);
     renderLanding();
     await openHostMenu();
-    fireEvent.click(await screen.findByTestId("new-chat-landing-run-on-arca"));
+    fireEvent.click(await screen.findByTestId("new-chat-landing-connect-managed-host"));
     await waitFor(() =>
       expect(localStorage.getItem("omnigent:last-host-choice")).toBe("actual-arca"),
     );
@@ -4032,7 +4051,7 @@ describe("Managed desktop host connection", () => {
     ]);
     renderLanding();
     await openHostMenu();
-    fireEvent.click(await screen.findByTestId("new-chat-landing-run-on-arca"));
+    fireEvent.click(await screen.findByTestId("new-chat-landing-connect-managed-host"));
 
     // selectHost persists the pick — the observable effect of auto-selection.
     await waitFor(() => expect(localStorage.getItem("omnigent:last-host-choice")).toBe("arca-1"));

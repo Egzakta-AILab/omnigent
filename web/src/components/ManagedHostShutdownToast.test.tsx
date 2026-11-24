@@ -3,9 +3,9 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { toast, Toaster } from "sonner";
 import type * as SonnerModule from "sonner";
-import { ArcaShutdownToast } from "./ArcaShutdownToast";
-import { ArcaShutdownBanner } from "./ArcaShutdownBanner";
-import { useArcaShutdownBanner } from "@/hooks/useArcaShutdownBanner";
+import { ManagedHostShutdownToast } from "./ManagedHostShutdownToast";
+import { ManagedHostShutdownBanner } from "./ManagedHostShutdownBanner";
+import { useHostShutdownBanner } from "@/hooks/useHostShutdownBanner";
 import {
   isDismissedToday,
   isWarnedToday,
@@ -23,10 +23,12 @@ const state = vi.hoisted(() => ({
   now: new Date(2026, 9, 5, 17, 0),
   hosts: [{ host_id: "arca", name: "jackson's arca", status: "online" }],
   toastCalls: 0,
+  useHosts: vi.fn(),
 }));
 
 vi.mock("@/hooks/useHosts", () => ({
   useHosts: () => {
+    state.useHosts();
     return { data: state.hosts };
   },
 }));
@@ -52,15 +54,17 @@ function ToastPage({ showBanner = false }: { showBanner?: boolean }) {
   return (
     <>
       {showBanner && <BannerOnArcaHost />}
-      <ArcaShutdownToast />
+      <ManagedHostShutdownToast />
       <Toaster position="top-center" visibleToasts={100} />
     </>
   );
 }
 
 function BannerOnArcaHost() {
-  const warning = useArcaShutdownBanner();
-  return warning.showForHost("arca") ? <ArcaShutdownBanner warning={warning} /> : null;
+  const warning = useHostShutdownBanner();
+  return warning.showForHost(state.hosts[0]?.host_id) ? (
+    <ManagedHostShutdownBanner warning={warning} />
+  ) : null;
 }
 
 beforeEach(() => {
@@ -72,6 +76,7 @@ beforeEach(() => {
   state.now = MON_5PM;
   state.hosts = [{ host_id: "arca", name: "jackson's arca", status: "online" }];
   state.toastCalls = 0;
+  state.useHosts.mockClear();
   vi.mocked(copyText).mockReset().mockResolvedValue(undefined);
   toast.dismiss();
   delete (window as unknown as { omnigentDesktop?: unknown }).omnigentDesktop;
@@ -84,7 +89,14 @@ afterEach(() => {
   delete (window as unknown as { omnigentDesktop?: unknown }).omnigentDesktop;
 });
 
-describe("ArcaShutdownToast", () => {
+describe("ManagedHostShutdownToast", () => {
+  it("does not poll hosts or start a notification when disabled", () => {
+    state.enabled = false;
+    render(<ToastPage />);
+    expect(state.useHosts).not.toHaveBeenCalled();
+    expect(state.toastCalls).toBe(0);
+  });
+
   it("dismisses the Home toast when the Arca chat banner mounts", async () => {
     const view = render(<ToastPage />);
     expect(await screen.findByText("Arca shuts down at about 6 PM")).toBeInTheDocument();
@@ -98,7 +110,7 @@ describe("ArcaShutdownToast", () => {
   it("shows the toast in terminal view, where the transcript banner is unmounted", async () => {
     render(
       <>
-        <ArcaShutdownToast />
+        <ManagedHostShutdownToast />
         <div>Terminal view</div>
         <Toaster />
       </>,
@@ -202,8 +214,8 @@ describe("ArcaShutdownToast", () => {
   it("deduplicates across two instances through the warned storage key", () => {
     const view = render(
       <>
-        <ArcaShutdownToast />
-        <ArcaShutdownToast />
+        <ManagedHostShutdownToast />
+        <ManagedHostShutdownToast />
         <Toaster />
       </>,
     );
@@ -212,8 +224,8 @@ describe("ArcaShutdownToast", () => {
     state.now = TUE_5PM;
     view.rerender(
       <>
-        <ArcaShutdownToast />
-        <ArcaShutdownToast />
+        <ManagedHostShutdownToast />
+        <ManagedHostShutdownToast />
         <Toaster />
       </>,
     );

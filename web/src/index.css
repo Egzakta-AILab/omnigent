@@ -1573,7 +1573,7 @@ html[data-electron-mac] .breadcrumb-folder {
   }
 
   :is([data-ios-native], [data-android-native])
-    .chat-conversation-content.chat-content-under-arca-banner {
+    .chat-conversation-content.chat-content-under-host-banner {
     padding-top: 1rem;
   }
 
