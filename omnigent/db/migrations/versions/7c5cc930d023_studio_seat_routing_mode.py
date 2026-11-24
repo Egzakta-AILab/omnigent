@@ -21,4 +21,5 @@ def downgrade() -> None:
         sa.text("SELECT 1 FROM studio_seat_slots WHERE routing_mode != 'subscription' LIMIT 1")
     ):
         raise RuntimeError("Restore fallback slots to subscription routing before downgrade")
-    op.drop_column("studio_seat_slots", "routing_mode")
+    with op.batch_alter_table("studio_seat_slots") as batch:
+        batch.drop_column("routing_mode")

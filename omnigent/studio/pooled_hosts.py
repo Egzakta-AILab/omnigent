@@ -6,6 +6,7 @@ from typing import Any
 from fastapi import HTTPException, WebSocketException
 from starlette.requests import HTTPConnection
 
+from omnigent.entities import Conversation
 from omnigent.runner.routing import routing_host_session
 from omnigent.server.auth import AuthProvider, effective_admin
 from omnigent.stores.conversation_store import ConversationStore
@@ -31,18 +32,26 @@ def pooled_target(
     session_id: str | None,
     host_id: str | None,
 ) -> bool:
-    profiles = SandboxProfileStore(conversations)
-    if session_id:
-        session = conversations.get_conversation(session_id)
-        if session:
-            owner = routing_host_session(session, conversations) or session
-            labels = owner.labels or {}
-            if (
-                labels.get("sandbox_profile:provider") == PROVIDER
-                and labels.get("sandbox_profile:id") in POOLED_PROFILES
-            ):
-                return True
-            host_id = host_id or owner.host_id
+    session = conversations.get_conversation(session_id) if session_id else None
+    return _pooled_target(conversations, hosts, session_id, host_id, session)
+
+
+def _pooled_target(
+    conversations: ConversationStore,
+    hosts: HostStore | None,
+    session_id: str | None,
+    host_id: str | None,
+    session: Conversation | None,
+) -> bool:
+    if session:
+        owner = routing_host_session(session, conversations) or session
+        labels = owner.labels or {}
+        if (
+            labels.get("sandbox_profile:provider") == PROVIDER
+            and labels.get("sandbox_profile:id") in POOLED_PROFILES
+        ):
+            return True
+        host_id = host_id or owner.host_id
     if not host_id or hosts is None:
         return False
     host = hosts.get_host(host_id)
@@ -50,7 +59,9 @@ def pooled_target(
         return False
     # Lost/ambiguous provenance is closed. Account ownership alone never makes
     # an unclassified Coder host safe for interactive access.
-    snapshot = profiles.get_host_snapshot(host.host_id, reference_session_id=session_id)
+    snapshot = SandboxProfileStore(conversations).get_host_snapshot(
+        host.host_id, reference_session_id=session_id
+    )
     return not snapshot or snapshot.get("id") != "dev-personal"
 
 
@@ -76,7 +87,11 @@ def pooled_access_dependency(
                 uuid_to_bytes(session_id)
             if host_id:
                 uuid_to_bytes(host_id)
-            closed = pooled_target(conversations, hosts, session_id, host_id)
+            session = conversations.get_conversation(session_id) if session_id else None
+            closed = _pooled_target(conversations, hosts, session_id, host_id, session)
+            # Policy evaluation can reuse this request-local row for its ACL
+            # lookup. The routing owner may be a parent; keep the requested row.
+            connection.state.studio_checked_conversation = session
         except InvalidUuidError:
             return
         except ValueError:
