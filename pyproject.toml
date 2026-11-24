@@ -195,8 +195,11 @@ microsandbox = ["microsandbox>=0.6.9,<0.7"]
 cwsandbox = ["cwsandbox>=0.24,<1"]
 # E2B sandbox launcher (`omnigent sandbox --provider e2b` and
 # server-managed `sandbox.provider: e2b`).
-# Same lazy-import posture as above.
-e2b = ["e2b>=2.26,<3"]
+# The 2.26.0 backport fixes CVE-2026-132276 through wcmatch 11.2 while
+# retaining compatibility with the workspace API's ConnectRPC 0.13.
+e2b = [
+    "e2b @ https://github.com/Egzakta-AILab/E2B/archive/464a304606d25276e5ad533f665f2ceaab7ff8be.tar.gz#subdirectory=packages/python-sdk",
+]
 # Islo sandbox launcher (`omnigent sandbox --provider islo` and
 # server-managed `sandbox.provider: islo`). The launcher module ships in
 # the base package and imports the SDK lazily, so only users of the
