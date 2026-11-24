@@ -1,0 +1,140 @@
+name: Studio release build
+on:
+  pull_request:
+    paths:
+      - .github/workflows/studio-build.yml
+      - deploy/docker/Dockerfile
+      - deploy/docker/Dockerfile.dockerignore
+      - deploy/docker/studio_release.py
+      - tests/deploy/test_studio_release.py
+  workflow_dispatch:
+    inputs:
+      extensions_tag:
+        description: Published extensions release tag
+        required: true
+        type: string
+      extensions_commit:
+        description: Full commit SHA referenced by the tag
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.12'
+      - run: |
+          python -m pip install pytest
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -c /dev/null --noconftest -p no:cacheprovider -q tests/deploy/test_studio_release.py
+
+  release:
+    needs: verify
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.repository == 'Egzakta-AILab/omnigent' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    env:
+      EXT_TAG: ${{ inputs.extensions_tag }}
+      EXT_COMMIT: ${{ inputs.extensions_commit }}
+      IMAGE: ghcr.io/egzakta-ailab/omnigent-studio
+      OMNIGENT_CHECKOUT: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Verify the extension release
+        env:
+          GH_TOKEN: ${{ secrets.STUDIO_EXTENSIONS_READ_TOKEN }}
+        run: python deploy/docker/studio_release.py pin "$EXT_TAG" "$EXT_COMMIT"
+      - name: Verify private registry destination
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python deploy/docker/studio_release.py registry
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: Egzakta-AILab/studio-extensions
+          ref: ${{ inputs.extensions_commit }}
+          token: ${{ secrets.STUDIO_EXTENSIONS_READ_TOKEN }}
+          path: .studio-extensions
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: '22'
+      - name: Build private extension wheels
+        working-directory: .studio-extensions
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXT_COMMIT"
+          mkdir "$RUNNER_TEMP/extension-wheels"
+          # This fork is public. Keep private build output off the Actions console.
+          exec >"$RUNNER_TEMP/extension-build.log" 2>&1
+          npm ci --ignore-scripts
+          npm run build
+          for package in studio-rpc-contract egzakta-{coder,work,review,fleet,comms,release}; do
+            python -m pip wheel --no-deps --wheel-dir "$RUNNER_TEMP/extension-wheels" "packages/$package"
+          done
+      - name: Build and verify the server and CLI
+        run: |
+          set -eu
+          target="$IMAGE:$GITHUB_SHA-$EXT_COMMIT-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          docker buildx build --load --target studio -f deploy/docker/Dockerfile \
+            --build-context "studio-extension-wheels=$RUNNER_TEMP/extension-wheels" \
+            --build-arg "OMNIGENT_BUILD_SOURCE_COMMIT=$GITHUB_SHA" \
+            --build-arg "STUDIO_EXTENSION_TAG=$EXT_TAG" --build-arg "STUDIO_EXTENSION_COMMIT=$EXT_COMMIT" \
+            -t "$target" . >"$RUNNER_TEMP/studio-build.log" 2>&1
+          docker run --rm --network none --entrypoint sh "$target" -ec '
+            cd /opt/studio/wheels
+            sha256sum -c SHA256SUMS
+            python -c "from omnigent.onboarding.sandboxes.registry import get_provider_metadata; assert get_provider_metadata(\"egzakta.coder\").manages_profiles"
+            for extension in work review fleet comms release; do omni extensions doctor "egzakta.$extension"; done
+          ' >"$RUNNER_TEMP/studio-smoke.log" 2>&1
+          id=$(docker create "$target")
+          docker cp "$id:/opt/studio/wheels" "$RUNNER_TEMP/cli-wheels"
+          docker rm "$id"
+          python -m venv "$RUNNER_TEMP/studio-cli"
+          (cd "$RUNNER_TEMP/cli-wheels" && sha256sum -c SHA256SUMS &&
+           "$RUNNER_TEMP/studio-cli/bin/pip" install ./*.whl &&
+           "$RUNNER_TEMP/studio-cli/bin/pip" check &&
+           "$RUNNER_TEMP/studio-cli/bin/omni" extensions doctor egzakta.release) >"$RUNNER_TEMP/cli-smoke.log" 2>&1
+      - name: Recheck the release tag before publication
+        env:
+          GH_TOKEN: ${{ secrets.STUDIO_EXTENSIONS_READ_TOKEN }}
+        run: python deploy/docker/studio_release.py pin "$EXT_TAG" "$EXT_COMMIT"
+      - name: Install the verified OCI artifact client
+        uses: oras-project/setup-oras@22ce207df3b08e061f537244349aac6ae1d214f6
+        with:
+          url: https://github.com/oras-project/oras/releases/download/v1.3.0/oras_1.3.0_linux_amd64.tar.gz
+          checksum: 6cdc692f929100feb08aa8de584d02f7bcc30ec7d88bc2adc2054d782db57c64
+      - name: Publish verified artifacts to private GHCR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python deploy/docker/studio_release.py registry
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          target="$IMAGE:$GITHUB_SHA-$EXT_COMMIT-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          cli="$target-cli"
+          cd "$RUNNER_TEMP/cli-wheels"
+          layers=(SHA256SUMS:text/plain STUDIO-RELEASE.json:application/json)
+          for wheel in *.whl; do layers+=("$wheel:application/vnd.python.wheel"); done
+          oras push "$cli" --artifact-type application/vnd.egzakta.studio.cli.v1 "${layers[@]}" >"$RUNNER_TEMP/cli-publish.log"
+          wheel_digest=$(oras resolve "$cli")
+          [[ $wheel_digest =~ ^sha256:[0-9a-f]{64}$ ]]
+          docker push "$target"
+          image_digest=$(oras resolve "$target")
+          [[ $image_digest =~ ^sha256:[0-9a-f]{64}$ ]]
+          printf 'Server image %s@%s\n\nCLI wheels %s@%s\n' "$IMAGE" "$image_digest" "$IMAGE" "$wheel_digest" >> "$GITHUB_STEP_SUMMARY"
