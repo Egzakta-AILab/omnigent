@@ -474,7 +474,7 @@ async def test_studio_shared_issue_private_session_and_confirmation(db_uri, tmp_
     )
     auth = UnifiedAuthProvider(source="accounts", accounts_config=config)
     accounts = SqlAlchemyAccountStore(db_uri)
-    password = "fixture-only-password"
+    password = uuid4().hex
     hashed = hash_password(password)
     monkeypatch.setenv("OMNIGENT_WS_ALLOWED_ORIGINS", "http://test")
     permissions = SqlAlchemyPermissionStore(db_uri)
