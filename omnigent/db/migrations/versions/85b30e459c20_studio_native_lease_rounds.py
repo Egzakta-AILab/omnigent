@@ -18,4 +18,5 @@ def downgrade() -> None:
         sa.text("SELECT 1 FROM studio_agent_leases WHERE round_evidence_json IS NOT NULL LIMIT 1")
     ):
         raise RuntimeError("Export existing free-agent round evidence before downgrade")
-    op.drop_column("studio_agent_leases", "round_evidence_json")
+    with op.batch_alter_table("studio_agent_leases") as batch:
+        batch.drop_column("round_evidence_json")

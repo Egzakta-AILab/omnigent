@@ -41,10 +41,14 @@ def downgrade() -> None:
         op.get_bind().scalar(sa.text(f"SELECT 1 FROM {table} LIMIT 1"))
         for table in ("studio_api_budgets", "studio_dispatches")
     ) or op.get_bind().scalar(
-        sa.text("SELECT 1 FROM studio_agent_leases WHERE session_start IS NOT NULL LIMIT 1")
+        sa.text(
+            "SELECT 1 FROM studio_agent_leases "
+            "WHERE session_start IS NOT NULL OR session_id IS NOT NULL LIMIT 1"
+        )
     ):
         raise RuntimeError("Export existing Studio dispatch evidence before downgrade")
     op.drop_table("studio_api_budgets")
     op.drop_table("studio_dispatches")
-    op.drop_column("studio_agent_leases", "session_start")
-    op.drop_column("studio_agent_leases", "session_id")
+    with op.batch_alter_table("studio_agent_leases") as batch:
+        batch.drop_column("session_start")
+        batch.drop_column("session_id")
