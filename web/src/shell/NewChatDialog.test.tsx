@@ -307,6 +307,7 @@ const { showToastMock } = vi.hoisted(() => ({ showToastMock: vi.fn() }));
 vi.mock("@/components/ui/toast", () => ({ showToast: showToastMock }));
 vi.mock("@/hooks/useAvailableAgents", () => ({
   useAvailableAgents: vi.fn(),
+  fetchAgentCatalog: vi.fn(),
   prefetchAvailableAgentDetails: vi.fn(),
   fetchUserAgents: vi.fn(),
   USER_AGENTS_QUERY_KEY: ["available-agents-user"],
@@ -14328,5 +14329,93 @@ describe("NewChatLandingScreen picker curation", () => {
     expect(row("a1")).toBeNull();
     expect(row("a2")).not.toBeNull();
     expect(screen.queryByText("Harnesses")).toBeNull();
+  });
+});
+
+it("requires a verified Work selection before showing a task composer", async () => {
+  renderLanding({}, "/?studioStart=unknown&studioHost=foreign-host&studioWorkspace=/unchecked");
+  expect(await screen.findByRole("alert")).toHaveTextContent("Open the task again in Work");
+  expect(screen.queryByTestId("new-chat-landing")).not.toBeInTheDocument();
+});
+
+it("submits the nested checkout confirmed in Work and links the resulting session", async () => {
+  setupLandingMocks();
+  const taskId = "192b0bc8-99cf-41dc-9e39-0effa263fd49";
+  const sessionId = "acd9fb2f6eaf49c6b6b3922138b03c73";
+  const viewer = "alice";
+  getCurrentUserIdMock.mockReturnValue(viewer);
+  const { getOmnigentServerIdentity } = await import("@/lib/host");
+  const { studioSessionLocation } = await import("@/extensions/services/studioSession");
+  const projectsApi = await import("@/lib/projectsApi");
+  const repoSettings = await import("@/studio/RepositorySettingsDialog");
+  const catalog = await import("@/hooks/useAvailableAgents");
+  const config = { host_id: "host_1", workspace: "/Users/corey/repo" };
+  const project = { id: "proj_a", name: "Example", config };
+  const projects = vi.spyOn(projectsApi, "listProjects").mockResolvedValue([project]);
+  const settings = vi.spyOn(repoSettings, "requestSettings").mockResolvedValue({
+    revision: "rev1",
+    depth: 1,
+    truncated: false,
+    repositories: [
+      {
+        checkout: "ready",
+        role: "active",
+        origin: "git@github.com:Org/App.git",
+        path: "app",
+        declared: true,
+        branch: "main",
+      },
+    ],
+  });
+  vi.mocked(catalog.fetchAgentCatalog).mockResolvedValue({
+    agents: [{ ...DEFAULT_LANDING_AGENTS[1], builtin: true }],
+    suppressedNames: new Set(),
+  });
+  onTestFinished(() => {
+    projects.mockRestore();
+    settings.mockRestore();
+    vi.mocked(catalog.fetchAgentCatalog).mockReset();
+    setupLandingMocks();
+    cleanup();
+  });
+  useProjectsMock.mockReturnValue({ ...SUCCESS_QUERY_STATE, data: [project] });
+  useProjectConfigMock.mockReturnValue({ ...SUCCESS_QUERY_STATE, data: config });
+  const route = await studioSessionLocation(
+    {
+      taskId,
+      hostId: "host_1",
+      repository: "Org/App",
+      branch: "feature/confirmed",
+      harness: "codex-native",
+    },
+    new AbortController().signal,
+    viewer,
+    getOmnigentServerIdentity(),
+  );
+  authenticatedFetchMock.mockImplementation(
+    async () => new Response(JSON.stringify({ id: sessionId })),
+  );
+  renderLanding({}, "/" + route.search);
+  expect(await screen.findByText("Org/App · feature/confirmed · codex-native")).toBeVisible();
+  const post = (url: string) =>
+    authenticatedFetchMock.mock.calls.find(
+      ([path, opts]) => path === url && opts?.method === "POST",
+    );
+  expect(post("/v1/sessions")).toBeUndefined();
+  fireEvent.change(screen.getByTestId("new-chat-landing-input"), {
+    target: { value: "Implement acceptance" },
+  });
+  fireEvent.submit(screen.getByTestId("new-chat-landing-composer"));
+  const linkUrl = "/v1/extensions/egzakta.work/studio/v1/tasks/linkSession";
+  await waitFor(() => expect(post(linkUrl)).toBeDefined());
+  expect(JSON.parse(String(post("/v1/sessions")?.[1]?.body))).toMatchObject({
+    agent_id: "a2",
+    host_id: "host_1",
+    workspace: "/Users/corey/repo/app",
+    git: { branch_name: "feature/confirmed" },
+  });
+  expect(JSON.parse(String(post(linkUrl)?.[1]?.body))).toEqual({
+    task_id: taskId,
+    session_id: sessionId,
   });
 });

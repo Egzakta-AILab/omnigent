@@ -6777,7 +6777,7 @@ async def _launch_runner_on_host_locked(
             )
             host_conn.pending_launches[request_id] = launch_future
             try:
-                host_registry.send_text(host_conn, launch_frame)
+                await host_registry.send_launch(host_conn, launch_frame)
             except ConnectionError:
                 host_conn.pending_launches.pop(request_id, None)
                 launch_future.cancel()

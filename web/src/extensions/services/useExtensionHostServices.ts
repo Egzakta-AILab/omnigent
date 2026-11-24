@@ -18,6 +18,7 @@ import { isImplementationSession, issueWorkspaceUrl, linearIssueKey } from "@/li
 import { useNavigate } from "@/lib/routing";
 import type { ExtensionCatalogItem, ExtensionPullRequest } from "../types";
 import { ExtensionHostServiceError } from "./errors";
+import { studioSessionLocation } from "./studioSession";
 import { studioHostMethods } from "./studio";
 import { useLinearConfirmation } from "./useLinearConfirmation";
 import { grantedHostMethods } from "./registry";
@@ -99,7 +100,9 @@ export function useExtensionHostServices(extension: ExtensionCatalogItem) {
 
   const methods = useMemo(() => {
     const implementations = {
-      ...studioHostMethods(extension.id, authenticatedFetch, confirm),
+      ...studioHostMethods(extension.id, authenticatedFetch, confirm, (url) =>
+        externalUrlsRef.current.add(url),
+      ),
       "navigation.openPage": (params: unknown, signal: AbortSignal) => {
         throwIfAborted(signal);
         const input = objectParams(params);
@@ -136,6 +139,19 @@ export function useExtensionHostServices(extension: ExtensionCatalogItem) {
           );
         }
         window.open(url, "_blank", "noopener,noreferrer");
+        return null;
+      },
+      "navigation.openStudioSession": async (params: unknown, signal: AbortSignal) => {
+        if (extension.id !== "egzakta.work")
+          throw new ExtensionHostServiceError("PermissionDenied", "Work extension required");
+        navigate(
+          await studioSessionLocation(
+            objectParams(params),
+            signal,
+            await resolveIdentity(),
+            getOmnigentServerIdentity(),
+          ),
+        );
         return null;
       },
       "navigation.openNewSession": async (params: unknown, signal: AbortSignal) => {

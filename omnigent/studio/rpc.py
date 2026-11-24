@@ -19,6 +19,10 @@ class Page(Params):
     after: str | None = Field(default=None, max_length=128)
 
 
+class FleetPage(Page):
+    task_id: UUID | None = None
+
+
 class TaskKey(Params):
     linear_workspace: UUID
     linear_issue_id: UUID
@@ -36,6 +40,10 @@ class PullRequest(TaskRef):
     repository: Annotated[str, StringConstraints(pattern=r"^[\w.-]+/[\w.-]+$", max_length=200)]
     number: int = Field(ge=1, le=2147483647)
     head_sha: Annotated[str, StringConstraints(pattern=r"^[a-f0-9]{40}$")]
+
+
+class SessionRef(Params):
+    session_id: UUID
 
 
 class SessionLink(TaskRef):
@@ -95,3 +103,11 @@ class Seat(Params):
     encrypted_profile_ref: Annotated[str, StringConstraints(min_length=1, max_length=512)]
     enabled: bool = Field(strict=True)
     weight: int = Field(default=1, ge=1, le=100)
+
+
+class WorkspaceRef(Params):
+    host_id: UUID
+
+
+class Preview(PullRequest):
+    """Preview allocation requires the current task-linked pull request revision."""

@@ -27,7 +27,7 @@ import time
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal, Protocol, TypedDict
 
 from cachetools import TTLCache
@@ -44,6 +44,7 @@ from omnigent.harness_availability import HarnessAvailability
 from omnigent.host.frames import (
     CAP_CODEX_SIDE_CHAT,
     HostHelloFrame,
+    HostLaunchRunnerFrame,
     HostMcpServersResultFrame,
     HostMcpToolsResultFrame,
     HostPluginsResultFrame,
@@ -52,6 +53,7 @@ from omnigent.host.frames import (
     HostSkillContentResultFrame,
     HostSkillsResultFrame,
     HostWorkspaceReplyFrame,
+    decode_host_frame,
     encode_host_frame,
 )
 from omnigent.host.harness_startup import HarnessStartup
@@ -678,6 +680,9 @@ class HostRegistry:
         # server re-learns it from the reconnect handshake.
         self._gateway_inference: dict[str, dict[str, bool]] = {}
         self._interactive_shells: dict[str, list[str]] = {}
+        self.studio_profile_for_launch: (
+            Callable[[HostConnection, HostLaunchRunnerFrame], str | None] | None
+        ) = None
         self.launch_authorizer: (
             Callable[[str, str, str | None, str | None, bool, str | None], None] | None
         ) = None
@@ -984,6 +989,25 @@ class HostRegistry:
                 allow_unbound,
                 transfer_from_host_id,
             )
+
+    async def send_launch(self, conn: HostConnection, data: str) -> None:
+        if self.studio_profile_for_launch is not None:
+            frame = decode_host_frame(data)
+            if not isinstance(frame, HostLaunchRunnerFrame):
+                raise ValueError("Expected a runner launch")
+            try:
+                profile = await asyncio.to_thread(self.studio_profile_for_launch, conn, frame)
+            except Exception:  # noqa: BLE001 — isolate provider errors at the transport boundary.
+                # Settle the existing launch transaction before any frame is sent.
+                pending = conn.pending_launches.get(frame.request_id)
+                if pending is not None and not pending.done():
+                    pending.set_result(
+                        {"status": "failed", "error": "Studio seat admission unavailable"}
+                    )
+                return
+            if profile is not None:
+                data = encode_host_frame(replace(frame, studio_seat_profile=profile))
+        self.send_text(conn, data)
 
     def send_text(self, conn: HostConnection, data: str) -> None:
         """Enqueue a text frame for sending to the host.

@@ -19354,6 +19354,62 @@
         "title": "ToolOutputDeltaEvent",
         "type": "object"
       },
+      "Trigger": {
+        "additionalProperties": false,
+        "properties": {
+          "base_ref": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Base Ref",
+            "type": "string"
+          },
+          "base_sha": {
+            "pattern": "^[0-9a-f]{40}$",
+            "title": "Base Sha",
+            "type": "string"
+          },
+          "head_sha": {
+            "pattern": "^[0-9a-f]{40}$",
+            "title": "Head Sha",
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "delta",
+              "full"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "pull_number": {
+            "exclusiveMinimum": 0.0,
+            "format": "int64",
+            "title": "Pull Number",
+            "type": "integer"
+          },
+          "repository": {
+            "const": "Egzakta-AILab/KVARK",
+            "title": "Repository",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": "studio-review-trigger@1",
+            "title": "Schema Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "repository",
+          "pull_number",
+          "base_ref",
+          "base_sha",
+          "head_sha",
+          "mode"
+        ],
+        "title": "Trigger",
+        "type": "object"
+      },
       "TurnCancelledEvent": {
         "description": "Emitted when a turn is interrupted by the user or system.",
         "properties": {
@@ -35983,6 +36039,49 @@
           }
         },
         "summary": "Synthesize Review Run",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/studio/reviews/dispatch": {
+      "post": {
+        "operationId": "dispatch_automated_review_v1_studio_reviews_dispatch_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Trigger"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Dispatch Automated Review V1 Studio Reviews Dispatch Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Dispatch Automated Review",
         "tags": [
           "sessions"
         ]

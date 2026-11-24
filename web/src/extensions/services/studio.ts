@@ -34,6 +34,7 @@ export function studioHostMethods(
   extensionId: string,
   fetch: typeof globalThis.fetch,
   confirm: ConfirmLinear,
+  allowExternal?: (url: string) => void,
 ): StudioMethods {
   const base = `/v1/extensions/${encodeURIComponent(extensionId)}/studio/v1/`;
   async function post(path: string, params: unknown, signal: AbortSignal): Promise<unknown> {
@@ -65,6 +66,64 @@ export function studioHostMethods(
   for (const name of Object.keys(STUDIO_METHOD_PERMISSIONS) as StudioMethod[]) {
     const [, scope, method] = name.split(".");
     methods[name] = (params, signal) => post(`${scope}/${method}`, params, signal);
+  }
+  for (const name of [
+    "list",
+    "getOrCreate",
+    "updateAcceptance",
+    "linkPr",
+    "linkSession",
+  ] as const) {
+    methods[`studio.tasks.${name}`] = async (params, signal) => {
+      const result = object(await post(`tasks/${name}`, params, signal));
+      for (const task of Array.isArray(result.items) ? result.items : [result]) {
+        for (const pr of Array.isArray(task.pull_requests) ? task.pull_requests : []) {
+          if (
+            typeof pr.repository === "string" &&
+            /^[a-z0-9_-][a-z0-9_.-]*\/[a-z0-9_-][a-z0-9_.-]*$/i.test(pr.repository) &&
+            Number.isSafeInteger(pr.number) &&
+            pr.number > 0
+          ) {
+            allowExternal?.(`https://github.com/${pr.repository}/pull/${pr.number}`);
+          }
+        }
+      }
+      return result;
+    };
+  }
+  methods["studio.fleet.inventory"] = async (params, signal) => {
+    const result = object(await post("fleet/inventory", params, signal));
+    for (const preview of Array.isArray(result.previews) ? result.previews : []) {
+      if (
+        typeof preview.url === "string" &&
+        preview.url.startsWith("https://") &&
+        /^[0-9a-f]{40}$/.test(preview.requested_sha) &&
+        preview.requested_sha === preview.checked_out_sha
+      )
+        allowExternal?.(preview.url);
+    }
+    return result;
+  };
+  for (const name of ["getWalkthrough", "askFrozen", "dispute", "dismiss"] as const) {
+    methods[`studio.reviews.${name}`] = async (params, signal) => {
+      const result = object(await post(`reviews/${name}`, params, signal));
+      for (const list of [result.walkthrough, result.proofs, result.citations]) {
+        if (!Array.isArray(list)) continue;
+        for (const item of list) {
+          for (const url of [item?.url, item?.services_url]) {
+            if (
+              typeof url === "string" &&
+              /^https:\/\/github\.com\/Egzakta-AILab\/(?:KVARK|Services)\/blob\/[0-9a-f]{40}\/[^?#]+#L[1-9]\d*$/.test(
+                url,
+              )
+            ) {
+              allowExternal?.(url);
+            }
+          }
+        }
+      }
+      return result;
+    };
   }
   methods["studio.tasks.syncLinearConfirmed"] = async (params, signal) => {
     const input = object(params);

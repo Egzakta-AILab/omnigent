@@ -83,7 +83,8 @@ import { useSessionAgent } from "@/hooks/useAgents";
 import { useSession } from "@/hooks/useSession";
 import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { STUDIO_ISSUE_LABEL } from "@/lib/studioIssue";
-import { SessionTaskBrief } from "@/studio/IssueWorkspace";
+import { SessionTaskBrief, SharedSessionTaskBrief } from "@/studio/IssueWorkspace";
+import { useExtensions } from "@/extensions/ExtensionProvider";
 import { ProfileEditorDialog } from "@/studio/reviews/ProfileEditorDialog";
 import type { SessionLiveness } from "@/hooks/useSessionLiveness";
 import {
@@ -972,6 +973,14 @@ function WorkspacePanelImpl({
     serverInfo.studio_workspace_settings;
   const { session } = useSession(!pending && (profilesEnabled || open) ? conversationId : null);
   const issue = session?.labels?.[STUDIO_ISSUE_LABEL];
+  const hasWork = useExtensions().some(
+    (e) =>
+      e.id === "egzakta.work" && e.status === "enabled" && e.permissions.includes("studio.tasks"),
+  );
+  const issueBrief =
+    open && session?.projectId && issue ? (
+      <SessionTaskBrief projectId={session.projectId} issue={issue} sessionId={session.id} />
+    ) : null;
   const canManageProfiles =
     profilesEnabled &&
     !!session?.hostId &&
@@ -1808,8 +1817,10 @@ function WorkspacePanelImpl({
         className="relative flex h-full min-h-0 shrink-0 flex-col"
         style={{ width: maximized ? "100%" : width }}
       >
-        {open && session?.projectId && issue && (
-          <SessionTaskBrief projectId={session.projectId} issue={issue} sessionId={session.id} />
+        {open && session && hasWork ? (
+          <SharedSessionTaskBrief sessionId={session.id} fallback={issueBrief} />
+        ) : (
+          issueBrief
         )}
         {/* Left-edge horizontal resize handle — suppressed while maximized. */}
         {!maximized && (

@@ -145,6 +145,18 @@ class StudioTaskStore:
                 else rows
             )
 
+    def tasks_for_session(self, session_id: UUID) -> list[Record]:
+        sid = str(session_id)
+        with self.read("tasks_for_session") as db:
+            query = (
+                select(SqlStudioTask)
+                .filter_by(workspace_id=current_workspace_id())
+                .where(SqlStudioTask.links_json.contains(json.dumps(sid)))
+                .order_by(SqlStudioTask.id)
+            )
+            tasks = (_task(row) for row in db.scalars(query))
+            return [task for task in tasks if sid in task["session_ids"]]
+
     def change_task(
         self, actor: str, value: rpc.Acceptance | rpc.PullRequest | rpc.SessionLink
     ) -> Record:
@@ -297,15 +309,147 @@ class StudioTaskStore:
                     row.state = "passed"
                 elif value.round == 3:
                     row.state = "escalated"
+                    task = _require_task(db, UUID(row.task_id))
+                    evidence = [
+                        f"Dispatch {UUID(row.idempotency_key)} failed all three rounds.",
+                        f"Native harness: {row.harness}.",
+                    ]
+                    for pr in _task(task)["pull_requests"][:10]:
+                        evidence.append(f"{pr['repository']}#{pr['number']} at {pr['head_sha']}")
+                    card = rpc.Handoff(
+                        task_id=UUID(row.task_id),
+                        schema_version="studio-handoff@1",
+                        request_id=uuid4(),
+                        recipient=actor,
+                        question=(
+                            "The free agent reached its three-round limit. "
+                            "Review the evidence and choose the next action."
+                        ),
+                        evidence=evidence,
+                    )
+                    db.add(
+                        SqlStudioTaskHandoff(
+                            request_id=card.request_id.hex,
+                            task_id=row.task_id,
+                            schema_version=card.schema_version,
+                            sender="Studio Fleet",
+                            sender_generation=None,
+                            recipient=actor,
+                            recipient_generation=registration,
+                            packet_json=card.model_dump_json(),
+                        )
+                    )
+
             if row.state == "active":
                 row.lease_expires_at = now + LEASE_SECONDS
             return _lease(row, now)
 
         return self._change(actor, "lease", change)
 
+    def begin_agent(self, actor: str, value: rpc.LeaseClaim) -> Record:
+        self.update_lease(actor, value)
+
+        def claim(db: Session) -> Record:
+            row = db.get(
+                SqlStudioAgentLease,
+                (current_workspace_id(), value.idempotency_key.hex),
+                with_for_update=True,
+            )
+            assert row is not None
+            receipt = _lease(row, int(self.clock()))
+            if row.actor != actor or row.actor_generation != require_active_account(db, actor):
+                raise HTTPException(404, "Dispatch not found")
+            if row.session_start or row.state != "active":
+                return {**receipt, "launch": False}
+            task = _require_task(db, value.task_id)
+            if not task.acceptance_check.strip():
+                raise HTTPException(409, "A shared acceptance check is required")
+            row.session_id = uuid4().hex
+            row.session_start = "pending"
+            return {
+                **receipt,
+                "launch": True,
+                "session_id": row.session_id,
+                "acceptance_check": task.acceptance_check,
+            }
+
+        return self._change(actor, "begin_agent", claim)
+
+    def complete_agent(
+        self, actor: str, key: UUID, started: bool, *, queued: bool = False
+    ) -> None:
+        def complete(db: Session) -> None:
+            row = db.get(
+                SqlStudioAgentLease, (current_workspace_id(), key.hex), with_for_update=True
+            )
+            if row is None or (row.actor, row.actor_generation) != (
+                actor,
+                require_active_account(db, actor),
+            ):
+                raise HTTPException(404, "Dispatch not found")
+            if queued:
+                row.session_start = None
+                row.session_id = None
+                return
+            row.session_start = "started" if started else "unknown"
+            if not started:
+                row.state = "unknown"
+
+        self._change(actor, "complete_agent", complete)
+
+    def task_prs(self, task_id: UUID) -> list[Record]:
+        with self.read("task_previews") as db:
+            return _task(_require_task(db, task_id))["pull_requests"]
+
+    def expired_sessions(self, after: str = "", only: str | None = None) -> list[tuple[str, str]]:
+        def scan(db: Session) -> list[tuple[str, str]]:
+            now = int(self.clock())
+            query = (
+                select(SqlStudioAgentLease)
+                .where(
+                    SqlStudioAgentLease.workspace_id == current_workspace_id(),
+                    SqlStudioAgentLease.session_id.is_not(None),
+                    SqlStudioAgentLease.session_start.in_(("pending", "started", "unknown")),
+                    (SqlStudioAgentLease.state != "active")
+                    | (SqlStudioAgentLease.lease_expires_at <= now),
+                )
+                .order_by(SqlStudioAgentLease.idempotency_key)
+            )
+            if after:
+                query = query.where(SqlStudioAgentLease.idempotency_key > after)
+            if only:
+                query = query.where(SqlStudioAgentLease.idempotency_key == only)
+            query = query.limit(100).with_for_update()
+            rows = db.scalars(query).all()
+            for row in rows:
+                _lease(row, now)
+            return [(row.idempotency_key, row.session_id) for row in rows if row.session_id]
+
+        return run_write_transaction(self.write, "expired_sessions", scan)
+
+    def mark_stopped(self, key: str, session_id: str) -> None:
+        def stop(db: Session) -> None:
+            row = db.get(SqlStudioAgentLease, (current_workspace_id(), key), with_for_update=True)
+            if row and row.session_id == session_id and row.state != "active":
+                row.session_start = "stopped"
+
+        run_write_transaction(self.write, "agent_stopped", stop)
+
+    def require_task_pr(self, actor: str, value: rpc.Preview) -> None:
+        def verify(db: Session) -> None:
+            task = _task(_require_task(db, value.task_id))
+            if value.model_dump(exclude={"task_id"}) not in task["pull_requests"]:
+                raise HTTPException(409, "The shared task does not reference this exact head")
+
+        self._change(actor, "require_task_pr", verify)
+
     def inventory(self, actor: str, page: rpc.Page) -> Record:
         def read(db: Session) -> Record:
-            query = select(SqlStudioAgentLease).filter_by(workspace_id=current_workspace_id())
+            query = select(SqlStudioAgentLease).filter_by(
+                workspace_id=current_workspace_id(),
+                actor=actor,
+                actor_generation=require_active_account(db, actor),
+            )
             if page.after:
                 query = query.where(SqlStudioAgentLease.idempotency_key > UUID(page.after).hex)
             leases = db.scalars(

@@ -77,6 +77,7 @@ export interface ExtensionContext {
     ): Promise<void>;
     openSession(sessionId: string): Promise<void>;
     /** Opens the composer; with `projectId`, the new session is filed under that project. */
+    openStudioSession(options: {hostId:string;repository:string;branch:string;harness:string;taskId:string;projectId?:string;prompt?:string;issue?:string}): Promise<void>;
     openNewSession(options?: {
       projectId?: string;
       prompt?: string;
@@ -268,6 +269,7 @@ export function defineExtension(lifecycle: ExtensionLifecycle): void {
       async openSession(sessionId) {
         await request("navigation.openSession", { sessionId });
       },
+      async openStudioSession(options) { await request("navigation.openStudioSession", options); },
       async openNewSession(options) {
         await request("navigation.openNewSession", {
           ...(options?.projectId !== undefined

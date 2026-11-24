@@ -4135,7 +4135,9 @@ def register_events_routes(
         runner_id: str | None,
     ) -> dict[str, bool | str]:
         """Pin initial review input or resume the bound session for a follow-up."""
-        if body.type != "message" or body.data.get("role") != "user":
+        if not (body.type == "stop_session" and runner_id) and (
+            body.type != "message" or body.data.get("role") != "user"
+        ):
             raise OmnigentError(
                 "A review starts with a user message", code=ErrorCode.INVALID_INPUT
             )

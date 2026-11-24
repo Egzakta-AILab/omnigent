@@ -4,16 +4,29 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import json
 import logging
+import os
 import posixpath
-from collections.abc import Awaitable, Callable
-from contextlib import suppress
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Any, Literal, TypeVar, cast
 from urllib.parse import urlsplit
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Request, Response
+import httpx
+from fastapi import (
+    APIRouter,
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    Path,
+    Query,
+    Request,
+    Response,
+)
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 
 from omnigent.db.account_authority import account_generation
@@ -22,7 +35,10 @@ from omnigent.entities import Conversation, Project
 from omnigent.errors import OmnigentError
 from omnigent.extensions.review_panel import creator_pilot_enabled
 from omnigent.harness_availability import reported_harness_availability
-from omnigent.native.native_coding_agents import native_coding_agent_for_agent_name
+from omnigent.native.native_coding_agents import (
+    CLAUDE_NATIVE_AGENT_NAME,
+    native_coding_agent_for_agent_name,
+)
 from omnigent.runner.session_prs import PullRequestRef
 from omnigent.server.auth import (
     RESERVED_USER_LOCAL,
@@ -64,7 +80,9 @@ from omnigent.stores import AgentStore, ConversationStore
 from omnigent.stores.artifact_store import ArtifactStore
 from omnigent.stores.permission_store import PermissionStore
 from omnigent.stores.project_store import ProjectStore
+from omnigent.stores.sandbox_profile_store import SandboxProfileStore
 from omnigent.stores.studio_creator_installation import CreatorInstallationConflict
+from omnigent.stores.studio_review_queue import ReviewQueue
 from omnigent.stores.studio_review_store import (
     ReviewConflictError,
     ReviewNotFoundError,
@@ -81,6 +99,7 @@ from omnigent.studio.creator_panel import (
     compile_creator_panel,
     creator_panel_contract,
 )
+from omnigent.studio.reviews import automated
 from omnigent.studio.reviews.artifacts import (
     EvidenceCheckSelection,
     EvidenceStorageError,
@@ -155,6 +174,7 @@ from omnigent.studio.reviews.models import (
     Sha,
 )
 from omnigent.studio.reviews.plan import plan_digest, plan_instructions, read_plan_proposal
+from omnigent.studio.reviews.product_pack import Trigger, capture_configured, unavailable
 from omnigent.studio.reviews.publication import delivery_body
 from omnigent.studio.reviews.questions import question_prompt, read_question_answer
 from omnigent.studio.reviews.report import (
@@ -577,7 +597,45 @@ def create_studio_reviews_router(
     artifact_store: ArtifactStore | None = None,
 ) -> APIRouter:
     """Expose owner-private captures, native starts and saved review reports."""
-    router = APIRouter()
+
+    @asynccontextmanager
+    async def queue_lifespan(app: FastAPI) -> AsyncIterator[None]:
+        async def wake_worker() -> None:
+            # Re-enter through the normal account middleware, including generation checks.
+            # A process restart can leave a queued revision with no incoming GitHub event.
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://studio-worker.internal"
+            ) as client:
+                while True:
+                    token = os.environ.get("OMNIGENT_STUDIO_REVIEW_TOKEN")
+                    if token and os.environ.get("OMNIGENT_STUDIO_REVIEW_PROJECT"):
+                        try:
+                            response = await client.post(
+                                "/v1/studio/reviews/worker/tick",
+                                json={},
+                                headers={"Authorization": f"Bearer {token}"},
+                            )
+                            response.raise_for_status()
+                        except httpx.HTTPError as exc:
+                            logging.getLogger(__name__).warning(
+                                "Studio queue wake failed (%s)", type(exc).__name__
+                            )
+                    await asyncio.sleep(60)
+
+        worker = asyncio.create_task(wake_worker())
+        try:
+            yield
+        finally:
+            worker.cancel()
+            with suppress(asyncio.CancelledError):
+                await worker
+            drains = tuple(queue_drains)
+            for pending in drains:
+                pending.cancel()
+            await asyncio.gather(*drains, return_exceptions=True)
+
+    queue_drains: set[asyncio.Task[None]] = set()
+    router = APIRouter(lifespan=queue_lifespan)
     service = ReviewService(review_store)
     evidence_transfers = asyncio.Semaphore(4)
     active_checks: set[asyncio.Task[None]] = set()
@@ -1147,7 +1205,12 @@ def create_studio_reviews_router(
         return await verified_current_project_patch(workspace, target, owner, run_id)
 
     async def launch_member(
-        request: Request, review: ReviewPass, idempotency_key: str, *, run: ReviewRun | None
+        request: Request,
+        review: ReviewPass,
+        idempotency_key: str,
+        *,
+        run: ReviewRun | None,
+        frozen_prompt: str | None = None,
     ) -> ReviewPass:
         owner = review.owner_user_id
         target = review.target
@@ -1192,6 +1255,10 @@ def create_studio_reviews_router(
         async def prepare() -> str:
             await validate_profile()
             await _qualify_skill(request, review)
+            if frozen_prompt is not None:
+                if isolated:
+                    raise HTTPException(409, "Automation requires the bot's clean review project")
+                return frozen_prompt
             if project_id is None:
                 current = await capture_context(request, target.origin_id, target.pr_url)
                 if current != target:
@@ -1409,6 +1476,170 @@ def create_studio_reviews_router(
                     conv.workspace != target.workspace and not isolated_binding
                 ):
                     raise HTTPException(409, "The linked reviewer session binding changed")
+
+    async def run_automated_lens(
+        request: Request, rid: str, capture: dict[str, Any], lens: str
+    ) -> automated.LensResult:
+        actor = require_user(request, auth_provider)
+        cfg = json.loads(os.environ["OMNIGENT_STUDIO_REVIEW_PROJECT"])
+        project_id = studio_identifier(cfg["project_id"])
+        host_id = studio_identifier(cfg["host_id"])
+        host, _, _ = await _connected_review_host(request, actor, host_id)
+        snapshot = await asyncio.to_thread(
+            SandboxProfileStore(conversation_store).get_host_snapshot, host_id
+        )
+        if (
+            host.sandbox_provider != "egzakta.coder"
+            or not snapshot
+            or (snapshot.get("provider"), snapshot.get("id")) != ("egzakta.coder", "bot-review")
+        ):
+            raise unavailable("Automation requires the closed bot-review Coder host")
+        workspace = await resolve_project_workspace(
+            request,
+            project_store,
+            project_id=project_id,
+            owner_id=actor,
+            host_id=host_id,
+            workspace=cfg["workspace"],
+        )
+        target = await _capture_project_target(
+            workspace,
+            cfg["repository_path"],
+            f"https://github.com/{capture['repository']}/pull/{capture['pull_number']}",
+        )
+        if (target.base_sha, target.head_sha) != (capture["base_sha"], capture["head_sha"]):
+            raise HTTPException(409, "The review checkout is no longer on the queued revision")
+        digest = hashlib.sha256(capture["profiles"][lens].encode()).hexdigest()
+        settings = CaptureReviewRequest(
+            expected_base_sha=target.base_sha,
+            expected_head_sha=target.head_sha,
+            agent_id=builtin_agent_id(CLAUDE_NATIVE_AGENT_NAME),
+            harness="claude-native",
+            profile_id=lens,
+            profile_digest=digest,
+            model=cfg.get("model"),
+        )
+        profile = (await resolve_profile(actor, settings)).model_copy(
+            update={"role": ReviewRole(id=lens, label=lens, digest=digest)}
+        )
+        receipt = await asyncio.to_thread(
+            review_store.capture,
+            owner_user_id=actor,
+            idempotency_key=f"studio-auto-{rid}-{lens}",
+            request_hash=hashlib.sha256(f"{rid}/{lens}/{digest}".encode()).hexdigest(),
+            target=target,
+            profile=profile,
+        )
+        review = receipt.review
+        prompt = automated.lens_prompt(review, capture, lens)
+        try:
+            review = await launch_member(
+                request, review, f"studio-review-start-{review.id}", run=None, frozen_prompt=prompt
+            )
+            if review.dispatch_status != "running":
+                raise unavailable("Native review launch could not be confirmed")
+            await verify_report_session(review)
+            while True:
+                state, result = await asyncio.to_thread(
+                    automated.native_result, conversation_store, review, prompt
+                )
+                if result is not None:
+                    return result
+                if state != "pending":
+                    raise unavailable("Native reviewer returned an incomplete revision receipt")
+                await asyncio.sleep(2)
+        finally:
+            # Release the pooled native process, including when the 20-minute lease expires.
+            if send_review is not None:
+                session = await asyncio.to_thread(conversation_store.get_conversation, review.id)
+                if (
+                    session is not None
+                    and session.runner_id
+                    and session.agent_id == review.profile.agent_id
+                ):
+                    await send_review(
+                        request,
+                        review.id,
+                        SessionEventInput(type="stop_session"),
+                        session.runner_id,
+                    )
+
+    async def drain_review_queue(request: Request, queue: ReviewQueue, repository: str) -> None:
+        while job := await asyncio.to_thread(queue.claim, repository):
+            rid, capture = job
+
+            async def run_lens(
+                rid: str, capture: dict[str, Any], lens: str
+            ) -> tuple[str, automated.LensResult | None]:
+                try:
+                    async with asyncio.timeout(1200):
+                        return lens, await run_automated_lens(request, rid, capture, lens)
+                except (
+                    OmnigentError,
+                    HTTPException,
+                    KeyError,
+                    ValueError,
+                    TimeoutError,
+                    ReviewConflictError,
+                ):
+                    return lens, None
+
+            reports = await asyncio.gather(
+                *(run_lens(rid, capture, lens) for lens in capture["selected_lenses"])
+            )
+            ready = {lens: item for lens, item in reports if item is not None}
+            result = automated.freeze(capture, ready, len(ready) != len(reports))
+            await asyncio.to_thread(queue.finish, rid, result)
+
+    def require_bot(request: Request) -> str:
+        actor = require_user(request, auth_provider)
+        expected = os.environ.get("OMNIGENT_STUDIO_REVIEW_TOKEN", "")
+        if (
+            not actor
+            or not expected
+            or not hmac.compare_digest(
+                request.headers.get("authorization", "").encode(), f"Bearer {expected}".encode()
+            )
+            or actor != os.environ.get("OMNIGENT_STUDIO_REVIEW_BOT_ACCOUNT", "studio-bot")
+        ):
+            raise HTTPException(403, "Review dispatch requires the authenticated Studio bot")
+        return actor
+
+    def wake_queue(request: Request, queue: ReviewQueue) -> None:
+        # One local drain is sufficient; database admission serializes across replicas.
+        # Each repository can receive new work immediately after the drain exits.
+        task = asyncio.create_task(drain_review_queue(request, queue, "Egzakta-AILab/KVARK"))
+        queue_drains.add(task)
+        task.add_done_callback(queue_drains.discard)
+
+    @router.post("/studio/reviews/worker/tick", dependencies=_WRITE_GATES, include_in_schema=False)
+    async def recover_automated_reviews(request: Request) -> dict[str, bool]:
+        require_bot(request)
+        wake_queue(request, ReviewQueue(review_store.storage_location))
+        return {"accepted": True}
+
+    @router.post("/studio/reviews/dispatch", dependencies=_WRITE_GATES)
+    async def dispatch_automated_review(request: Request, body: Trigger) -> dict[str, Any]:
+        actor = require_bot(request)
+        queue = ReviewQueue(review_store.storage_location)
+        capture = await asyncio.to_thread(capture_configured, body)
+        try:
+            accounts = json.loads(os.environ.get("OMNIGENT_STUDIO_GITHUB_ACCOUNTS", "{}"))
+            leads = json.loads(os.environ.get("OMNIGENT_STUDIO_REVIEW_LEADS", "[]"))
+            if (
+                not isinstance(accounts, dict)
+                or not all(isinstance(v, str) for v in accounts.values())
+                or not isinstance(leads, list)
+                or not all(isinstance(v, str) for v in leads)
+            ):
+                raise ValueError("Invalid identity map")
+        except ValueError as exc:
+            raise unavailable("Review identity configuration is invalid") from exc
+        receipt = await asyncio.to_thread(
+            queue.enqueue, actor, body, capture, {k.lower(): v for k, v in accounts.items()}, leads
+        )
+        wake_queue(request, queue)
+        return receipt
 
     async def current_proposal(run: ReviewRun) -> ReviewPlanProposal:
         assert run.coordinator is not None

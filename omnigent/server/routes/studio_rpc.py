@@ -1,10 +1,15 @@
 """Versioned extension RPCs for org-readable Studio tasks and private sessions."""
 
 import asyncio
+import logging
+import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager, suppress
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+import httpx
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response
 from pydantic import ValidationError
 
 from omnigent.db.account_authority import account_generation
@@ -31,9 +36,10 @@ from omnigent.server.routes._content_type import require_json_content_type
 from omnigent.server.routes._origin import require_trusted_origin
 from omnigent.stores.conversation_store import ConversationStore
 from omnigent.stores.permission_store import PermissionStore
+from omnigent.stores.studio_review_queue import ReviewQueue
 from omnigent.stores.studio_review_store import ReviewNotFoundError, StudioReviewStore
 from omnigent.stores.studio_tasks import StudioTaskStore
-from omnigent.studio import rpc
+from omnigent.studio import fleet, rpc
 from omnigent.studio.linear_write import write_linear
 
 
@@ -47,9 +53,62 @@ def create_studio_rpc_router(
     auth: AuthProvider | None,
 ) -> APIRouter:
     handlers = load_studio_handlers(extensions)
+
+    @asynccontextmanager
+    async def lease_lifespan(app: FastAPI) -> AsyncIterator[None]:
+        async def sweep() -> None:
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://studio-worker.internal"
+            ) as client:
+                while True:
+                    if os.getenv("OMNIGENT_STUDIO_DISPATCH_ACCOUNT") and (
+                        key_file := os.getenv("OMNIGENT_STUDIO_DISPATCH_TOKEN_FILE")
+                    ):
+                        try:
+                            from pathlib import Path
+
+                            from omnigent.studio.credential_agent import protected_file
+
+                            token = protected_file(Path(key_file)).strip()
+                            response = await client.post(
+                                "/v1/studio/fleet/reap",
+                                json={},
+                                headers={"Authorization": f"Bearer {token}"},
+                            )
+                            response.raise_for_status()
+                        except (ValueError, OSError, httpx.HTTPError) as exc:
+                            logging.getLogger(__name__).warning(
+                                "Studio lease sweep unavailable (%s)", type(exc).__name__
+                            )
+                    await asyncio.sleep(5)
+
+        worker = asyncio.create_task(sweep())
+        try:
+            yield
+        finally:
+            worker.cancel()
+            with suppress(asyncio.CancelledError):
+                await worker
+
     router = APIRouter(
-        dependencies=[Depends(require_json_content_type), Depends(require_trusted_origin)]
+        lifespan=lease_lifespan,
+        dependencies=[Depends(require_json_content_type), Depends(require_trusted_origin)],
     )
+
+    @router.post("/studio/fleet/reap", include_in_schema=False)
+    async def reconcile_expired(request: Request) -> dict[str, bool]:
+        actor = require_user(request, auth)
+        if (
+            not actor
+            or actor != os.getenv("OMNIGENT_STUDIO_DISPATCH_ACCOUNT")
+            or not permissions
+            or not effective_admin(await asyncio.to_thread(permissions.is_admin, actor))
+        ):
+            raise HTTPException(403, "Fleet worker required")
+        if not tasks:
+            raise fleet.unavailable("Studio dispatch store is unavailable")
+        await fleet.reap(request, tasks)
+        return {"processed": True}
 
     @router.post("/extensions/{extension_id}/studio/v1/{scope}/{method}")
     async def invoke(
@@ -118,6 +177,16 @@ def create_studio_rpc_router(
                         tasks.task_list, rpc.Page.model_validate(params)
                     )
                     return {"items": await asyncio.to_thread(filter_sessions, rows)}
+                if method == "forSession":
+                    target = rpc.SessionRef.model_validate(params)
+                    await require_access(
+                        actor, target.session_id.hex, LEVEL_READ, permissions, conversations
+                    )
+                    rows = await asyncio.to_thread(tasks.tasks_for_session, target.session_id)
+                    visible = await asyncio.to_thread(filter_sessions, rows)
+                    return {
+                        "items": [r for r in visible if str(target.session_id) in r["session_ids"]]
+                    }
                 if method == "getOrCreate":
                     return await filtered(
                         await asyncio.to_thread(
@@ -184,9 +253,43 @@ def create_studio_rpc_router(
                         tasks.respond, actor, rpc.Response.model_validate(params)
                     )
             if scope == "fleet":
+                if method in ("report", "shadowReport"):
+                    from omnigent.studio.verification import fleet_report, shadow_report
+
+                    if not effective_admin(await asyncio.to_thread(permissions.is_admin, actor)):
+                        raise HTTPException(403, "Studio reporting requires an administrator")
+                    window = params.get("window", "7d")
+                    if not isinstance(window, str):
+                        raise HTTPException(422, "Invalid report window")
+                    if method == "report":
+                        return await asyncio.to_thread(
+                            fleet_report, request, tasks, window, conversations, permissions
+                        )
+                    return await asyncio.to_thread(shadow_report, tasks, window)
                 if method == "inventory":
+                    return await fleet.inventory(
+                        request,
+                        tasks,
+                        actor,
+                        rpc.FleetPage.model_validate(params),
+                    )
+                if method == "dispatchFreeAgent":
+                    return await fleet.dispatch(
+                        request, tasks, actor, rpc.LeaseClaim.model_validate(params)
+                    )
+                if method in ("wakeWorkspace", "stopWorkspace"):
                     return await asyncio.to_thread(
-                        tasks.inventory, actor, rpc.Page.model_validate(params)
+                        fleet.control,
+                        request,
+                        actor,
+                        method,
+                        rpc.WorkspaceRef.model_validate(params),
+                    )
+                if method == "allocatePreview":
+                    if not effective_admin(await asyncio.to_thread(permissions.is_admin, actor)):
+                        raise HTTPException(403, "Preview allocation requires a Studio operator")
+                    return await asyncio.to_thread(
+                        fleet.allocate, request, tasks, actor, rpc.Preview.model_validate(params)
                     )
                 if method == "claimLease":
                     return await asyncio.to_thread(
@@ -197,15 +300,27 @@ def create_studio_rpc_router(
                         tasks.update_lease, actor, rpc.LeaseRef.model_validate(params)
                     )
                 if method == "finishRound":
-                    return await asyncio.to_thread(
-                        tasks.update_lease, actor, rpc.FinishRound.model_validate(params)
-                    )
+                    value = rpc.FinishRound.model_validate(params)
+                    result = await asyncio.to_thread(tasks.update_lease, actor, value)
+                    if result["state"] != "active":
+                        await fleet.reap(request, tasks, value.idempotency_key.hex)
+                    return result
                 if method == "adminSeats":
                     if not effective_admin(await asyncio.to_thread(permissions.is_admin, actor)):
                         raise HTTPException(403, "Seat administration requires an administrator")
                     return await asyncio.to_thread(
                         tasks.admin_seat, actor, rpc.Seat.model_validate(params)
                     )
+            if scope == "reviews" and method in {
+                "listQueue",
+                "getWalkthrough",
+                "dispute",
+                "dismiss",
+                "askFrozen",
+            }:
+                return await asyncio.to_thread(
+                    ReviewQueue(tasks.storage_location).rpc, actor, method, params
+                )
             if (scope, method) == ("reviews", "listRuns"):
                 page = rpc.Page.model_validate(params)
                 mode = getattr(request.app.state, "sharing_mode", lambda: SharingMode.ON)()

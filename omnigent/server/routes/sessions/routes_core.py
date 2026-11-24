@@ -1343,7 +1343,7 @@ def register_core_routes(
         launch_timeout_s = resolve_launch_timeout_s()
         launch_result: HostLaunchResult
         try:
-            host_registry.send_text(conn, launch_frame)
+            await host_registry.send_launch(conn, launch_frame)
             launch_result = await asyncio.wait_for(future, timeout=launch_timeout_s)
         except ConnectionError as exc:
             launch_result = {"status": "failed", "error": str(exc)}
@@ -1703,6 +1703,8 @@ def register_core_routes(
                 conversation_store=conversation_store,
                 scheduled_task_store=getattr(request.app.state, "scheduled_task_store", None),
             )
+        from omnigent.studio.fleet import agent_session_id
+
         creation_metadata(parent_session_id=body.parent_session_id, host_type=body.host_type)
         resp, conv, resolved_body = await _create_session_from_existing_agent(
             conversation_store,
@@ -1730,7 +1732,7 @@ def register_core_routes(
                 launching_task.id if launching_task is not None else None
             ),
             review_profile=review_profile,
-            conversation_id=reviewer_session_id,
+            conversation_id=reviewer_session_id or agent_session_id(user_id),
         )
         # Notify the runner about the new session so it can resolve
         # the spec and cache sub_agent_name before the first turn.

@@ -77,6 +77,7 @@ RUNNER_LOG_TAIL_HEADING = "--- runner log tail ---"
 # presence — no host-version table to maintain, and a build that lacks the
 # feature simply omits the token (older hosts send no ``capabilities`` at all).
 # The runner intercepts codex ``/side`` and forks an ephemeral side-chat thread:
+CAP_STUDIO_SEAT = "studio_seat_v1"
 CAP_CODEX_SIDE_CHAT = "codex_side_chat"
 CAP_CODEX_SIDE_CHAT_RESUME = "codex_side_chat_resume"
 # The runner starts a codex-native session whose collaboration-mode label is
@@ -107,6 +108,7 @@ CAP_LONG_SESSION_MESSAGES = "long_session_messages"
 
 # Every capability THIS build supports; reported verbatim in the hello frame.
 HOST_CAPABILITIES: list[str] = [
+    CAP_STUDIO_SEAT,
     CAP_CODEX_SIDE_CHAT,
     CAP_CODEX_SIDE_CHAT_RESUME,
     CAP_CODEX_PLAN_AT_LAUNCH,
@@ -444,6 +446,7 @@ class HostLaunchRunnerFrame:
     scheduled_run: ScheduledRunLogContext | None = None
     mcp_disabled_servers_active_harnesses: list[str] | None = None
     session_env_handoff_id: str | None = None
+    studio_seat_profile: str | None = None
 
 
 @dataclass
@@ -1848,6 +1851,8 @@ def encode_host_frame(frame: HostFrame) -> str:
             "inference_config": frame.inference_config,
             "session_env_handoff_id": frame.session_env_handoff_id,
         }
+        if frame.studio_seat_profile is not None:
+            payload["studio_seat_profile"] = frame.studio_seat_profile
         if frame.mcp_disabled_servers_active_harnesses is not None:
             payload["mcp_disabled_servers_active_harnesses"] = (
                 frame.mcp_disabled_servers_active_harnesses
@@ -3060,6 +3065,7 @@ def _decode_launch_runner(msg: _JsonObject) -> HostLaunchRunnerFrame:
             if "superseded_runner_ids" in msg
             else None
         ),
+        studio_seat_profile=_optional_nullable_str(msg, "studio_seat_profile"),
         session_env_handoff_id=_optional_nullable_str(msg, "session_env_handoff_id"),
     )
 

@@ -6,6 +6,7 @@ export const HOST_METHOD_PERMISSIONS = {
   ...STUDIO_METHOD_PERMISSIONS,
   "navigation.openPage": "navigation",
   "navigation.openSession": "navigation",
+  "navigation.openStudioSession": "studio.tasks",
   "navigation.openNewSession": "navigation",
   "navigation.openExternal": "navigation",
   "theme.getCurrent": null,
@@ -31,6 +32,11 @@ export function grantedHostMethods<T extends Record<string, unknown>>(
     if (!Object.hasOwn(HOST_METHOD_PERMISSIONS, method)) {
       throw new Error(`Host method ${method} has no permission declaration`);
     }
+    if (
+      method === "navigation.openStudioSession" &&
+      (extension.id !== "egzakta.work" || !extension.permissions.includes("navigation"))
+    )
+      continue;
     const permission = HOST_METHOD_PERMISSIONS[method as keyof typeof HOST_METHOD_PERMISSIONS];
     if (permission === null || extension.permissions.includes(permission)) {
       granted[method as keyof T] = implementation as T[keyof T];

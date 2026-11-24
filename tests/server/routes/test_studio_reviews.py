@@ -933,3 +933,202 @@ async def test_event_sequence_is_bounded_to_storage_integer(
         headers={"X-Forwarded-Email": ALICE},
     )
     assert response.status_code == 422
+
+
+async def test_automated_trigger_runs_only_pinned_native_lens(
+    review_harness, review_client, db_uri, monkeypatch
+):
+    import asyncio
+
+    from omnigent.stores.studio_review_queue import ReviewQueue
+    from omnigent.studio.reviews.automated import FENCE
+
+    harness = review_harness
+    target = harness.target
+    project = harness.project_store.create(uuid.uuid4().hex, "Bot review", ALICE, {})
+    harness.agents.create(
+        builtin_agent_id(CLAUDE_NATIVE_AGENT_NAME), CLAUDE_NATIVE_AGENT_NAME, "native-bundle"
+    )
+    monkeypatch.setenv("OMNIGENT_STUDIO_REVIEW_BOT_ACCOUNT", ALICE)
+    monkeypatch.setenv("OMNIGENT_STUDIO_REVIEW_TOKEN", "trusted-machine")
+    monkeypatch.setenv(
+        "OMNIGENT_STUDIO_REVIEW_PROJECT",
+        json.dumps(
+            {
+                "project_id": project.id,
+                "host_id": target.host_id,
+                "workspace": target.workspace,
+                "repository_path": ".",
+            }
+        ),
+    )
+    host = SimpleNamespace(
+        sandbox_provider="egzakta.coder", configured_harnesses={"claude-native": True}
+    )
+    module = "omnigent.server.routes.studio_reviews."
+    monkeypatch.setattr(
+        module + "_connected_review_host", AsyncMock(return_value=(host, None, None))
+    )
+    monkeypatch.setattr(
+        module + "SandboxProfileStore.get_host_snapshot",
+        lambda *_: {"provider": "egzakta.coder", "id": "bot-review"},
+    )
+    monkeypatch.setattr(module + "resolve_project_workspace", AsyncMock())
+    monkeypatch.setattr(
+        module + "_capture_project_target",
+        AsyncMock(
+            return_value=target.model_copy(
+                update={
+                    "repository": "Egzakta-AILab/KVARK",
+                    "source_session_id": None,
+                    "source_project_id": project.id,
+                    "repository_path": ".",
+                    "pr_url": "https://github.com/Egzakta-AILab/KVARK/pull/42",
+                }
+            )
+        ),
+    )
+    capture = {
+        "repository": "Egzakta-AILab/KVARK",
+        "instructions": "Use pinned base instructions.",
+        "profiles": {"backend": "Inspect backend."},
+        "selected_lenses": ["backend"],
+        "protected_paths": [],
+        "author_login": "author",
+        "asked_logins": [],
+        "labels": [],
+        "head_ref": "topic",
+        "services_revision": None,
+        "services": {},
+        "policy": {
+            "lanes": {"otherwise": "human_review", "env_blocked": "environment_owner"},
+            "auto_lane": {
+                "max_changed_lines": 150,
+                "max_changed_files": 5,
+                "max_components": 1,
+                "allowed_severities": ["note"],
+            },
+        },
+        "files": [
+            {
+                "filename": "backend/main.py",
+                "additions": 10000,
+                "deletions": 0,
+                "status": "added",
+                "patch": "@@ -0,0 +1,10000 @@\n" + "+code\n" * 10000,
+            }
+        ],
+    }
+    monkeypatch.setattr(module + "capture_configured", lambda _: capture)
+    called = []
+
+    async def create(_request, owner, review, sid):
+        session = harness.conversations.create_conversation(
+            conversation_id=sid,
+            agent_id=review.profile.agent_id,
+            host_id=target.host_id,
+            workspace=target.workspace,
+            project_id=project.id,
+            runner_id=uuid.uuid4().hex,
+        )
+        harness.permissions.grant(owner, sid, LEVEL_OWNER)
+        return SimpleNamespace(
+            id=sid,
+            runner_id=session.runner_id,
+            agent_id=session.agent_id,
+            host_id=target.host_id,
+            workspace=target.workspace,
+            harness=review.profile.harness,
+        )
+
+    async def send(_request, sid, body, runner):
+        called.append(body.type)
+        if body.type == "message":
+            prompt = body.data["content"][0]["text"]
+            assert "Inspect backend." in prompt and "Use pinned base instructions." in prompt
+            assert "+code\n" not in prompt
+            result = {
+                "review_id": sid,
+                "base_sha": BASE_SHA,
+                "head_sha": HEAD_SHA,
+                "needs_manual_trial": False,
+                "proofs": [],
+                "walkthrough": [
+                    {
+                        "path": "backend/main.py",
+                        "line": 7,
+                        "text": "Explains the change.",
+                        "layer": "summary",
+                    }
+                ],
+            }
+            harness.conversations.append(
+                sid,
+                [
+                    NewConversationItem(
+                        type="message",
+                        response_id="one",
+                        data=MessageData(role="user", content=body.data["content"]),
+                    ),
+                    NewConversationItem(
+                        type="message",
+                        response_id="one",
+                        data=MessageData(
+                            role="assistant",
+                            agent="native reviewer",
+                            content=[
+                                {
+                                    "type": "output_text",
+                                    "text": f"{FENCE}\n{json.dumps(result)}\n```",
+                                }
+                            ],
+                        ),
+                    ),
+                ],
+            )
+        return {"queued": True, "pending_id": "accepted"}
+
+    harness.create_reviewer.side_effect = create
+    harness.send_review.side_effect = send
+    payload = {
+        "schema_version": "studio-review-trigger@1",
+        "repository": "Egzakta-AILab/KVARK",
+        "pull_number": 42,
+        "base_ref": "main",
+        "base_sha": BASE_SHA,
+        "head_sha": HEAD_SHA,
+        "mode": "delta",
+    }
+    headers = {"X-Forwarded-Email": ALICE, "Authorization": "Bearer trusted-machine"}
+    wrong = {**headers, "Authorization": "Bearer untrusted"}
+    assert (
+        await review_client.post("/v1/studio/reviews/dispatch", headers=wrong, json=payload)
+    ).status_code == 403
+    receipt = (
+        (await review_client.post("/v1/studio/reviews/dispatch", headers=headers, json=payload))
+        .raise_for_status()
+        .json()
+    )
+    queue = ReviewQueue(db_uri)
+    async with asyncio.timeout(15):
+        while True:
+            view = queue.rpc(ALICE, "getWalkthrough", {"review_id": receipt["review_id"]})
+            if view["state"] == "finished":
+                break
+            await asyncio.sleep(0.05)
+    assert view["walkthrough"][0]["line"] == 7
+    assert called == ["message", "stop_session"]
+    replay = (
+        (
+            await review_client.post(
+                "/v1/studio/reviews/dispatch", headers=headers, json={**payload, "mode": "full"}
+            )
+        )
+        .raise_for_status()
+        .json()
+    )
+    assert (
+        replay["review_id"] == receipt["review_id"]
+        and replay["mode"] == "full"
+        and replay["status"] == "existing"
+    )
