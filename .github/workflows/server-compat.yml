@@ -80,14 +80,15 @@ jobs:
           fetch-depth: 0
           sparse-checkout: .github/scripts/ci
           persist-credentials: false
+      - name: Load the Studio fork's upstream compatibility baseline
+        if: github.repository == 'Egzakta-AILab/omnigent'
+        run: bash .github/scripts/ci/fetch-studio-compat-baseline.sh
       - name: Resolve latest final tag
         id: tag
         shell: bash
         run: |
           # Latest final (non-prerelease) tag by version sort.
-          tag=$(git tag --sort=-v:refname \
-            | grep -viE '(^|[^a-z])(rc|dev|pre)[0-9]' \
-            | head -1)
+          tag=$(git tag --sort=-v:refname | awk '/^v?[0-9]+\.[0-9]+(\.[0-9]+)?$/ && !found { print; found=1 }')
           if [ -z "$tag" ]; then
             echo "No stable release tag found" >&2; exit 1
           fi
@@ -104,6 +105,9 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
+      - name: Load the Studio fork's upstream compatibility baseline
+        if: github.repository == 'Egzakta-AILab/omnigent'
+        run: bash .github/scripts/ci/fetch-studio-compat-baseline.sh
       - name: Run compat smoke (Config 1)
         uses: ./.github/actions/compat-smoke-run
         with:
@@ -120,6 +124,9 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
+      - name: Load the Studio fork's upstream compatibility baseline
+        if: github.repository == 'Egzakta-AILab/omnigent'
+        run: bash .github/scripts/ci/fetch-studio-compat-baseline.sh
       - name: Run compat smoke (Config 2)
         uses: ./.github/actions/compat-smoke-run
         with:
@@ -136,6 +143,9 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
+      - name: Load the Studio fork's upstream compatibility baseline
+        if: github.repository == 'Egzakta-AILab/omnigent'
+        run: bash .github/scripts/ci/fetch-studio-compat-baseline.sh
       - name: Run UI compat smoke (Config A)
         uses: ./.github/actions/compat-smoke-ui-run
         with:
@@ -152,6 +162,9 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
+      - name: Load the Studio fork's upstream compatibility baseline
+        if: github.repository == 'Egzakta-AILab/omnigent'
+        run: bash .github/scripts/ci/fetch-studio-compat-baseline.sh
       - name: Run UI compat smoke (Config B)
         uses: ./.github/actions/compat-smoke-ui-run
         with:
@@ -181,6 +194,9 @@ jobs:
           # Full history so `git tag` sees every release tag for the matrix.
           fetch-depth: 0
           persist-credentials: false
+      - name: Load the Studio fork's upstream compatibility baseline
+        if: github.repository == 'Egzakta-AILab/omnigent'
+        run: bash .github/scripts/ci/fetch-studio-compat-baseline.sh
       - name: Compute pairwise matrices
         id: matrix
         env:
@@ -210,6 +226,9 @@ jobs:
           ref: ${{ github.ref }}
           fetch-depth: 0
 
+      - name: Load the Studio fork's upstream compatibility baseline
+        if: github.repository == 'Egzakta-AILab/omnigent'
+        run: bash .github/scripts/ci/fetch-studio-compat-baseline.sh
       - name: Run e2e suite for this cell
         uses: ./.github/actions/e2e-run
         with:
@@ -244,6 +263,9 @@ jobs:
           ref: ${{ github.ref }}
           fetch-depth: 0
 
+      - name: Load the Studio fork's upstream compatibility baseline
+        if: github.repository == 'Egzakta-AILab/omnigent'
+        run: bash .github/scripts/ci/fetch-studio-compat-baseline.sh
       - name: Run integration suite for this cell
         uses: ./.github/actions/integration-run
         with:
@@ -272,6 +294,9 @@ jobs:
           sparse-checkout: .github/scripts/ci
           fetch-depth: 0
           persist-credentials: false
+      - name: Load the Studio fork's upstream compatibility baseline
+        if: github.repository == 'Egzakta-AILab/omnigent'
+        run: bash .github/scripts/ci/fetch-studio-compat-baseline.sh
       - name: Compute UI matrix
         id: matrix
         env:
@@ -294,6 +319,9 @@ jobs:
         with:
           ref: ${{ github.ref }}
           fetch-depth: 0
+      - name: Load the Studio fork's upstream compatibility baseline
+        if: github.repository == 'Egzakta-AILab/omnigent'
+        run: bash .github/scripts/ci/fetch-studio-compat-baseline.sh
       - name: Run e2e-ui suite for this cell
         uses: ./.github/actions/compat-smoke-ui-run
         with:

@@ -590,3 +590,46 @@ def test_manual_ci_waiver_still_verifies_bot_and_head(tmp_path, api, fault):
     result = _run_access(tmp_path, api)
     assert result.returncode == 1, result.stdout + result.stderr
     assert "CI access denied" in result.stdout
+
+
+def test_scan_collects_large_diff_at_event_head(tmp_path):
+    repo = tmp_path / "repo"
+    workspace = tmp_path / "workspace"
+    for path in (repo, workspace):
+        subprocess.run(["git", "init", "-q", str(path)], check=True)
+
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(repo), *args], text=True).strip()
+
+    git("config", "user.name", "Test")
+    git("config", "user.email", "test@example.org")
+    git("commit", "--allow-empty", "-m", "base")
+    base = git("rev-parse", "HEAD")
+    names = [f"case-{i:03d}" for i in range(301)]
+    for name in names:
+        (repo / name).write_text(name)
+    git("add", ".")
+    git("commit", "-m", "large change")
+    head = git("rev-parse", "HEAD")
+    (repo / "later").write_text("later revision")
+    git("add", "later")
+    git("commit", "-m", "advance branch")
+    subprocess.run(["git", "-C", str(workspace), "remote", "add", "origin", str(repo)], check=True)
+
+    step = next(s for s in _steps("security-scan.yml", "scan") if s["name"] == "Fetch PR diff")
+    subprocess.run(
+        ["bash", "-c", step["run"]],
+        cwd=workspace,
+        env=dict(
+            os.environ,
+            GH_TOKEN="fixture",
+            BASE_SHA=base,
+            HEAD_SHA=head,
+            RUNNER_TEMP=str(tmp_path),
+            GITHUB_WORKSPACE=str(workspace),
+        ),
+        check=True,
+    )
+    assert (workspace / "changed.txt").read_text().splitlines() == names
+    assert (workspace / "pr.diff").read_text().strip() == git("diff", f"{base}...{head}")
+    assert not (workspace / names[0]).exists()
