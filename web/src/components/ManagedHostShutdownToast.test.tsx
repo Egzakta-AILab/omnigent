@@ -5,7 +5,7 @@ import { toast, Toaster } from "sonner";
 import type * as SonnerModule from "sonner";
 import { ManagedHostShutdownToast } from "./ManagedHostShutdownToast";
 import { ManagedHostShutdownBanner } from "./ManagedHostShutdownBanner";
-import { useHostShutdownBanner } from "@/hooks/useHostShutdownBanner";
+import { useHostShutdownBanner } from "@/hooks/useManagedHosts";
 import {
   isDismissedToday,
   isWarnedToday,

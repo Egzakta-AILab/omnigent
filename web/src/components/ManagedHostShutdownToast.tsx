@@ -1,4 +1,4 @@
-import { useHostShutdownWarningsEnabled } from "@/hooks/useHostShutdownBanner";
+import { useHostShutdownWarningsEnabled } from "@/hooks/useManagedHosts";
 import { useEffect, useReducer, useRef, useState } from "react";
 import { toast } from "sonner";
 import { useHosts } from "@/hooks/useHosts";

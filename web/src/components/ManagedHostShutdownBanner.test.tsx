@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { toast } from "sonner";
 import { ManagedHostShutdownBanner } from "./ManagedHostShutdownBanner";
-import { useHostShutdownBanner } from "@/hooks/useHostShutdownBanner";
+import { useHostShutdownBanner } from "@/hooks/useManagedHosts";
 import {
   isDismissedToday,
   isWarnedToday,

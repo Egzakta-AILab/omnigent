@@ -1,6 +1,6 @@
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { useHostShutdownBanner } from "./useHostShutdownBanner";
+import { useHostShutdownBanner } from "./useManagedHosts";
 import { resetArcaWarningStorageForTests } from "@/lib/arcaShutdownWarning";
 
 const MON_5PM = new Date(2026, 9, 5, 17, 0);

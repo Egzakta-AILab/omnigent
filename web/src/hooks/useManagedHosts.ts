@@ -1,6 +1,6 @@
 import { useEffect, useReducer } from "react";
 import { toast } from "sonner";
-import { useHosts } from "@/hooks/useHosts";
+import { type Host, useHosts } from "@/hooks/useHosts";
 import { useNowSelector } from "@/hooks/useNow";
 import { isArcaHost, readArcaHostId } from "@/lib/arcaHost";
 import {
@@ -56,12 +56,31 @@ export function useHostShutdownBanner() {
     };
   }, [enabled]);
 
+  const managed = resolveManagedHosts(hosts);
   return {
     showForHost(hostId: string | null | undefined): boolean {
-      if (!enabled || !hostId || !warningDay || isDismissedToday(new Date())) {
-        return false;
-      }
+      return Boolean(
+        enabled &&
+        hostId &&
+        warningDay &&
+        !isDismissedToday(new Date()) &&
+        managed.isOnline(hostId),
+      );
+    },
+    dismissToday: () => dismissToday(new Date()),
+    day: warningDay,
+  };
+}
+
+/** Resolve enrollment by its saved ID. Shutdown warnings also recognize the default managed name. */
+export function resolveManagedHosts(hosts: readonly Host[] | undefined) {
+  return {
+    get enrolledId(): string | null {
       const storedId = readArcaHostId();
+      return storedId;
+    },
+    isOnline(hostId: string): boolean {
+      const storedId = this.enrolledId;
       return Boolean(
         hosts?.some(
           (host) =>
@@ -69,7 +88,5 @@ export function useHostShutdownBanner() {
         ),
       );
     },
-    dismissToday: () => dismissToday(new Date()),
-    day: warningDay,
   };
 }

@@ -568,8 +568,10 @@ corrected without prompting from sandbox sessions. Both paths verify that the
 captured host ID matches the source session. Consent or auto-connect opt-in, the
 captured identity check, and the agent-context gate remain the trust boundaries.
 A decline briefly suppresses repeat prompts, while failed runs remain retryable.
-**Connect managed host** is hidden for an online remembered host only when the desktop
-advertises preview recovery; older shells keep the action visible.
+**Connect managed host** requires a desktop update that advertises the window-scoped
+`managedHostConnection` capability. Older desktops can still select an existing host row.
+On updated desktops, preview recovery handles an enrolled host that is already online.
+A sibling session restricted to its source host can select that row directly.
 
 The exception covers HTTP(S) `localhost`, `127.0.0.1`, `[::1]`, and
 `*.localhost` subdomains, including redirects and links that would open a new

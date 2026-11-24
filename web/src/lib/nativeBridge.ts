@@ -488,6 +488,8 @@ export function workspaceSocketBridge():
  * optional: an older shell reports fewer.
  */
 export interface DesktopFeatures {
+  /** Availability and preview recovery for managed host setup in this window. */
+  managedHostConnection?: { enabled: boolean; restoresPreviewIdentity: boolean };
   /**
    * Managed features (e.g. the managed host option) are enabled.
    * Already scoped by the shell: true only when the flag is set AND the

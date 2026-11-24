@@ -1,3 +1,4 @@
+import { resolveManagedHosts } from "@/hooks/useManagedHosts";
 import {
   addNestedSessionDraft,
   updateNestedSessionDraft,
@@ -2909,7 +2910,10 @@ function NewChatLandingContent({
   const pendingConnectRef = useRef<(() => Promise<void>) | null>(null);
   // Offer the managed host only when the desktop shell enables it.
   const [arcaEnabled, setArcaEnabled] = useState(false);
-  const [arcaPreviewRecovery, setArcaPreviewRecovery] = useState(false);
+  const [managedConnection, setManagedConnection] =
+    useState<
+      NonNullable<Awaited<ReturnType<typeof getDesktopFeatures>>>["managedHostConnection"]
+    >();
   const [connectingManagedHost, setConnectingManagedHost] = useState(false);
   const [arcaError, setArcaError] = useState<string | null>(null);
   // Sandbox repository inputs — composed into the managed create's
@@ -3249,7 +3253,7 @@ function NewChatLandingContent({
     void getDesktopFeatures().then((features) => {
       if (!cancelled) {
         setArcaEnabled(features?.databricksInternalFeatures === true);
-        setArcaPreviewRecovery(features?.arcaPreviewRecovery === true);
+        setManagedConnection(features?.managedHostConnection);
       }
     });
     return () => {
@@ -5930,13 +5934,14 @@ function NewChatLandingContent({
     : null;
   // The Arca row is remembered by host ID, never inferred from its machine hostname.
   const arcaHostId = arcaEnabled ? readArcaHostId() : null;
-  const arcaHostOnline = arcaHostId !== null && onlineHosts.some((h) => h.host_id === arcaHostId);
+  const enrolledHostId = managedConnection?.enabled
+    ? resolveManagedHosts(onlineHosts).enrolledId
+    : null;
+  const enrolledHostOnline = onlineHosts.some((host) => host.host_id === enrolledHostId);
   const showManagedConnection =
-    arcaEnabled &&
-    // Restricted siblings select the existing host row, even on older desktop shells.
     siblingMayUseOtherHosts &&
-    // Older shells still need the setup action to recover a connected host.
-    (!arcaPreviewRecovery || !arcaHostOnline);
+    managedConnection?.enabled === true &&
+    (!managedConnection.restoresPreviewIdentity || !enrolledHostOnline);
   const hostLabel = connectingThisMachine
     ? "Connecting…"
     : connectingManagedHost

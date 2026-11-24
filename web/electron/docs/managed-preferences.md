@@ -68,7 +68,9 @@ the host row identifies the connected instance (recognized by the host id
 remembered at connect time). Like the server list, the flag is read from macOS
 on demand, so profile changes apply without a restart.
 
-In those same windows, **Connect managed host** replaces connecting a machine over SSH:
+On an updated desktop, the scoped `managedHostConnection` capability enables
+**Connect managed host** in those windows. Older desktops retain the host list.
+For windows with managed enrollment enabled,
 the SSH field under **Connect a host** is hidden and the app refuses an SSH
 connect. Everywhere else, including flagged Macs on a self-hosted server, the
 SSH field stays.

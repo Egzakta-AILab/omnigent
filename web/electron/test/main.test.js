@@ -819,15 +819,17 @@ describe("Arca extend IPC", () => {
     const features = h.ipc.get("omnigent:get-desktop-features");
     const event = { sender: h.webContents, senderFrame: { url: serverUrl } };
     assert.deepEqual(
-      { ...features(event) },
+      structuredClone(features(event)),
       {
         databricksInternalFeatures: true,
         canExtendArca: true,
         canRefreshDbcert: true,
         arcaPreviewRecovery: true,
+        managedHostConnection: { enabled: true, restoresPreviewIdentity: true },
         // Managed-feature fixtures simulate macOS on every test host.
         chromeCookieImport: true,
       },
+      "Pinned windows should advertise the managed connection and legacy capabilities together",
     );
     assert.deepEqual(await extend(event, "overnight"), { ok: true, shutdownAt: null });
     assert.deepEqual(h.calls.arcaExtends, ["overnight"]);
@@ -851,6 +853,10 @@ describe("Arca extend IPC", () => {
     h.api.registerIpc();
     const event = { sender: h.webContents, senderFrame: { url: h.webContents.getURL() } };
     assert.equal(h.ipc.get("omnigent:get-desktop-features")(event).canExtendArca, false);
+    assert.equal(
+      h.ipc.get("omnigent:get-desktop-features")(event).managedHostConnection.enabled,
+      false,
+    );
     const result = await h.ipc.get("omnigent:arca-extend")(event, "overnight");
     assert.equal(result.ok, false);
     assert.deepEqual(h.calls.arcaExtends, []);
@@ -862,6 +868,10 @@ describe("Arca extend IPC", () => {
     h.api.registerIpc();
     const event = { sender: h.webContents, senderFrame: { url: h.webContents.getURL() } };
     assert.equal(h.ipc.get("omnigent:get-desktop-features")(event).canExtendArca, false);
+    assert.equal(
+      h.ipc.get("omnigent:get-desktop-features")(event).managedHostConnection.enabled,
+      false,
+    );
     assert.equal((await h.ipc.get("omnigent:arca-extend")(event, "overnight")).ok, false);
     assert.deepEqual(h.calls.arcaExtends, []);
   });
@@ -4586,6 +4596,7 @@ describe("browser-view teardown on server change (src/main.js)", () => {
         canExtendArca: true,
         canRefreshDbcert: true,
         arcaPreviewRecovery: true,
+        managedHostConnection: { enabled: true, restoresPreviewIdentity: true },
         // Managed-feature fixtures simulate macOS on every test host.
         chromeCookieImport: true,
       },

@@ -3801,6 +3801,7 @@ describe("Managed desktop host connection", () => {
     vi.mocked(getDesktopFeatures).mockResolvedValue({
       databricksInternalFeatures: true,
       arcaPreviewRecovery: true,
+      managedHostConnection: { enabled: true, restoresPreviewIdentity: true },
     });
     vi.mocked(connectArcaHost).mockClear();
     vi.mocked(fetchHosts).mockClear();
@@ -3860,16 +3861,14 @@ describe("Managed desktop host connection", () => {
     await waitFor(() => expect(localStorage.getItem("omnigent:last-host-choice")).toBe("arca-1"));
   });
 
-  it("restricts legacy desktop setup for nested agents while keeping the source selectable", async () => {
+  it("keeps legacy desktop host rows selectable without offering connection setup", async () => {
     vi.mocked(getDesktopFeatures).mockResolvedValue({ databricksInternalFeatures: true });
     localStorage.setItem("omnigent:arca-host-id", "arca-1");
     mockHosts([{ host_id: "arca-1", name: "remote-box", owner: "me", status: "online" }]);
     const standalone = renderLanding();
     await openHostMenu();
 
-    expect(await screen.findByTestId("new-chat-landing-connect-managed-host")).toHaveTextContent(
-      /^Connect managed host$/,
-    );
+    expect(screen.queryByTestId("new-chat-landing-connect-managed-host")).toBeNull();
     // The host row itself still lists under My machines.
     const row = await screen.findByTestId("new-chat-landing-host-arca-1");
     expect(
@@ -3895,6 +3894,39 @@ describe("Managed desktop host connection", () => {
     expect(sameHost).toBeEnabled();
     fireEvent.click(sameHost);
     expect(localStorage.getItem("omnigent:last-host-choice")).toBe(sourceHost.host_id);
+  });
+
+  it("hides the updated desktop setup action for a sibling restricted to its offline source", async () => {
+    const sourceHost = {
+      host_id: "source-host",
+      name: "source machine",
+      owner: "me",
+      status: "offline",
+    } as const;
+    mockHosts([sourceHost]);
+    authenticatedFetchMock.mockImplementation(async (url) => {
+      if (String(url).startsWith("/v1/sessions/source?")) {
+        return Response.json({ id: "source", host_id: sourceHost.host_id, labels: {} });
+      }
+      return Response.json({}, { status: 404 });
+    });
+    renderLanding(
+      { sibling_sessions: true, sibling_session_destinations: "current_host" },
+      "/?sibling=source",
+    );
+    await openHostMenu();
+    expect(screen.queryByTestId("new-chat-landing-connect-managed-host")).toBeNull();
+  });
+
+  it("honors a disabled connection grant without falling back to older desktop features", async () => {
+    const desktop = await getDesktopFeatures();
+    vi.mocked(getDesktopFeatures).mockResolvedValue({
+      ...desktop,
+      managedHostConnection: { enabled: false, restoresPreviewIdentity: true },
+    });
+    renderLanding();
+    await openHostMenu();
+    expect(screen.queryByTestId("new-chat-landing-connect-managed-host")).toBeNull();
   });
 
   it("recaptures an already-running host through the same reconnect action", async () => {

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { AlertTriangleIcon, CheckIcon, CopyIcon } from "lucide-react";
-import { useMarkShutdownBannerWhenVisible } from "@/hooks/useHostShutdownBanner";
+import { useMarkShutdownBannerWhenVisible } from "@/hooks/useManagedHosts";
 import { offersWorkweek } from "@/lib/arcaShutdownWarning";
 import { copyText } from "@/lib/clipboard";
 import { cn } from "@/lib/utils";

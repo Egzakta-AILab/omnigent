@@ -31,7 +31,7 @@ import { FloatingBannerStack, StreamBudgetBanner } from "@/components/StreamBudg
 import { DbcertBanner } from "@/components/DbcertBanner";
 import { ManagedHostShutdownBanner } from "@/components/ManagedHostShutdownBanner";
 import { useSessionTasks } from "@/hooks/useSessionTasks";
-import { useHostShutdownBanner } from "@/hooks/useHostShutdownBanner";
+import { useHostShutdownBanner } from "@/hooks/useManagedHosts";
 import { useSearchParams } from "@/lib/routing";
 import { MESSAGE_QUERY_PARAM } from "@/lib/messageDeepLink";
 import { onFindOpened } from "@/lib/nativeBridge";
