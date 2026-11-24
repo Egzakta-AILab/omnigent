@@ -97,12 +97,24 @@ jobs:
         if: ${{ steps.gate.outputs.scan == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          gh pr diff "$PR" --repo "$REPO" > "$GITHUB_WORKSPACE/pr.diff"
-          gh pr diff "$PR" --repo "$REPO" --name-only > "$GITHUB_WORKSPACE/changed.txt"
-          echo "Changed files:"; cat "$GITHUB_WORKSPACE/changed.txt"
+          set -euo pipefail
+          [[ "$BASE_SHA" =~ ^[a-f0-9]{40}$ && "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]]
+          # A fresh bare repository provides full merge-base history without
+          # checking out PR code or changing the trusted scanner worktree.
+          objects=$(mktemp -d "$RUNNER_TEMP/pr-diff.XXXXXXXX")
+          git init --bare --quiet "$objects"
+          authorization=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
+          echo "::add-mask::$authorization"
+          git -C "$objects" -c "http.extraHeader=AUTHORIZATION: basic $authorization" \
+            fetch --quiet --no-tags "$(git remote get-url origin)" "$BASE_SHA" "$HEAD_SHA"
+          # The hosted diff API refuses large PRs. Compare the event SHAs
+          # locally and include both sides of a rename in the path guard.
+          diff=(git -C "$objects" diff --no-ext-diff --no-textconv --no-renames)
+          "${diff[@]}" "$BASE_SHA...$HEAD_SHA" -- > "$GITHUB_WORKSPACE/pr.diff"
+          "${diff[@]}" --name-only "$BASE_SHA...$HEAD_SHA" -- > "$GITHUB_WORKSPACE/changed.txt"
 
       - name: Install trusted policy parser
         if: >-
