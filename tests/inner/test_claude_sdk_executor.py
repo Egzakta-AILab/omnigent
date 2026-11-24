@@ -7644,7 +7644,7 @@ async def test_unpinned_databricks_session_replays_within_its_default_models_win
     with patch(
         "omnigent.inner.databricks_executor._read_databrickscfg",
         return_value=DatabricksCredentials(
-            host="https://example.cloud.databricks.com", token="dapi_test_token"
+            host="https://workspace.example.test", token="dapi_test_token"
         ),
     ):
         executor = ClaudeSDKExecutor(gateway=True)

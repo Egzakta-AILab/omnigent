@@ -5,7 +5,7 @@ import org.junit.Test
 import java.net.URI
 
 class WorkspaceSessionProbeTest {
-    private val page = URI("https://dbc-123.cloud.databricks.com/omnigent/c/chat-1?o=42#latest")
+    private val page = URI("https://workspace.example.test/omnigent/c/chat-1?o=42#latest")
 
     @Test
     fun `accepted session probes the workspace identity endpoint with the DBAUTH cookie`() {
@@ -15,7 +15,7 @@ class WorkspaceSessionProbeTest {
 
         assertEquals(WorkspaceSessionCheck.Valid, check)
         val request = transport.requests.single()
-        assertEquals(URI("https://dbc-123.cloud.databricks.com/omnigent/v1/me?o=42"), request.uri)
+        assertEquals(URI("https://workspace.example.test/omnigent/v1/me?o=42"), request.uri)
         assertEquals("DBAUTH=session-value", request.headers["Cookie"])
     }
 

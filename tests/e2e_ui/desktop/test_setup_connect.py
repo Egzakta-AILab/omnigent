@@ -83,6 +83,14 @@ def test_bare_workspace_url_connects_without_http_warning(page: Page) -> None:
 
     page.wait_for_function("() => window.__connectCalls.length === 1")
     assert page.evaluate("() => window.__connectCalls") == ["dbc-x.cloud.databricks.com/omnigent"]
+    # The main process normalizes this same schemeless input before navigation.
+    # Retain only the organization when trimming a deep link to its origin.
+    entered = page.input_value("#url")
+    pasted = f"{entered}?ignored=yes&o=4242424242424242#page"
+    origin = entered.split("/", 1)[0]
+    assert page.evaluate("url => window.omnigentUrl.normalizeUrl(url)", pasted) == (
+        f"https://{origin}/?o=4242424242424242"
+    )
     expect(page.locator("#err")).to_have_text("")
 
 
@@ -184,7 +192,7 @@ def test_recent_server_connect_and_copy_actions_are_independent(page: Page) -> N
     assert page.evaluate("() => window.__connectCalls") == [recent_url]
 
 
-def test_shared_url_module_defaults_scheme_in_browser(page: Page) -> None:
+def test_shared_url_module_uses_http_for_loopback(page: Page) -> None:
     """The shared url.js (also used by the main process) defaults the scheme.
 
     The setup page loads ``web/electron/src/url.js`` as
@@ -194,16 +202,6 @@ def test_shared_url_module_defaults_scheme_in_browser(page: Page) -> None:
     """
     _open_setup_page(page)
 
-    # Remote host → https root while retaining the Databricks organization;
-    # the main process then probes and appends the canonical /omnigent mount.
-    assert (
-        page.evaluate(
-            """() => window.omnigentUrl.normalizeUrl(
-              'dbc-x.cloud.databricks.com/omnigent?ignored=yes&o=4242424242424242#page'
-            )"""
-        )
-        == "https://dbc-x.cloud.databricks.com/?o=4242424242424242"
-    )
     # Loopback stays http for local dev.
     assert (
         page.evaluate("() => window.omnigentUrl.normalizeUrl('localhost:6767')")

@@ -165,7 +165,7 @@ model_provider = "Databricks"
 
 [model_providers.Databricks]
 name = "Databricks Unity Gateway"
-base_url = "https://4242424242424242.ai-gateway.cloud.databricks.com/codex/v1"
+base_url = "https://workspace.ai-gateway.workspaces.example.test/codex/v1"
 wire_api = "responses"
 
 [model_providers.Databricks.auth]
@@ -182,6 +182,7 @@ def _write_codex_toml(home: Path, body: str) -> None:
     (codex_dir / "config.toml").write_text(body, encoding="utf-8")
 
 
+@pytest.mark.usefixtures("example_gateway_domain")
 def test_default_provider_for_pi_selects_cli_config_databricks_gateway(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

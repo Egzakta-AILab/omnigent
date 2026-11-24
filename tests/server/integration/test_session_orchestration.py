@@ -1677,7 +1677,6 @@ async def test_managed_creation_uses_default_provider_and_saves_private_first_ta
         {
             "server_url": "https://managed-test.example.com",
             "providers": [
-                {"provider": "lakebox"},
                 {"provider": "modal" if provider == "embedding" else provider},
             ],
         }
@@ -1685,6 +1684,9 @@ async def test_managed_creation_uses_default_provider_and_saves_private_first_ta
     assert deployment is not None
     if provider == "embedding":
         deployment = replace(deployment, configs=(replace(deployment.default, provider=provider),))
+    # A configured provider can be staged before its launcher is available.
+    staged = replace(deployment.default, provider="staged", managed_launch_supported=False)
+    deployment = replace(deployment, configs=(staged, *deployment.configs))
     auth_app.state.sandbox_config = deployment
     auth_app.state.default_public_sessions = lambda: DefaultPublicSessions.ALL
     launched = asyncio.Event()

@@ -19,7 +19,6 @@
   "spacesAroundRangeFormationOperators": false,
   "spacesBeforeEndOfLineComments": 2,
   "multiElementCollectionTrailingCommas": true,
-  "reflowMultilineStringLiterals": "never",
   "fileScopedDeclarationPrivacy": {
     "accessLevel": "private"
   },

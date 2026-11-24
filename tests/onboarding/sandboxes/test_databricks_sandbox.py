@@ -609,7 +609,7 @@ def test_workspace_client_tags_user_agent(monkeypatch: pytest.MonkeyPatch) -> No
 
     launcher = DatabricksSandboxLauncher()
     launcher.bind_owner_credential(
-        lambda: {"token": "tok", "workspace_host": "https://example.cloud.databricks.com"}
+        lambda: {"token": "tok", "workspace_host": "https://workspace.example.test"}
     )
     launcher._workspace_client()
 

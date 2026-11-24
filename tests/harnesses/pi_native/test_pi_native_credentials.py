@@ -733,6 +733,7 @@ def test_databricks_gateway_builder_derives_codex_surface_from_anthropic_url(
 
     codex_url = "https://123.ai-gateway.cloud.databricks.com/codex/v1"
     assert provider.base_url == "https://123.ai-gateway.cloud.databricks.com/anthropic"
+    assert creds._is_databricks_ai_gateway_url(codex_url)
     assert provider.databricks_surfaces[creds.DatabricksPiSurface.RESPONSES] == codex_url
     assert provider.additional_providers["omnigent-openai"]["baseUrl"] == codex_url
 
@@ -1678,7 +1679,7 @@ model_provider = "Databricks"
 
 [model_providers.Databricks]
 name = "Databricks Unity Gateway"
-base_url = "https://4242424242424242.ai-gateway.cloud.databricks.com/codex/v1"
+base_url = "https://workspace.ai-gateway.workspaces.example.test/codex/v1"
 wire_api = "responses"
 
 [model_providers.Databricks.auth]
@@ -1688,6 +1689,7 @@ timeout_ms = 5000
 """
 
 
+@pytest.mark.usefixtures("example_gateway_domain")
 def test_cli_config_databricks_resolves_to_anthropic_gateway(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1707,9 +1709,7 @@ def test_cli_config_databricks_resolves_to_anthropic_gateway(
     assert provider is not None
     assert provider.api == "anthropic-messages"
     # /codex/v1 rewritten to the /anthropic surface Pi speaks natively.
-    assert (
-        provider.base_url == "https://4242424242424242.ai-gateway.cloud.databricks.com/anthropic"
-    )
+    assert provider.base_url == "https://workspace.ai-gateway.workspaces.example.test/anthropic"
     assert provider.model == "catalog-databricks-claude-default"
     assert provider.auth_header is True
     # apiKey is a "!command" rebuilt from the table's [X.auth] command + args
@@ -1719,6 +1719,7 @@ def test_cli_config_databricks_resolves_to_anthropic_gateway(
     )
 
 
+@pytest.mark.usefixtures("example_gateway_domain")
 def test_cli_config_databricks_respects_model_override(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1732,11 +1733,10 @@ def test_cli_config_databricks_respects_model_override(
     )
     assert provider is not None
     assert provider.model == "databricks-claude-opus-4-8"
-    assert (
-        provider.base_url == "https://4242424242424242.ai-gateway.cloud.databricks.com/anthropic"
-    )
+    assert provider.base_url == "https://workspace.ai-gateway.workspaces.example.test/anthropic"
 
 
+@pytest.mark.usefixtures("example_gateway_domain")
 def test_cli_config_preserves_auth_refresh_settings(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1840,10 +1840,11 @@ _LOOKALIKE_GATEWAY_URLS = [
     # Both substrings live in the path, not the host.
     "https://evil.test/databricks/ai-gateway/v1",
     # Right host shape but plaintext http (token must never go over http).
-    "http://4242424242424242.ai-gateway.cloud.databricks.com/codex/v1",
+    "http://workspace.ai-gateway.workspaces.example.test/codex/v1",
 ]
 
 
+@pytest.mark.usefixtures("example_gateway_domain")
 @pytest.mark.parametrize("gateway_url", _LOOKALIKE_GATEWAY_URLS)
 def test_cli_config_lookalike_gateway_returns_none(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, gateway_url: str
@@ -1861,6 +1862,7 @@ def test_cli_config_lookalike_gateway_returns_none(
     assert creds.resolve_pi_native_provider(config_loader=_cli_config_databricks_config) is None
 
 
+@pytest.mark.usefixtures("example_gateway_domain")
 def test_real_gateway_still_resolves_after_hardening(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1873,7 +1875,7 @@ def test_real_gateway_still_resolves_after_hardening(
     _write_codex_config(
         tmp_path,
         _codex_config_with_base_url(
-            "https://4242424242424242.ai-gateway.cloud.databricks.com/codex/v1"
+            "https://workspace.ai-gateway.workspaces.example.test/codex/v1"
         ),
     )
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -1881,9 +1883,7 @@ def test_real_gateway_still_resolves_after_hardening(
     provider = creds.resolve_pi_native_provider(config_loader=_cli_config_databricks_config)
 
     assert provider is not None
-    assert (
-        provider.base_url == "https://4242424242424242.ai-gateway.cloud.databricks.com/anthropic"
-    )
+    assert provider.base_url == "https://workspace.ai-gateway.workspaces.example.test/anthropic"
     assert provider.api == "anthropic-messages"
     assert provider.api_key == (
         "!jq -r .access_token /Users/me/.databricks/model-serving-token.json"
@@ -1924,6 +1924,7 @@ def _cli_config_databricks_pinned_pi() -> dict[str, object]:
     }
 
 
+@pytest.mark.usefixtures("example_gateway_domain")
 def test_explicit_pi_pin_selects_cli_config_databricks_over_anthropic_key(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1941,9 +1942,7 @@ def test_explicit_pi_pin_selects_cli_config_databricks_over_anthropic_key(
     provider = creds.resolve_pi_native_provider(config_loader=_cli_config_databricks_pinned_pi)
 
     assert provider is not None
-    assert (
-        provider.base_url == "https://4242424242424242.ai-gateway.cloud.databricks.com/anthropic"
-    )
+    assert provider.base_url == "https://workspace.ai-gateway.workspaces.example.test/anthropic"
     assert provider.api == "anthropic-messages"
     assert provider.auth_header is True
     assert provider.api_key == (
@@ -1953,6 +1952,7 @@ def test_explicit_pi_pin_selects_cli_config_databricks_over_anthropic_key(
     assert provider.base_url != "https://api.anthropic.com"
 
 
+@pytest.mark.usefixtures("example_gateway_domain")
 def test_cli_config_databricks_as_sole_default_selected_for_pi(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1969,9 +1969,7 @@ def test_cli_config_databricks_as_sole_default_selected_for_pi(
     provider = creds.resolve_pi_native_provider(config_loader=_cli_config_databricks_config)
 
     assert provider is not None
-    assert (
-        provider.base_url == "https://4242424242424242.ai-gateway.cloud.databricks.com/anthropic"
-    )
+    assert provider.base_url == "https://workspace.ai-gateway.workspaces.example.test/anthropic"
 
 
 def test_non_databricks_cli_config_not_selected_for_pi_via_fallback(
@@ -2006,8 +2004,6 @@ args = ["%s", "sk-static"]
 @pytest.mark.parametrize(
     "gateway_url",
     [
-        # Canonical AWS gateway.
-        "https://4242424242424242.ai-gateway.cloud.databricks.com/codex/v1",
         # Staging variant (still ends in .cloud.databricks.com).
         "https://wkspc.ai-gateway.staging.cloud.databricks.com/codex/v1",
         # Azure / GCP parent domains carrying the ai-gateway label.
@@ -2020,6 +2016,7 @@ def test_is_databricks_ai_gateway_url_accepts_real_hosts(gateway_url: str) -> No
     assert creds._is_databricks_ai_gateway_url(gateway_url) is True
 
 
+@pytest.mark.usefixtures("example_gateway_domain")
 @pytest.mark.parametrize(
     "gateway_url",
     [
@@ -2646,6 +2643,7 @@ def test_databricks_profile_registers_gpt_provider(monkeypatch: pytest.MonkeyPat
     assert any(m["id"] == "databricks-gpt-5-4" for m in completions_entry["models"])
 
 
+@pytest.mark.usefixtures("example_gateway_domain")
 def test_cli_config_databricks_registers_gpt_provider(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -2669,7 +2667,7 @@ def test_cli_config_databricks_registers_gpt_provider(
         creds,
         "resolve_databricks_workspace",
         lambda profile: db_creds_mod.WorkspaceCreds(
-            host="https://dbc-12345678-abcd.cloud.databricks.com", token="sdk-tok"
+            host="https://catalog.workspace.example.test", token="sdk-tok"
         ),
     )
     monkeypatch.setattr(creds, "_run_auth_command", lambda *_: "cmd-tok")
@@ -2679,7 +2677,7 @@ def test_cli_config_databricks_registers_gpt_provider(
     def _mock_fetch(workspace_url: str, token: str):
         # Assert the auth_command token is used, not the SDK token
         assert token == "cmd-tok", f"expected auth_command token, got {token!r}"
-        assert "dbc-12345678" in workspace_url
+        assert workspace_url == "https://catalog.workspace.example.test"
         return live_claude, live_gpt, [], []
 
     monkeypatch.setattr(creds, "_fetch_pi_model_lists", _mock_fetch)
@@ -2694,8 +2692,7 @@ def test_cli_config_databricks_registers_gpt_provider(
     # Uses the Unity Gateway codex URL (supports tools); the REAL workspace hostname
     # from databrickscfg fixes the NXDOMAIN issue for dedicated-subdomain gateways.
     assert (
-        openai_entry["baseUrl"]
-        == "https://4242424242424242.ai-gateway.cloud.databricks.com/codex/v1"
+        openai_entry["baseUrl"] == "https://workspace.ai-gateway.workspaces.example.test/codex/v1"
     )
     assert openai_entry["api"] == "openai-responses"
     assert any(m["id"] == "databricks-gpt-5-4" for m in openai_entry["models"])
@@ -3527,6 +3524,7 @@ def test_gateway_provider_max_output_tokens_validation_rejects_negative() -> Non
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("example_gateway_domain")
 @pytest.mark.parametrize("catalog_unavailable", [False, True])
 def test_cli_config_pi_provider_uses_live_discovery_over_catalog_default(
     monkeypatch: pytest.MonkeyPatch,
@@ -3618,6 +3616,7 @@ def test_select_databricks_claude_model_needs_catalog_or_served_claude(
         creds._select_databricks_claude_model(None, [])
 
 
+@pytest.mark.usefixtures("example_gateway_domain")
 def test_cli_config_pi_provider_explicit_override_wins_over_discovery(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -3663,6 +3662,7 @@ def test_cli_config_pi_provider_explicit_override_wins_over_discovery(
     assert provider.model == PINNED, f"pinned model override must survive; got {provider.model!r}"
 
 
+@pytest.mark.usefixtures("example_gateway_domain")
 def test_cli_config_pi_provider_discovery_failure_falls_back_to_catalog_default(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

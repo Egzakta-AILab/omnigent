@@ -3565,7 +3565,7 @@ def test_databricks_preflight_uses_cli_workspace_id_for_workspace_mount(
         "User-Agent": client_user_agent(),
     }
     assert requests[1]["params"] == {"o": "4242424242424242"}
-    assert stored == [(server, "https://example.databricks.com", "4242424242424242")]
+    assert stored == [(server, server.removesuffix("/api/2.0/omnigent"), "4242424242424242")]
 
 
 def test_databricks_preflight_refresh_handles_duplicate_workspace_profiles(

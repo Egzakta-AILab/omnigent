@@ -5614,6 +5614,7 @@ def test_materialize_attributes_effective_gateway_without_copying_credentials(
     assert providers == tomllib.loads(resolved_config)["model_providers"]
 
 
+@pytest.mark.usefixtures("example_gateway_domain")
 @pytest.mark.parametrize("existing_name", [None, "My Gateway", "", " \t", 7, False])
 def test_materialize_inherited_gateway_name_preserves_explicit_values(
     tmp_path: Path, existing_name: str | int | bool | None
@@ -5638,7 +5639,7 @@ def test_materialize_inherited_gateway_name_preserves_explicit_values(
         effective_providers={
             "Managed": {
                 "name": "Managed Gateway",
-                "base_url": "https://ws.cloud.databricks.com/ai-gateway/codex/v1",
+                "base_url": "https://workspace.workspaces.example.test/ai-gateway/codex/v1",
             }
         },
     )

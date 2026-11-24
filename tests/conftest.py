@@ -871,3 +871,15 @@ def lowered_idle_thresholds(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(terminal_module, "_IDLE_POLL_INTERVAL_SECONDS", 0.1)
     monkeypatch.setattr(terminal_module, "_IDLE_MARKER_SUBSTRINGS", [])
     monkeypatch.setattr(terminal_module, "_IDLE_MARKER_THRESHOLD_SECONDS", 0.4)
+
+
+@pytest.fixture
+def example_gateway_domain(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Trust the reserved workspace test domain for this test's gateway fixtures."""
+    from omnigent import databricks_ai_gateway as gateway
+
+    monkeypatch.setattr(
+        gateway,
+        "DATABRICKS_TRUSTED_HOST_SUFFIXES",
+        (*gateway.DATABRICKS_TRUSTED_HOST_SUFFIXES, ".workspaces.example.test"),
+    )

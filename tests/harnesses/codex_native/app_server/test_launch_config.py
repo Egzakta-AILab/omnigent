@@ -31,12 +31,13 @@ from tests.harnesses.codex_native.app_server._support import (
 )
 
 
+@pytest.mark.usefixtures("example_gateway_domain")
 @pytest.mark.parametrize("reused_home", [False, True], ids=["fresh", "resumed"])
 @pytest.mark.parametrize(
     "source_url,expected_agent",
     [
         ("https://source.example.test/v1", None),
-        ("https://ws.cloud.databricks.com/ai-gateway/codex/v1", "codex"),
+        ("https://workspace.workspaces.example.test/ai-gateway/codex/v1", "codex"),
     ],
     ids=["generic", "gateway"],
 )

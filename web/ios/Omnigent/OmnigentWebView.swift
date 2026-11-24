@@ -7,7 +7,7 @@ struct OmnigentWebView: UIViewRepresentable {
   let initialURL: URL
   @ObservedObject var model: WebViewModel
   @ObservedObject var settings: SettingsStore
-  let databricksInternalFeaturesEnabled: Bool
+  let managedDeviceGuidanceEnabled: Bool
   /// A nil message returns to setup after cancellation without showing an error.
   let loadFailed: (URL, String?) -> Void
   let loadSucceeded: () -> Void
@@ -32,10 +32,10 @@ struct OmnigentWebView: UIViewRepresentable {
   var serverSignedOut: ((URL, String) -> Void)?
 
   static func connectionErrorMessage(
-    for error: Error, databricksInternalFeaturesEnabled: Bool
+    for error: Error, managedDeviceGuidanceEnabled: Bool
   ) -> String {
     let failure = transportFailure(of: error)
-    if databricksInternalFeaturesEnabled, failure.domain == NSURLErrorDomain,
+    if managedDeviceGuidanceEnabled, failure.domain == NSURLErrorDomain,
       [NSURLErrorCannotFindHost, NSURLErrorDNSLookupFailed].contains(failure.code)
     {
       return "Couldn’t reach the server. Check your device’s compliance status in Jamf."
@@ -1239,11 +1239,11 @@ struct OmnigentWebView: UIViewRepresentable {
     /// Nil stays silent after cancellation. Everything else shares the page-load wording, so an
     /// unreachable managed host reads the same during native sign-in as during a page load.
     static func workspaceErrorMessage(
-      _ error: Error, databricksInternalFeaturesEnabled: Bool = false
+      _ error: Error, managedDeviceGuidanceEnabled: Bool = false
     ) -> String? {
       if error is CancellationError || error as? DatabricksSessionError == .cancelled { return nil }
       return OmnigentWebView.connectionErrorMessage(
-        for: error, databricksInternalFeaturesEnabled: databricksInternalFeaturesEnabled)
+        for: error, managedDeviceGuidanceEnabled: managedDeviceGuidanceEnabled)
     }
 
     /// Also ends a native-OIDC connection or attempt, which shares the same return to setup.
@@ -1269,7 +1269,7 @@ struct OmnigentWebView: UIViewRepresentable {
           parent.initialURL,
           Self.workspaceErrorMessage(
             error,
-            databricksInternalFeaturesEnabled: parent.databricksInternalFeaturesEnabled))
+            managedDeviceGuidanceEnabled: parent.managedDeviceGuidanceEnabled))
       }
     }
 
@@ -1756,7 +1756,7 @@ struct OmnigentWebView: UIViewRepresentable {
       parent.loadFailed(
         failedURL,
         OmnigentWebView.connectionErrorMessage(
-          for: error, databricksInternalFeaturesEnabled: parent.databricksInternalFeaturesEnabled)
+          for: error, managedDeviceGuidanceEnabled: parent.managedDeviceGuidanceEnabled)
       )
     }
 

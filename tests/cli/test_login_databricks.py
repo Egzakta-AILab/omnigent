@@ -1503,8 +1503,8 @@ def test_workspace_url_skips_authed_probe_without_databricks_extra(
     [
         # The guide hands out the web URL without a scheme; default https.
         (
-            "dbc-12345678-abcd.cloud.databricks.com/omnigent",
-            "https://dbc-12345678-abcd.cloud.databricks.com/omnigent",
+            "workspace.example.test/omnigent",
+            "https://workspace.example.test/omnigent",
         ),
         ("example.cloud.databricks.com", "https://example.cloud.databricks.com"),
         # Loopback hosts stay http — local dev servers are plain http.
