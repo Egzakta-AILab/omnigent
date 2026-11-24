@@ -1,6 +1,6 @@
 "use strict";
 
-// Real SPA → preload → main → CLI process → session API. The dbcert sign-in
+// Real SPA → preload → main → CLI process → session API. The device certificate sign-in
 // and machine policy are fixtures. This does not exercise macOS SSO.
 const { it } = require("node:test");
 const assert = require("node:assert/strict");

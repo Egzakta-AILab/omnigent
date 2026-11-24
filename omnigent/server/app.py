@@ -4001,8 +4001,8 @@ def create_app(
         needs_setup = False
         if accounts_enabled and account_store is not None:
             needs_setup = not any(u.has_password for u in account_store.list_users())
-        # databricks_features gates the Databricks-only UI hints (the
-        # "Databricks Lakebox" connect tab). True only when the lakebox launcher
+        # databricks_features gates the managed workspace UI hints (the
+        # managed sandbox connection tab). True only when the managed sandbox launcher
         # module is present; otherwise the SPA shows the provider-agnostic hints.
         # find_spec is side-effect-free (no import).
         import importlib.util

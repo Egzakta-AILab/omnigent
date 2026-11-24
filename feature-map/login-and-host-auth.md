@@ -67,7 +67,7 @@ be able to write resources without a separate Omnigent account.
   (refused, no browser), a window connected to a server on this computer
   (`localhost`; refused in the dialog before connecting), and failures, shown
   only in the app's own window.
-  Hidden where **Run on Arca** is offered (the managed-features flag on a
+  Hidden where managed host enrollment is offered (the managed-features flag on a
   managed server).
 - `desktop-join-install-cli`: in desktop onboarding (the V2 server selector,
   the macOS default), a new user without the `omnigent` CLI who joins a server

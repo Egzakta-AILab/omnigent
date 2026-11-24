@@ -1,15 +1,10 @@
 "use strict";
 
 /**
- * Arca host connection.
- *
- * Connecting an Arca instance as an Omnigent host means running, over
- * `arca ssh`:
- *
- *   isaac omni host --server <url> --background --non-interactive
+ * Enroll the managed host by starting its background daemon over SSH.
  *
  * The remote daemon then opens the ordinary outbound host tunnel using the
- * instance's own Omnigent OAuth grant; generic Arca sign-in is not sufficient.
+ * instance's own Omnigent OAuth grant; a generic host sign-in is not sufficient.
  * `--background` exits 0 only once the daemon registered with the server, and
  * `--non-interactive` fails instead of waiting on a browser login, so the exit
  * code is a reliable signal.
@@ -840,7 +835,7 @@ function connectArcaHost(serverUrl, deps = {}) {
 }
 
 /**
- * Well-known install locations for dbcert.
+ * Well-known install locations for the device certificate helper.
  *
  * @returns {string[]}
  */
@@ -871,7 +866,7 @@ function resolveDbcertPathAsync(deps = {}) {
 
 /**
  * Renew this machine's dbcert with `dbcert --force`, which signs in through
- * the browser. Unless skipped, dbcert also syncs the primary Arca instance.
+ * the browser. The helper can also sync the primary managed host.
  * `--force` mints a new certificate even while the current one is valid.
  *
  * @param {{ resolveDbcertPath?: () => string | null | Promise<string | null>, spawn?: typeof spawn, timeoutMs?: number, killGraceMs?: number, skipArcaSync?: boolean }} [deps]

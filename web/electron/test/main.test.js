@@ -856,7 +856,7 @@ describe("Arca extend IPC", () => {
     assert.deepEqual(h.calls.arcaExtends, []);
   });
 
-  it("rejects Arca extension on a local server even with managed features", async (t) => {
+  it("rejects managed host extension on a local server even with managed features", async (t) => {
     const h = loadNavigationHarness({ serverUrl: "http://localhost:6767", internalFeatures: true });
     t.after(h.cleanup);
     h.api.registerIpc();
@@ -2958,7 +2958,7 @@ describe("managed server preference wiring", () => {
 });
 
 describe("managed local-host CLI wiring", () => {
-  it("selects isaac omni only behind the managed features flag and managed server gate", () => {
+  it("selects the managed CLI wrapper only behind the managed features flag and managed server gate", () => {
     assert.match(
       liveCode,
       /function hostCliCommand\(serverUrl\)[\s\S]{0,300}databricksInternalFeaturesEnabled\(\)[\s\S]{0,120}isDatabricksManagedServerUrl\(serverUrl\)[\s\S]{0,300}prefixArgs:\s*\["omni"\]/,
@@ -4641,11 +4641,11 @@ describe("browser-view teardown on server change (src/main.js)", () => {
     assert.equal(eligible(context), false);
     const event = { sender: h.webContents, senderFrame: { url: serverUrl } };
     assert.match(hint(event, "http://localhost"), /New session > Host > Run on Arca/);
-    assert.match(
-      hint(event, "https://spog.dev.localhost:23090/one"),
-      /New session > Host > Run on Arca/,
+    assert.equal(
+      hint(event, "https://preview.dev.localhost:23090/one"),
+      hint(event, "http://localhost"),
     );
-    assert.equal(hint(event, "http://lvh.me"), null, "public aliases get no Arca hint");
+    assert.equal(hint(event, "http://lvh.me"), null, "public aliases get no managed-host hint");
     await h.api.startArcaHostConnect(serverUrl).promise;
     assert.equal(eligible(context), true);
     assert.equal(hint(event, "http://localhost"), null);
@@ -6051,10 +6051,10 @@ describe("SSH connect IPC", () => {
     assert.deepEqual(h.calls.sshConnects, []);
   });
 
-  // Run on Arca replaces SSH connect where it is offered: the managed features flag on a managed server.
+  // managed-host connection replaces SSH connect where it is offered: the managed features flag on a managed server.
   const managed = "https://workspace.cloud.databricks.com/omnigent";
   const arcaCases = {
-    "a laptop with managed features on a managed server, which offers Run on Arca": [
+    "a laptop with managed features on a managed server, which offers managed-host connection": [
       managed,
       true,
       false,

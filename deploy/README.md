@@ -410,7 +410,7 @@ heartbeat. Ordinary heartbeats keep their existing cost. Expiry is measured
 from the last renewal; disconnected hosts receive no renewals, and an expired
 token cannot open a new connection. Renewal also extends the validity of any
 leaked copy of that token. This setting does not change sandbox lifetime or
-Mac/Arca user-login credentials.
+user-login credentials from a laptop or remote host.
 
 **Stopping archived sessions' sandboxes.** Set `sandbox.stop_on_archive: true`
 (off by default) to stop a session's sandbox when the session is archived, after

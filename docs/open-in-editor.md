@@ -12,18 +12,12 @@ identify the session's host as its own machine. Mobile shells hide the controls.
 The browser uses a normal link to invoke the editor, so the page's `frame-src`
 policy does not need to allow editor protocol schemes.
 
-Remote controls require the host to be online. The UI infers standard SSH
-aliases from the existing host list: provider
-`databricks-arca` uses `arca.ssh`, and provider `arclet` uses
-`arclet_<host.name>.ssh`. Arclet names must be 1–64 ASCII letters, digits,
-underscores, or hyphens, start with a letter or digit, and not start with
-`arclet_` or `arclet-`. The alias must exist in your local SSH configuration.
-For user-connected hosts without a sandbox provider, the UI reads the host's
-machine-type label through the existing authenticated session file API. A
-unique `arca_type arca` label selects `arca.ssh`. For `arca_type arclet`, it
-uses the validated canonical Arclet name for `arclet_<name>.ssh`. Display names,
-including IP-based hostnames and custom names, do not determine the machine
-type. Other types, including `isaac-arca`, are not treated as personal Arcas.
+Remote controls require an online host with a supported SSH alias. Configure
+that alias in your local SSH configuration. For sandbox providers the UI
+derives it from the provider and canonical host name. For user-connected hosts,
+the UI reads the machine-type label through the authenticated session file API.
+It ignores display names (including IP-based names) when determining the type.
+Unsupported or ambiguous labels and invalid canonical names disable the link.
 Discovery is cached per session and host for five minutes and shared by the
 folder and file controls. Clicking Open performs no metadata request.
 Remote links currently support POSIX paths, including Arca and Arclet workspaces.

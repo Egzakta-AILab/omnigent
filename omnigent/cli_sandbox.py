@@ -423,7 +423,7 @@ def sandbox_connect(
     )
 
 
-# Hidden lakebox alias; still fully invocable.
+# Preserve the legacy provider alias as a hidden command.
 @click.group("lakebox", hidden=True)
 @click.pass_context
 def lakebox(ctx: click.Context) -> None:

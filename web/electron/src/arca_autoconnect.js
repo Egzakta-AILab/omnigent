@@ -1,10 +1,9 @@
 "use strict";
 
 /**
- * Arca auto-connect: when a window loads an eligible server, connect the user's
- * Arca instance to it as a host by running the same idempotent
- * `arca ssh … isaac omni host --background` command as the manual "Run on Arca"
- * item, without the consent console. Runs at most once per server target
+ * When a window loads an eligible server, connect the user's managed host.
+ * Use the same idempotent command as manual enrollment, without a console.
+ * Runs at most once per server target
  * (including the workspace selector) per app launch. Only the main process
  * starts runs; a retry is allowed only after a failure. Whether the feature is
  * on at all is part of `isEligible`.

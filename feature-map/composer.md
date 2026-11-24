@@ -537,7 +537,7 @@ apply only to that side chat. See the [side-chat settings recipe](sessions.md).
   in-session composer, then close the browser. Reopen after startup and check
   that all three reached the agent in order. Ordinary busy-session queueing
   resumes after the first input is delivered.
-- For a managed sandbox that fails to start (e.g. an Arclet whose host never
+- For a managed sandbox that fails to start (e.g. a workspace whose host never
   comes online), send a prompt with an attachment and wait for the failure. Check
   the prompt stays marked **Not delivered**, also after reload. **Copy message to
   new session** opens New Chat with the text and attachment.
@@ -548,7 +548,7 @@ apply only to that side chat. See the [side-chat settings recipe](sessions.md).
   and type `/` for Claude or `$` for Codex before the first send. The menu previews that Arca's home-level
   catalog; selecting a skill completes the prompt while the launch stays on Arclet.
   Skill roots or plugins installed only on the connected host may be missing on
-  the sandbox. With no connected Arca, host skills become available after the sandbox starts.
+  the sandbox. Without a connected host, host skills become available after the sandbox starts.
   SDK agents continue using their bundled skills before the sandbox starts.
   Browser coverage: `tests/browser_ui/chat/test_arclet_skills.py`.
 - Open **MCPs** in the workspace bar above the composer (the plug icon when space is tight), then turn
@@ -1136,7 +1136,7 @@ Other connection providers alone do not enable the managed MCP picker.
 - Test touch sizing with a real touch device or browser touch emulation; resizing
   a mouse browser alone does not enable it.
 
-- The Arclet dbcert preflight needs the updated desktop shell and web UI, with
+- The remote sandbox certificate preflight needs the updated desktop shell and web UI, with
   managed features enabled on the server. Browsers, older shells, other sandbox
   providers, and already-connected hosts skip this check. Refreshing a host's
   credential from the session banner does not prove new-session gating works.

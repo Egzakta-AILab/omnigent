@@ -143,7 +143,7 @@ def _builtin_contribution() -> SandboxProviderContribution:
                 launcher_class="omnigent.onboarding.sandboxes.lakebox:LakeboxLauncher",
             ),
             # Databricks Sandbox provider over the REST command-execution API (no
-            # SSH). Distinct from `lakebox`.
+            # SSH). The managed sandbox uses a separate provider.
             "databricks": SandboxProviderMetadata(
                 name="databricks",
                 launcher_class=(

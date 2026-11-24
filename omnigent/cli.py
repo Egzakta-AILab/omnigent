@@ -12394,7 +12394,7 @@ def setup(internal_beta: bool) -> None:
         ui.print_brandmark("setup")
 
     if internal_beta:
-        # The --internal-beta defaults are not in every build. Fail loud with a
+        # The managed setup defaults are not in every build. Fail loud with a
         # clear message instead of an ImportError deep in the onboarding flow.
         try:
             import omnigent.onboarding.internal_beta  # type: ignore[import-not-found]  # noqa: F401

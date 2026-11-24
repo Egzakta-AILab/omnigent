@@ -12,10 +12,11 @@ ai.omnigent.desktop
 
 ## Keys
 
-| Key                                 | Type             | Required | Default | Description                                                                                                                         |
-| ----------------------------------- | ---------------- | -------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `serverUrls`                        | Array of strings | No       | `[]`    | Server URLs to offer, most-preferred first. Each must use `https://`. At most 10.                                                   |
-| `databricksInternalFeaturesEnabled` | Boolean          | No       | `false` | Defaults macOS apps to V2 onboarding and enables managed features on supported servers. Only an explicit boolean `true` enables it. |
+| Key          | Type             | Required | Default | Description                                                                       |
+| ------------ | ---------------- | -------- | ------- | --------------------------------------------------------------------------------- |
+| `serverUrls` | Array of strings | No       | `[]`    | Server URLs to offer, most-preferred first. Each must use `https://`. At most 10. |
+
+The optional managed-features Boolean described below defaults to `false`. Set it to `true` to enable V2 onboarding and managed features on supported servers.
 
 A schemeless host is accepted and interpreted as `https://`. Paths are
 preserved, so an administrator can provide a workspace mount directly:
@@ -57,15 +58,13 @@ is opened or the connect screen is loaded.
 ## Managed features
 
 When `databricksInternalFeaturesEnabled` is `true` **and** the window is
-connected to an eligible HTTPS server, the new-session host picker offers
-**Run on Arca**, which connects the user's Arca instance to the current server
-as a host. On any other server
-the Arca option is disabled. Selecting it opens a connect console that shows the
+connected to an eligible HTTPS server, the new-session host picker can enroll the user's managed host with that server. On other servers
+the option is disabled. Selecting it opens a connect console that shows the
 exact command. After confirmation, the command's live output streams into an
 embedded terminal pane. A connect already in flight is re-surfaced (console
 focused, outcome shared) rather than refused, and the run has a hard timeout so
 a stalled connection always settles. Once connected, the option disappears and
-the box's host row is tagged **Arca instance** (recognized by the host id
+the host row identifies the connected instance (recognized by the host id
 remembered at connect time). Like the server list, the flag is read from macOS
 on demand, so profile changes apply without a restart.
 
@@ -76,7 +75,7 @@ SSH field stays.
 
 Remote hosts need their own renewable **Omnigent** OAuth grant. Desktop browser
 sign-in does not replace it. During explicit runner setup, an
-authentication-required result starts `isaac omni login <server-url>` on Arca
+authentication-required result starts the Omnigent login command on the remote host
 and retries the noninteractive host command once after sign-in. The connect
 console does the same after the same consent click. Tokens and login output are
 not forwarded to the desktop renderer. Closing the sign-in console cancels the

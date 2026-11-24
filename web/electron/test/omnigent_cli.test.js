@@ -36,7 +36,7 @@ const {
 } = require("../src/omnigent_cli");
 
 describe("cliCommandParts", () => {
-  it("keeps plain CLI paths bare and adds fixed isaac argv without a shell", () => {
+  it("keeps plain CLI paths bare and adds fixed launcher arguments without a shell", () => {
     assert.deepEqual(cliCommandParts("/bin/omnigent"), {
       executable: "/bin/omnigent",
       prefixArgs: [],
@@ -713,7 +713,7 @@ describe("localHostId", () => {
 
 describe("probeHostTunnel slice key", () => {
   const HOST_ID = "0f50e4dd924d941d15ae083645926dc3";
-  const WORKSPACE = "https://example.cloud.databricks.com/api/2.0/omnigent";
+  const WORKSPACE = "https://workspace.example.org/api/2.0/omnigent";
   const prevSetting = process.env.OMNIGENT_HOST_SLICE_KEY_ENABLED;
   afterEach(() => {
     mock.restoreAll();
@@ -764,7 +764,7 @@ describe("probeHostTunnel slice key", () => {
     delete process.env.OMNIGENT_HOST_SLICE_KEY_ENABLED;
     assert.equal(hostRoutingEnabled(`${WORKSPACE}/`), true);
     assert.equal(hostRoutingEnabled(`${WORKSPACE}?o=123`), true);
-    assert.equal(hostRoutingEnabled("https://example.cloud.databricks.com/omnigent"), false);
+    assert.equal(hostRoutingEnabled("https://workspace.example.org/omnigent"), false);
     assert.equal(hostRoutingEnabled("not a url"), false);
   });
 });

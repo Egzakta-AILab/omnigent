@@ -343,7 +343,7 @@ function databricksInternalFeaturesEnabled() {
 }
 
 /**
- * The Arca connect console: a modal owned by the shell that asks consent by
+ * The managed host connect console: a modal owned by the shell that asks consent by
  * showing the exact command, then streams its live output. A repeat connect
  * while one is in flight re-focuses the console and shares its outcome.
  */
@@ -483,7 +483,7 @@ function arcaAutoConnectFeatureEnabled() {
 
 /** Launch-time Arca auto-connect, behind the feature flag above. */
 const arcaAutoConnect = createArcaAutoConnect({
-  // Auto-connect needs arca itself: the managed flag alone keeps the manual
+  // Auto-connect needs the host CLI: the managed flag alone keeps the manual
   // item (which explains what's missing) but shouldn't fail on every launch.
   isEligible: (serverUrl) =>
     arcaAutoConnectFeatureEnabled() &&
@@ -1953,7 +1953,7 @@ const ONBOARDING_RUNNER_TTL_MS = 10 * 60 * 1000;
 
 /**
  * CLI command for desktop host enrollment on `serverUrl`. Managed
- * windows use `isaac omni` behind the same effective gate as Arca (managed
+ * windows use the managed launcher under the same eligibility rules (managed
  * features flag + managed HTTPS server); every other window keeps the configured
  * or auto-detected Omnigent CLI. Returns null when the selected launcher is
  * unavailable.
@@ -5506,11 +5506,11 @@ function registerIpc() {
     return result;
   });
 
-  // SPA → connect the user's Arca instance to the window's server as a host,
-  // by running `isaac omni host --background` on the instance over `arca ssh`.
+  // SPA → connect the user's managed host to the window's server
+  // by starting the remote daemon over SSH.
   // Gated three ways: pinned-origin sender, the managed features flag re-checked
   // HERE (the renderer is not trusted to have checked it), and user consent in
-  // the connect console (arca_connect_window.js), which shows the exact command.
+  // the connect console, which shows the exact command.
   // A connect already in flight is re-surfaced, never refused. The runner
   // enforces CONNECT_TIMEOUT_MS so a wedged command always settles.
   ipcMain.handle("omnigent:arca-connect", async (event) => {
@@ -5522,7 +5522,7 @@ function registerIpc() {
     }
     const serverUrl = senderServerUrl(event);
     if (!serverUrl) return { ok: false, error: "this window is not connected to a server" };
-    // Same scope as get-desktop-features, re-checked here: an Arca instance may
+    // Same scope as get-desktop-features, re-checked here: a managed host may
     // only be enrolled against a managed server.
     if (!isDatabricksManagedServerUrl(serverUrl)) {
       return { ok: false, error: "Arca hosts can only connect to Databricks-managed servers." };
@@ -5578,8 +5578,8 @@ function registerIpc() {
     }
   });
 
-  // SPA → renew this machine's dbcert from the expired-dbcert banner. Same
-  // gates as arca-extend. Clicks from several windows share one sign-in.
+  // SPA → renew this machine's device certificate from the expired-certificate banner. Same
+  // gates as manual host renewal. Clicks from several windows share one sign-in.
   let dbcertPreflight = null;
   let dbcertGeneration = 0;
   let dbcertRefresh = null;
