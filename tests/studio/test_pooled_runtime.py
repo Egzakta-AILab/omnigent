@@ -72,6 +72,8 @@ def test_persisted_pool_rejects_shell_and_native_launch_without_provider(db_uri,
     client = TestClient(app)
     assert client.get(path, headers=headers).status_code == 403
     assert client.post(path, headers=headers, json={}).status_code == 403
+    policy = client.post(f"/v1/sessions/{source.id}/policies/evaluate", headers=headers, json={})
+    assert policy.status_code == 403
     for suffix in ("", "?read_only=true"):
         with (
             pytest.raises(WebSocketDisconnect) as error,
