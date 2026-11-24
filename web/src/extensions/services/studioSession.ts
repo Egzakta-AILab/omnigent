@@ -36,10 +36,11 @@ export function peekStudioSelection(
 
 function matchesOrigin(origin: string | null | undefined, repository: string) {
   if (!origin) return false;
-  const match = /^(?:https:\/\/github\.com\/|git@github\.com:)([\w.-]+\/[\w.-]+?)(?:\.git)?$/i.exec(
-    origin,
+  const remote = origin.toLowerCase();
+  const slug = repository.toLowerCase();
+  return [`https://github.com/${slug}`, `git@github.com:${slug}`].some(
+    (candidate) => remote === candidate || remote === candidate + ".git",
   );
-  return match?.[1].toLowerCase() === repository.toLowerCase();
 }
 
 export async function studioSessionLocation(
