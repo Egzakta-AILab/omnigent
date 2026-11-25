@@ -143,7 +143,7 @@ def test_modern_entry_point_discovery_selects_extension_group(
     assert registry._entry_points() == (expected,)
 
 
-def test_extension_permission_values_include_read_only_sessions() -> None:
+def test_extension_permission_values_match_public_contract() -> None:
     assert {permission.value for permission in ExtensionPermission} == {
         "linear.read",
         "navigation",
@@ -151,6 +151,11 @@ def test_extension_permission_values_include_read_only_sessions() -> None:
         "projects.write",
         "sessions.read",
         "storage.user",
+        "studio.fleet",
+        "studio.inbox",
+        "studio.releases",
+        "studio.reviews",
+        "studio.tasks",
     }
     registry.validate_manifest(
         replace(_manifest(), permissions=frozenset({ExtensionPermission.SESSIONS_READ}))
