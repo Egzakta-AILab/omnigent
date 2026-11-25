@@ -803,8 +803,14 @@ def register_hooks_routes(
         from omnigent.server.routes import sessions as _sf
 
         user_id = _sf._get_user_id(request, auth_provider)
+        checked_conv = getattr(request.state, "studio_checked_conversation", None)
         access = await _require_access_and_level(
-            user_id, session_id, LEVEL_READ, permission_store, conversation_store
+            user_id,
+            session_id,
+            LEVEL_READ,
+            permission_store,
+            conversation_store,
+            conversation=checked_conv,
         )
         is_read_only = permission_store is not None and (
             access.level is None or access.level < LEVEL_EDIT

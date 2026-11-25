@@ -72,9 +72,36 @@ describe("useExtensionHostServices", () => {
     const { result } = renderHook(() => useExtensionHostServices(extension), { wrapper });
     expect(Object.keys(result.current.methods).sort()).toEqual(
       Object.keys(HOST_METHOD_PERMISSIONS)
-        .filter((method) => !method.startsWith("linear.") && !method.startsWith("studio."))
+        .filter(
+          (method) =>
+            method !== "navigation.openStudioSession" &&
+            !method.startsWith("linear.") &&
+            !method.startsWith("studio."),
+        )
         .sort(),
     );
+  });
+
+  it("offers Studio session navigation only to Work with both required permissions", () => {
+    for (const [id, permissions, expected] of [
+      ["egzakta.work", ["studio.tasks", "navigation"], true],
+      ["egzakta.work", ["studio.tasks"], false],
+      ["another.extension", ["studio.tasks", "navigation"], false],
+    ] as const) {
+      const { result, unmount } = renderHook(
+        () =>
+          useExtensionHostServices({
+            ...extension,
+            id,
+            permissions: [...permissions],
+          }),
+        { wrapper },
+      );
+      expect(typeof result.current.methods["navigation.openStudioSession"] === "function").toBe(
+        expected,
+      );
+      unmount();
+    }
   });
 
   it("grants only the declared Studio scopes", () => {

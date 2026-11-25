@@ -19,6 +19,9 @@ _OWNERS = {
     ("inbox", "teamView"): ("egzakta.comms", "egzakta-comms"),
     ("releases", "getCandidate"): ("egzakta.release", "egzakta-release"),
     ("releases", "recordScenario"): ("egzakta.release", "egzakta-release"),
+    ("releases", "previewIssue"): ("egzakta.release", "egzakta-release"),
+    ("releases", "confirmIssue"): ("egzakta.release", "egzakta-release"),
+    ("releases", "createIssueConfirmed"): ("egzakta.release", "egzakta-release"),
     ("releases", "signOff"): ("egzakta.release", "egzakta-release"),
 }
 

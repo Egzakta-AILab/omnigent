@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 import httpx
 import yaml
-from fastapi import FastAPI, Query, Request
+from fastapi import Depends, FastAPI, Query, Request
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
@@ -2636,7 +2636,22 @@ def create_app(
         else None
     )
 
-    app = FastAPI(title="Omnigent Server", lifespan=_lifespan)
+    from omnigent.studio.pooled_hosts import PROVIDER, pooled_access_dependency
+
+    coder_enabled = bool(sandbox_config and sandbox_config.for_provider(PROVIDER))
+    app = FastAPI(
+        title="Omnigent Server",
+        lifespan=_lifespan,
+        dependencies=[
+            Depends(
+                pooled_access_dependency(
+                    conversation_store, host_store, permission_store, auth_provider
+                )
+            )
+        ]
+        if permission_store is not None or coder_enabled
+        else [],
+    )
     from omnigent.runtime import telemetry
 
     telemetry.instrument_fastapi_app(app)
@@ -2854,11 +2869,34 @@ def create_app(
     from omnigent.server.sandbox_profiles import SandboxProfileCatalog
 
     sandbox_profiles = (
-        SandboxProfileCatalog(conversation_store, sandbox_config, host_store)
+        SandboxProfileCatalog(conversation_store, sandbox_config, host_store, permission_store)
         if host_store is not None and resolved_feature_flags.enabled(Feature.SANDBOX_PROFILES)
         else None
     )
     app.state.sandbox_profiles = sandbox_profiles
+    if host_store is not None:
+        from omnigent.host.frames import CAP_STUDIO_SEAT, HostLaunchRunnerFrame
+        from omnigent.server.host_registry import HostConnection
+        from omnigent.studio.pooled_hosts import pooled_target
+        from omnigent.studio.seat_pool import assigned_profile
+
+        def studio_profile_for_launch(
+            conn: HostConnection, frame: HostLaunchRunnerFrame
+        ) -> str | None:
+            harness, session_id = frame.harness, frame.session_id
+            if harness not in ("claude-native", "codex-native") or not pooled_target(
+                conversation_store, host_store, session_id, conn.host_id
+            ):
+                return None
+            if (
+                not coder_enabled
+                or not session_id
+                or CAP_STUDIO_SEAT not in conn.hello.capabilities
+            ):
+                raise ValueError("Pooled dispatch requires a current host")
+            return assigned_profile(conversation_store.storage_location, harness, session_id)
+
+        host_registry.studio_profile_for_launch = studio_profile_for_launch
     if host_store is not None and sandbox_profiles is not None:
 
         def admit_profiled_launch(

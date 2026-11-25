@@ -57,3 +57,56 @@ describe("Studio v1 extension transport", () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("release failure confirmation", () => {
+  const intent = {
+    candidate_id: "rc",
+    scenario_id: "qa-01",
+    request_id: "id",
+    head_sha: "a".repeat(40),
+  };
+  const issuePreview = {
+    linear_workspace: "ws",
+    team: "QA",
+    title: "Failure",
+    body: "Observed failure",
+    recipient: "owner",
+    preview_digest: "d".repeat(64),
+  };
+  it.each([true, false])(
+    "shows the server's exact issue before granting (%s)",
+    async (approved) => {
+      const fetch = vi
+        .fn()
+        .mockResolvedValueOnce(Response.json(issuePreview))
+        .mockResolvedValueOnce(Response.json({ confirmation_token: "once" }))
+        .mockResolvedValueOnce(Response.json({ issue_id: "new" }));
+      const confirm = vi.fn().mockResolvedValue(approved);
+      const run = studioHostMethods("egzakta.release", fetch, confirm)[
+        "studio.releases.createIssueConfirmed"
+      ](
+        { ...intent, title: "iframe title", confirmation_token: "forged" },
+        new AbortController().signal,
+      );
+      if (approved) await expect(run).resolves.toEqual({ issue_id: "new" });
+      else await expect(run).rejects.toMatchObject({ code: "Cancelled" });
+      expect(confirm.mock.calls[0][0]).toMatchObject({
+        ...intent,
+        title: "Failure",
+        recipient: "owner",
+        team: "QA",
+        body: "Observed failure",
+      });
+      expect(fetch.mock.calls.map(([url]) => url.split("/").pop())).toEqual(
+        approved ? ["previewIssue", "confirmIssue", "createIssueConfirmed"] : ["previewIssue"],
+      );
+      expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual(intent);
+      if (approved)
+        expect(JSON.parse(fetch.mock.calls[2][1].body)).toEqual({
+          ...intent,
+          preview_digest: issuePreview.preview_digest,
+          confirmation_token: "once",
+        });
+    },
+  );
+});

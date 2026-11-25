@@ -1,3 +1,4 @@
+import { SessionTaskThread, TaskThreadDisclosure, useStudioThreadPage } from "./SessionTaskThread";
 import { ReadableMarkdown } from "@/components/ReadableMarkdown";
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -6,6 +7,9 @@ import { Input } from "@/components/ui/input";
 import { type Conversation, useProjects, useProjectSessions } from "@/hooks/useConversations";
 import { useIdentityReady, useViewerId } from "@/hooks/useViewerId";
 import { useServerInfo } from "@/lib/CapabilitiesContext";
+import { authenticatedFetch } from "@/lib/identity";
+import { getOmnigentServerIdentity } from "@/lib/host";
+import type { StudioTask } from "../../../sdks/web-extension/src/studio";
 import { getProject } from "@/lib/projectsApi";
 import { Link, useNavigate, useSearchParams } from "@/lib/routing";
 import { getSession, updateSession } from "@/lib/sessionsApi";
@@ -64,6 +68,99 @@ export function SessionTaskBrief({
         {project.isError && <p role="alert">Could not load the task project.</p>}
       </div>
     </details>
+  );
+}
+
+export function SharedSessionTaskBrief({
+  sessionId,
+  fallback,
+  threadOnly = false,
+}: {
+  sessionId: string;
+  fallback: React.ReactNode;
+  threadOnly?: boolean;
+}) {
+  const thread = useStudioThreadPage();
+  const viewer = useViewerId();
+  const server = getOmnigentServerIdentity();
+  const query = useQuery({
+    queryKey: ["studio-shared-session-tasks", server, viewer, sessionId],
+    enabled: !!viewer && !!server,
+    retry: false,
+    queryFn: async ({ signal }): Promise<StudioTask[]> => {
+      const response = await authenticatedFetch(
+        "/v1/extensions/egzakta.work/studio/v1/tasks/forSession",
+        {
+          method: "POST",
+          signal,
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ session_id: sessionId }),
+        },
+      );
+      if (!response.ok) throw new Error("Could not load the shared task.");
+      return (await response.json()).items;
+    },
+  });
+  if (query.isError)
+    return (
+      <>
+        {fallback}
+        <p role="alert" className="px-3 py-2 text-sm">
+          Could not load the shared task.
+        </p>
+      </>
+    );
+  if (threadOnly && query.isPending && query.fetchStatus === "fetching")
+    return <p role="status">Loading shared tasks…</p>;
+  if (!query.data?.length) return fallback;
+  if (threadOnly)
+    return (
+      thread &&
+      query.data.map((task) => (
+        <section key={task.task_id}>
+          <p>{task.acceptance_check || task.linear_issue_id}</p>
+          <SessionTaskThread {...thread} sessionId={sessionId} taskId={task.task_id} />
+        </section>
+      ))
+    );
+  return (
+    <>
+      {query.data.map((task) => (
+        <details key={task.task_id} className="shrink-0 border-b px-3 py-2 text-sm">
+          <summary className="cursor-pointer font-medium">Task · {task.linear_issue_id}</summary>
+          <div className="mt-2 max-h-52 space-y-2 overflow-y-auto">
+            {task.acceptance_check && <p>Acceptance check · {task.acceptance_check}</p>}
+            {task.pull_requests.map((pr) => (
+              <a
+                key={pr.repository + "#" + pr.number}
+                className="block underline"
+                href={
+                  "https://github.com/" +
+                  pr.repository +
+                  "/pull/" +
+                  pr.number +
+                  "/commits/" +
+                  pr.head_sha
+                }
+                target="_blank"
+                rel="noreferrer"
+              >
+                {pr.repository} #{pr.number} · {pr.head_sha}
+              </a>
+            ))}
+            <Link className="block underline" to="/extensions/egzakta.work/board">
+              Open Work
+            </Link>
+            <Link className="block underline" to={sessionReviewUrl(sessionId)}>
+              Review PR
+            </Link>
+          </div>
+          {thread && (
+            <TaskThreadDisclosure {...thread} sessionId={sessionId} taskId={task.task_id} />
+          )}
+        </details>
+      ))}
+    </>
   );
 }
 

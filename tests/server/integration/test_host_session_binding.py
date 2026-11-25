@@ -1775,7 +1775,7 @@ async def test_move_launch_queued_behind_a_refused_relaunch_still_starts(
         def mcp_disabled_servers_active_harnesses(self) -> tuple[str, ...]:
             return ()
 
-        def send_text(self, conn: object, text: str) -> None:
+        async def send_launch(self, conn: object, data: str) -> None:
             # The runner is bound by now; the host's answer isn't under test.
             raise ConnectionError("host gone")
 

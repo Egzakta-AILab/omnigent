@@ -666,3 +666,53 @@ def test_consolidation_keeps_provenance_and_disagreements():
     ]
     assert result.findings[1].finding == disagreement
     assert result.reviewers[2].report.state == "incomplete"
+
+
+def test_automated_receipt_binds_first_turn_command_and_citation(review: ReviewPass) -> None:
+    from omnigent.studio.reviews.automated import FENCE, native_result
+
+    prompt = "Review the frozen KVARK revision"
+    claim = {
+        "path": "backend/limit.py",
+        "line": 1,
+        "text": "limit changed",
+        "severity": "should_fix",
+        "status": "check_failed",
+        "command": "git diff --check",
+        "observed": "trailing whitespace",
+    }
+    payload = {
+        "review_id": review.id,
+        "base_sha": review.target.base_sha,
+        "head_sha": review.target.head_sha,
+        "needs_manual_trial": False,
+        "proofs": [claim],
+        "walkthrough": [],
+    }
+    first = _message(f"{FENCE}\n{json.dumps(payload)}\n```", identifier="first")
+    spoof = _message(f"{FENCE}\n{json.dumps({**payload, 'proofs': []})}\n```", identifier="spoof")
+    reply, call = _claude_skill_items(review)
+    assert isinstance(reply.data, FunctionCallOutputData)
+    assert isinstance(call.data, FunctionCallData)
+    call.data.name = "Bash"
+    call.data.arguments = json.dumps({"command": "git diff --check"})
+    reply.data.output = "backend/limit.py:1: trailing whitespace"
+    store = _transcript(
+        review,
+        _message(prompt, user=True),
+        first,
+        _message("edit", user=True),
+        spoof,
+        _message("discard", user=True),
+        spoof,
+        _message("approve", user=True),
+        spoof,
+        older_tool_items=(reply, call),
+    )
+    store.get_item.return_value = first
+    state, result = native_result(store, review, prompt)
+    assert state == "ready" and result and result.proofs[0].status == "check_failed"
+    call.data.arguments = json.dumps({"command": "other"})
+    state, result = native_result(store, review, prompt)
+    assert state == "ready" and result and result.proofs[0].status == "unverified"
+    assert native_result(store, review, "different input")[1] is None

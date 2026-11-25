@@ -11,6 +11,7 @@ from pydantic import TypeAdapter, ValidationError
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.onboarding.sandboxes.base import SandboxGoneError
 from omnigent.onboarding.sandboxes.profiles import ProviderSandboxProfile
+from omnigent.server.auth import effective_admin
 from omnigent.server.managed_hosts import ManagedSandboxDeployment, build_owner_launcher
 from omnigent.server.provider_sandbox_profiles import (
     ProviderProfileSnapshot,
@@ -23,11 +24,13 @@ from omnigent.stores.conversation_store import (
     SIDE_CHAT_SOURCE_LABEL_KEY,
     ConversationNotFoundError,
 )
+from omnigent.stores.permission_store import PermissionStore
 from omnigent.stores.sandbox_profile_store import (
     SandboxProfileStore,
     encode_snapshot,
     same_profile_identity,
 )
+from omnigent.studio.pooled_hosts import DENIAL, pooled_profile
 
 if TYPE_CHECKING:
     from omnigent.entities import Conversation
@@ -54,7 +57,9 @@ class SandboxProfileCatalog:
         conversations: ConversationStore,
         deployment: ManagedSandboxDeployment | None,
         host_store: HostStore | None = None,
+        permission_store: PermissionStore | None = None,
     ) -> None:
+        self._permissions = permission_store
         self._store = SandboxProfileStore(conversations)
         self._deployment = deployment
         self._host_store = host_store
@@ -244,6 +249,12 @@ class SandboxProfileCatalog:
                 raise HTTPException(
                     status_code=403, detail="Sandbox profile belongs to another workspace"
                 )
+            if pooled_profile(saved_reference) and not (
+                user_id
+                and self._permissions
+                and effective_admin(self._permissions.is_admin(user_id))
+            ):
+                raise HTTPException(403, DENIAL)
             encode_snapshot(saved_reference)
         except ValueError as exc:
             raise _invalid_reference(exc) from exc

@@ -294,6 +294,8 @@ def require_access_and_level_sync(
     required_level: int,
     permission_store: PermissionStore | None,
     conversation_store: ConversationStore,
+    *,
+    conversation: Conversation | None = None,
 ) -> SessionAccess:
     """Synchronous core of :func:`require_access_and_level`.
 
@@ -319,6 +321,7 @@ def require_access_and_level_sync(
         3=manage, 4=owner).
     :param permission_store: Permission store, or ``None`` to skip auth.
     :param conversation_store: Conversation store for sub-agent lookups.
+    :param conversation: Optional requested row already read during this request.
     :returns: A :class:`SessionAccess` with the level and (for non-admin
         callers) the fetched conversation.
     :raises OmnigentError: 401 unauthenticated, 403 insufficient level,
@@ -351,7 +354,9 @@ def require_access_and_level_sync(
         if effective_admin(access.is_admin):
             return SessionAccess(level=level, conversation=None)
 
-        conv = conversation_store.get_conversation(conversation_id)
+        conv = conversation
+        if conv is None or conv.id != conversation_id:
+            conv = conversation_store.get_conversation(conversation_id)
         if conv is None:
             raise OmnigentError(
                 "Conversation not found",
@@ -402,6 +407,8 @@ async def require_access_and_level(
     required_level: int,
     permission_store: PermissionStore | None,
     conversation_store: ConversationStore,
+    *,
+    conversation: Conversation | None = None,
 ) -> SessionAccess:
     """Authorize a caller and resolve their display level in one threaded pass.
 
@@ -419,6 +426,7 @@ async def require_access_and_level(
         3=manage, 4=owner).
     :param permission_store: Permission store, or ``None`` to skip auth.
     :param conversation_store: Conversation store for sub-agent lookups.
+    :param conversation: Optional requested row already read during this request.
     :returns: A :class:`SessionAccess` (level + fetched conversation).
     :raises OmnigentError: 401 / 403 / 404 as documented on the sync core.
     """
@@ -429,6 +437,7 @@ async def require_access_and_level(
         required_level,
         permission_store,
         conversation_store,
+        conversation=conversation,
     )
 
 

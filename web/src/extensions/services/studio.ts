@@ -4,13 +4,26 @@ import {
 } from "../../../../sdks/web-extension/src/studio";
 import { ExtensionHostServiceError } from "./errors";
 
-export interface LinearPreview {
+export interface ExistingIssuePreview {
   linear_workspace: string;
   linear_issue_id: string;
   body: string;
   change?: "status" | "assignee";
   value?: string;
 }
+interface FailureIssuePreview {
+  kind: "failureIssue";
+  candidate_id: string;
+  scenario_id: string;
+  head_sha: string;
+  request_id: string;
+  linear_workspace: string;
+  team: string;
+  recipient: string;
+  title: string;
+  body: string;
+}
+export type LinearPreview = ExistingIssuePreview | FailureIssuePreview;
 export type ConfirmLinear = (preview: LinearPreview, signal: AbortSignal) => Promise<boolean>;
 
 type HostMethod = (params: unknown, signal: AbortSignal) => Promise<unknown>;
@@ -34,6 +47,7 @@ export function studioHostMethods(
   extensionId: string,
   fetch: typeof globalThis.fetch,
   confirm: ConfirmLinear,
+  allowExternal?: (url: string) => void,
 ): StudioMethods {
   const base = `/v1/extensions/${encodeURIComponent(extensionId)}/studio/v1/`;
   async function post(path: string, params: unknown, signal: AbortSignal): Promise<unknown> {
@@ -65,6 +79,64 @@ export function studioHostMethods(
   for (const name of Object.keys(STUDIO_METHOD_PERMISSIONS) as StudioMethod[]) {
     const [, scope, method] = name.split(".");
     methods[name] = (params, signal) => post(`${scope}/${method}`, params, signal);
+  }
+  for (const name of [
+    "list",
+    "getOrCreate",
+    "updateAcceptance",
+    "linkPr",
+    "linkSession",
+  ] as const) {
+    methods[`studio.tasks.${name}`] = async (params, signal) => {
+      const result = object(await post(`tasks/${name}`, params, signal));
+      for (const task of Array.isArray(result.items) ? result.items : [result]) {
+        for (const pr of Array.isArray(task.pull_requests) ? task.pull_requests : []) {
+          if (
+            typeof pr.repository === "string" &&
+            /^[a-z0-9_-][a-z0-9_.-]*\/[a-z0-9_-][a-z0-9_.-]*$/i.test(pr.repository) &&
+            Number.isSafeInteger(pr.number) &&
+            pr.number > 0
+          ) {
+            allowExternal?.(`https://github.com/${pr.repository}/pull/${pr.number}`);
+          }
+        }
+      }
+      return result;
+    };
+  }
+  methods["studio.fleet.inventory"] = async (params, signal) => {
+    const result = object(await post("fleet/inventory", params, signal));
+    for (const preview of Array.isArray(result.previews) ? result.previews : []) {
+      if (
+        typeof preview.url === "string" &&
+        preview.url.startsWith("https://") &&
+        /^[0-9a-f]{40}$/.test(preview.requested_sha) &&
+        preview.requested_sha === preview.checked_out_sha
+      )
+        allowExternal?.(preview.url);
+    }
+    return result;
+  };
+  for (const name of ["getWalkthrough", "askFrozen", "dispute", "dismiss"] as const) {
+    methods[`studio.reviews.${name}`] = async (params, signal) => {
+      const result = object(await post(`reviews/${name}`, params, signal));
+      for (const list of [result.walkthrough, result.proofs, result.citations]) {
+        if (!Array.isArray(list)) continue;
+        for (const item of list) {
+          for (const url of [item?.url, item?.services_url]) {
+            if (
+              typeof url === "string" &&
+              /^https:\/\/github\.com\/Egzakta-AILab\/(?:KVARK|Services)\/blob\/[0-9a-f]{40}\/[^?#]+#L[1-9]\d*$/.test(
+                url,
+              )
+            ) {
+              allowExternal?.(url);
+            }
+          }
+        }
+      }
+      return result;
+    };
   }
   methods["studio.tasks.syncLinearConfirmed"] = async (params, signal) => {
     const input = object(params);
@@ -102,6 +174,40 @@ export function studioHostMethods(
     return post(
       "tasks/syncLinearConfirmed",
       { ...approved, confirmation_token: requiredString(grant.confirmation_token) },
+      signal,
+    );
+  };
+  methods["studio.releases.createIssueConfirmed"] = async (params, signal) => {
+    if (extensionId !== "egzakta.release") {
+      throw new ExtensionHostServiceError("PermissionDenied", "Release extension required");
+    }
+    const input = object(params);
+    const intent = {
+      candidate_id: requiredString(input.candidate_id),
+      scenario_id: requiredString(input.scenario_id),
+      head_sha: requiredString(input.head_sha),
+      request_id: requiredString(input.request_id),
+    };
+    const preview = object(await post("releases/previewIssue", intent, signal));
+    const approval = { ...intent, preview_digest: requiredString(preview.preview_digest) };
+    signal.throwIfAborted();
+    const accepted = await confirm(
+      {
+        kind: "failureIssue",
+        ...intent,
+        linear_workspace: requiredString(preview.linear_workspace),
+        team: requiredString(preview.team),
+        title: requiredString(preview.title),
+        body: requiredString(preview.body),
+        recipient: requiredString(preview.recipient),
+      },
+      signal,
+    );
+    if (!accepted) throw new ExtensionHostServiceError("Cancelled", "Issue creation cancelled");
+    const grant = object(await post("releases/confirmIssue", approval, signal));
+    return post(
+      "releases/createIssueConfirmed",
+      { ...approval, confirmation_token: requiredString(grant.confirmation_token) },
       signal,
     );
   };

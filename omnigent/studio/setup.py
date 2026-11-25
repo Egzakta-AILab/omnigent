@@ -519,7 +519,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     proof.add_argument("--server", required=True)
     proof.add_argument("--finding", required=True, help="captured finding key")
     proof.add_argument("--receipt", type=Path, required=True)
+    for command in ("fleet", "shadow-report", "release"):
+        gate = commands.add_parser(command, help="read back Studio acceptance evidence")
+        gate.add_argument("--server", help="trusted HTTPS instance (or OMNIGENT_SERVER_URL)")
+        if command == "release":
+            gate.add_argument("--candidate", required=True)
+        else:
+            gate.add_argument("--window", default="7d")
+        if command == "shadow-report":
+            gate.add_argument(
+                "--truth",
+                type=Path,
+                default=os.getenv("OMNIGENT_STUDIO_SHADOW_TRUTH"),
+                help="human findings keyed by repository, base SHA and head SHA",
+            )
     args = parser.parse_args(argv)
+    if args.command in ("fleet", "shadow-report", "release"):
+        from omnigent.studio.verification import run_gate
+
+        return run_gate(args)
     if args.command == "release-a":
         from omnigent.studio.release_a import ROUTES, ReleaseEvidence, collect_release_a
 

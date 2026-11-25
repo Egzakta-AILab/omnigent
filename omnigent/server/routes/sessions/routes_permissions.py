@@ -146,6 +146,18 @@ def register_permissions_routes(
                 "Permissions not enabled",
                 code=ErrorCode.INTERNAL_ERROR,
             )
+        from omnigent.studio.pooled_hosts import DENIAL, pooled_target
+
+        if not await asyncio.to_thread(
+            permission_store.is_admin, body.user_id
+        ) and await asyncio.to_thread(
+            pooled_target,
+            conversation_store,
+            getattr(request.app.state, "host_store", None),
+            session_id,
+            None,
+        ):
+            raise OmnigentError(DENIAL, code=ErrorCode.FORBIDDEN)
         if body.user_id == user_id:
             raise OmnigentError(
                 "Cannot modify your own permissions",

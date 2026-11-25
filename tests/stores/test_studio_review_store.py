@@ -790,3 +790,42 @@ def test_project_run_rolls_back_all_captures_on_invalid_snapshot(store: StudioRe
         == []
     )
     assert store.list_page(owner_user_id=OWNER, source_project_id=project, limit=10).entries == []
+
+
+def test_seat_budget_serializes_frozen_pr_and_month(store, db_uri):
+    from omnigent.db.db_models import SqlStudioApiBudget
+    from omnigent.studio.seat_pool import SeatPool
+
+    def claimed(key, number):
+        result = _capture(
+            store,
+            key=key,
+            target=_target(
+                pr_number=number, pr_url=f"https://github.com/example/project/pull/{number}"
+            ),
+        )
+        rid = result.review.id
+        op = store.reserve_operation(
+            rid,
+            owner_user_id=OWNER,
+            action="review.start",
+            idempotency_key=key,
+            request_hash="c" * 64,
+        ).operation
+        store.claim_operation(
+            rid, op.id, owner_user_id=OWNER, expected_version=op.version, reviewer_session_id=rid
+        )
+        return rid
+
+    pool = SeatPool(db_uri)
+    ids = [claimed(f"lens-{i}", 3) for i in range(5)]
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        receipts = list(executor.map(pool.reserve_paid, ids))
+    assert receipts.count(("example/project#3", 100)) == 3
+    assert receipts.count(None) == 2
+    month = datetime.now(UTC).strftime("%Y-%m")
+    with pool.write("seed_month") as db:
+        db.get(SqlStudioApiBudget, (0, f"month:{month}")).reserved_cents = 24950
+    another = claimed("other-pr", 4)
+    assert pool.reserve_paid(another) == ("example/project#4", 50)
+    assert pool.reserve_paid(another) is None

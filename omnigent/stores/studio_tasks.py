@@ -28,6 +28,7 @@ from omnigent.db.utils import (
     run_write_transaction,
 )
 from omnigent.studio import rpc
+from omnigent.studio.seat_pool import fallback_order, usage_counts
 
 T = TypeVar("T")
 Record = dict[str, Any]
@@ -64,7 +65,11 @@ def _handoff(row: SqlStudioTaskHandoff) -> Record:
 def _lease(row: SqlStudioAgentLease, now: int) -> Record:
     if row.state == "active" and row.lease_expires_at <= now:
         row.state = "unknown"
+    evidence = json.loads(row.round_evidence_json or "{}")
+    receipts = evidence.get("results", [])
     return {
+        "native_bound": bool(row.session_id or evidence.get("acceptance")),
+        "last_result": receipts[-1] if receipts else None,
         "idempotency_key": str(UUID(row.idempotency_key)),
         "task_id": str(UUID(row.task_id)),
         "harness": row.harness,
@@ -74,9 +79,69 @@ def _lease(row: SqlStudioAgentLease, now: int) -> Record:
     }
 
 
+def _escalate(db: Session, row: SqlStudioAgentLease, receipts: list[Record]) -> None:
+    task = _require_task(db, UUID(row.task_id))
+    evidence = [
+        f"Dispatch {UUID(row.idempotency_key)} failed all three rounds.",
+        f"Native harness: {row.harness}.",
+    ]
+    for result in receipts:
+        evidence.append(
+            f"Round {result['round']}: {result['status']} at {result['commit_sha']} "
+            f"(output SHA-256 {result['output_digest']})."
+        )
+    for pr in _task(task)["pull_requests"][: 10 - len(receipts)]:
+        evidence.append(f"{pr['repository']}#{pr['number']} at {pr['head_sha']}")
+    card = rpc.Handoff(
+        task_id=UUID(row.task_id),
+        schema_version="studio-handoff@1",
+        request_id=uuid4(),
+        recipient=row.actor,
+        question=(
+            "The free agent reached its three-round limit. "
+            "Review the evidence and choose the next action."
+        ),
+        evidence=evidence,
+    )
+    db.add(
+        SqlStudioTaskHandoff(
+            request_id=card.request_id.hex,
+            task_id=row.task_id,
+            schema_version=card.schema_version,
+            sender="Studio Fleet",
+            sender_generation=None,
+            recipient=row.actor,
+            recipient_generation=row.actor_generation,
+            packet_json=card.model_dump_json(),
+        )
+    )
+
+
+def _current_native_turn(db: Session, turn: Record, now: int) -> SqlStudioAgentLease | None:
+    row = db.get(SqlStudioAgentLease, (current_workspace_id(), turn["key"]), with_for_update=True)
+    if (
+        row is None
+        or row.session_id != turn["session_id"]
+        or row.fix_round + 1 != turn["round"]
+        or _lease(row, now)["state"] != "active"
+    ):
+        return None
+    if row.actor_generation:
+        account = db.get(SqlUser, (current_workspace_id(), row.actor), with_for_update=True)
+        if (
+            not account
+            or account.deleted_at is not None
+            or account.account_generation != row.actor_generation
+        ):
+            row.state = "unknown"
+            return None
+    return row
+
+
 def _seat(row: SqlStudioSeatSlot) -> Record:
     return {
         "slot_id": row.slot_id,
+        "routing_mode": row.routing_mode,
         "harness": row.harness,
         "enabled": row.enabled,
         "weight": row.weight,
@@ -144,6 +209,18 @@ class StudioTaskStore:
                 if releases
                 else rows
             )
+
+    def tasks_for_session(self, session_id: UUID) -> list[Record]:
+        sid = str(session_id)
+        with self.read("tasks_for_session") as db:
+            query = (
+                select(SqlStudioTask)
+                .filter_by(workspace_id=current_workspace_id())
+                .where(SqlStudioTask.links_json.contains(json.dumps(sid)))
+                .order_by(SqlStudioTask.id)
+            )
+            tasks = (_task(row) for row in db.scalars(query))
+            return [task for task in tasks if sid in task["session_ids"]]
 
     def change_task(
         self, actor: str, value: rpc.Acceptance | rpc.PullRequest | rpc.SessionLink
@@ -286,6 +363,10 @@ class StudioTaskStore:
                 raise HTTPException(404, "Dispatch not found")
             _lease(row, now)
             if isinstance(value, rpc.FinishRound):
+                if _lease(row, now)["native_bound"]:
+                    raise HTTPException(
+                        409, "Native rounds require a completed verification receipt"
+                    )
                 if value.round == row.fix_round:
                     if value.passed != (row.state == "passed"):
                         raise HTTPException(409, "Round result differs from its receipt")
@@ -293,19 +374,210 @@ class StudioTaskStore:
                 if row.state != "active" or value.round != row.fix_round + 1:
                     raise HTTPException(409, "Dispatch round is closed or out of sequence")
                 row.fix_round = value.round
+                record = json.loads(row.round_evidence_json or "{}")
+                record.setdefault("results", []).append(
+                    {
+                        "source": "manual",
+                        "ci_url": None,
+                        "round": value.round,
+                        "status": "unverified" if value.passed else "check_failed",
+                        "commit_sha": None,
+                        "base_sha": None,
+                        "output_digest": None,
+                    }
+                )
+                row.round_evidence_json = json.dumps(record)
                 if value.passed:
                     row.state = "passed"
                 elif value.round == 3:
                     row.state = "escalated"
+                    _escalate(db, row, [])
+
             if row.state == "active":
                 row.lease_expires_at = now + LEASE_SECONDS
             return _lease(row, now)
 
         return self._change(actor, "lease", change)
 
-    def inventory(self, actor: str, page: rpc.Page) -> Record:
+    def begin_agent(self, actor: str, value: rpc.LeaseClaim) -> Record:
+        self.update_lease(actor, value)
+
+        def claim(db: Session) -> Record:
+            row = db.get(
+                SqlStudioAgentLease,
+                (current_workspace_id(), value.idempotency_key.hex),
+                with_for_update=True,
+            )
+            assert row is not None
+            receipt = _lease(row, int(self.clock()))
+            if row.actor != actor or row.actor_generation != require_active_account(db, actor):
+                raise HTTPException(404, "Dispatch not found")
+            if row.session_start or row.state != "active":
+                return {**receipt, "launch": False}
+            task = _require_task(db, value.task_id)
+            if not task.acceptance_check.strip():
+                raise HTTPException(409, "A shared acceptance check is required")
+            row.session_id = uuid4().hex
+            row.session_start = "pending"
+            seed = {
+                "acceptance": task.acceptance_check,
+                "prs": _task(task)["pull_requests"],
+                "results": [],
+                "followup": None,
+            }
+            row.round_evidence_json = json.dumps(seed)
+            return {
+                **receipt,
+                "launch": True,
+                "session_id": row.session_id,
+                "native_bound": True,
+                "turn": {**seed, "key": row.idempotency_key, "round": 1},
+            }
+
+        return self._change(actor, "begin_agent", claim)
+
+    def complete_agent(
+        self, actor: str, key: UUID, started: bool, *, queued: bool = False
+    ) -> None:
+        def complete(db: Session) -> None:
+            row = db.get(
+                SqlStudioAgentLease, (current_workspace_id(), key.hex), with_for_update=True
+            )
+            if row is None or (row.actor, row.actor_generation) != (
+                actor,
+                require_active_account(db, actor),
+            ):
+                raise HTTPException(404, "Dispatch not found")
+            if queued:
+                row.session_start = None
+                row.session_id = None
+                row.round_evidence_json = None
+                return
+            row.session_start = "started" if started else "unknown"
+            if not started:
+                row.state = "unknown"
+
+        self._change(actor, "complete_agent", complete)
+
+    def running_turns(self, after: str | None = None) -> list[Record]:
+        with self.read("running_turns") as db:
+            query = (
+                select(SqlStudioAgentLease)
+                .filter_by(
+                    workspace_id=current_workspace_id(), state="active", session_start="started"
+                )
+                .where(
+                    SqlStudioAgentLease.lease_expires_at > int(self.clock()),
+                    SqlStudioAgentLease.round_evidence_json.is_not(None),
+                )
+            )
+            if after:
+                query = query.where(SqlStudioAgentLease.idempotency_key > after)
+            rows = db.scalars(query.order_by(SqlStudioAgentLease.idempotency_key).limit(50))
+            return [
+                {
+                    **json.loads(row.round_evidence_json or "{}"),
+                    "session_id": row.session_id,
+                    "key": row.idempotency_key,
+                    "round": row.fix_round + 1,
+                }
+                for row in rows
+                if row.session_id
+            ]
+
+    def record_native_round(self, turn: Record, receipt: Record) -> None:
+        def record(db: Session) -> None:
+            row = _current_native_turn(db, turn, int(self.clock()))
+            if row is None:
+                return
+            seed = json.loads(row.round_evidence_json or "{}")
+            if not seed.get("acceptance"):
+                return
+            row.fix_round = turn["round"]
+            seed["results"].append(receipt)
+            seed["followup"] = None
+            if receipt["status"] == "verified":
+                row.state = "passed"
+            elif receipt["status"] != "check_failed":
+                row.state = "unknown"
+            elif row.fix_round == 3:
+                row.state = "escalated"
+                _escalate(db, row, seed["results"])
+            else:
+                seed["followup"] = "pending"
+                row.lease_expires_at = int(self.clock()) + LEASE_SECONDS
+            row.round_evidence_json = json.dumps(seed)
+
+        run_write_transaction(self.write, "native_round", record)
+
+    def claim_followup(self, turn: Record) -> bool:
+        def claim(db: Session) -> bool:
+            row = _current_native_turn(db, turn, int(self.clock()))
+            if row is None:
+                return False
+            seed = json.loads(row.round_evidence_json or "{}")
+            if seed.get("followup") != "pending":
+                return False
+            # Claim before posting. An ambiguous delivery is never replayed.
+            seed["followup"] = "claimed"
+            row.round_evidence_json = json.dumps(seed)
+            return True
+
+        return run_write_transaction(self.write, "claim_native_followup", claim)
+
+    def task_prs(self, task_id: UUID) -> list[Record]:
+        with self.read("task_previews") as db:
+            return _task(_require_task(db, task_id))["pull_requests"]
+
+    def expired_sessions(self, after: str = "", only: str | None = None) -> list[tuple[str, str]]:
+        def scan(db: Session) -> list[tuple[str, str]]:
+            now = int(self.clock())
+            query = (
+                select(SqlStudioAgentLease)
+                .where(
+                    SqlStudioAgentLease.workspace_id == current_workspace_id(),
+                    SqlStudioAgentLease.session_id.is_not(None),
+                    SqlStudioAgentLease.session_start.in_(("pending", "started", "unknown")),
+                    (SqlStudioAgentLease.state != "active")
+                    | (SqlStudioAgentLease.lease_expires_at <= now),
+                )
+                .order_by(SqlStudioAgentLease.idempotency_key)
+            )
+            if after:
+                query = query.where(SqlStudioAgentLease.idempotency_key > after)
+            if only:
+                query = query.where(SqlStudioAgentLease.idempotency_key == only)
+            query = query.limit(100).with_for_update()
+            rows = db.scalars(query).all()
+            for row in rows:
+                _lease(row, now)
+            return [(row.idempotency_key, row.session_id) for row in rows if row.session_id]
+
+        return run_write_transaction(self.write, "expired_sessions", scan)
+
+    def mark_stopped(self, key: str, session_id: str) -> None:
+        def stop(db: Session) -> None:
+            row = db.get(SqlStudioAgentLease, (current_workspace_id(), key), with_for_update=True)
+            if row and row.session_id == session_id and row.state != "active":
+                row.session_start = "stopped"
+
+        run_write_transaction(self.write, "agent_stopped", stop)
+
+    def require_task_pr(self, actor: str, value: rpc.Preview) -> None:
+        def verify(db: Session) -> None:
+            task = _task(_require_task(db, value.task_id))
+            if value.model_dump(exclude={"task_id"}) not in task["pull_requests"]:
+                raise HTTPException(409, "The shared task does not reference this exact head")
+
+        self._change(actor, "require_task_pr", verify)
+
+    def inventory(self, actor: str, page: rpc.Page, can_admin: bool = False) -> Record:
         def read(db: Session) -> Record:
-            query = select(SqlStudioAgentLease).filter_by(workspace_id=current_workspace_id())
+            query = select(SqlStudioAgentLease).filter_by(
+                workspace_id=current_workspace_id(),
+                actor=actor,
+                actor_generation=require_active_account(db, actor),
+            )
             if page.after:
                 query = query.where(SqlStudioAgentLease.idempotency_key > UUID(page.after).hex)
             leases = db.scalars(
@@ -318,9 +590,17 @@ class StudioTaskStore:
                 .filter_by(workspace_id=current_workspace_id())
                 .order_by(SqlStudioSeatSlot.slot_id)
             )
+            counts = usage_counts(db, int(self.clock())) if can_admin else {}
             return {
+                "can_admin_seats": can_admin,
+                "fallback_order": fallback_order() if can_admin else [],
                 "leases": [_lease(row, int(self.clock())) for row in leases],
-                "seats": [_seat(row) for row in seats],
+                "seats": [
+                    {**_seat(row), "usage_7d": counts.get(row.slot_id, 0)}
+                    if can_admin
+                    else _seat(row)
+                    for row in seats
+                ],
             }
 
         return self._change(actor, "inventory", read)
@@ -330,12 +610,36 @@ class StudioTaskStore:
             row = db.get(
                 SqlStudioSeatSlot, (current_workspace_id(), value.slot_id), with_for_update=True
             )
+            if (
+                value.routing_mode == "fallback"
+                and not fallback_order()
+                and (row is None or row.routing_mode != "fallback")
+            ):
+                raise HTTPException(409, "No fallback tier is enabled")
             if row is None:
-                row = SqlStudioSeatSlot(**value.model_dump(), cooldown_until=0)
+                if not value.encrypted_profile_ref:
+                    raise HTTPException(422, "A new seat requires a profile reference")
+                row = SqlStudioSeatSlot(
+                    **value.model_dump(exclude={"routing_mode"}),
+                    routing_mode=value.routing_mode or "subscription",
+                    cooldown_until=0,
+                )
                 db.add(row)
             else:
-                row.enabled, row.harness, row.weight = value.enabled, value.harness, value.weight
-                row.encrypted_profile_ref = value.encrypted_profile_ref
+                if row.harness != value.harness and not value.encrypted_profile_ref:
+                    raise HTTPException(422, "Changing harness requires a profile reference")
+                mode = value.routing_mode or row.routing_mode
+                ref = value.encrypted_profile_ref or row.encrypted_profile_ref
+                if (ref, mode, value.harness) != (
+                    row.encrypted_profile_ref,
+                    row.routing_mode,
+                    row.harness,
+                ):
+                    row.cooldown_until = 0
+                row.enabled, row.harness = value.enabled, value.harness
+                if "weight" in value.model_fields_set:
+                    row.weight = value.weight
+                row.routing_mode, row.encrypted_profile_ref = mode, ref
             return _seat(row)
 
         return self._change(actor, "admin_seat", change)

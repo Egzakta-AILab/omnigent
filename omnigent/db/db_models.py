@@ -2600,6 +2600,9 @@ class SqlStudioAgentLease(OmnigentBase):
     actor_generation: Mapped[str | None] = mapped_column(String(32))
     harness: Mapped[str] = mapped_column(String(32), nullable=False)
     state: Mapped[str] = mapped_column(String(16), nullable=False)
+    session_id: Mapped[str | None] = mapped_column(Uuid16())
+    session_start: Mapped[str | None] = mapped_column(String(32))
+    round_evidence_json: Mapped[str | None] = mapped_column(Text)
     fix_round: Mapped[int] = mapped_column(Integer, nullable=False)
     lease_expires_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
     __table_args__ = (CheckConstraint("fix_round BETWEEN 0 AND 3", name="ck_studio_lease_round"),)
@@ -2613,6 +2616,62 @@ class SqlStudioSeatSlot(OmnigentBase):
     slot_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     harness: Mapped[str] = mapped_column(String(32), nullable=False)
     encrypted_profile_ref: Mapped[str] = mapped_column(String(512), nullable=False)
+    routing_mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="subscription"
+    )
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
     weight: Mapped[int] = mapped_column(Integer, nullable=False)
     cooldown_until: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+
+
+class SqlStudioDispatch(OmnigentBase):
+    """Dispatch attempts contain operational data only, scoped to a workspace."""
+
+    __tablename__ = "studio_dispatches"
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, default=current_workspace_id
+    )
+    id: Mapped[str] = mapped_column(Uuid16, primary_key=True)
+    group_id: Mapped[str | None] = mapped_column(Uuid16())
+    elapsed_ms: Mapped[int | None] = mapped_column(Integer)
+    started_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    harness: Mapped[str] = mapped_column(String(32), nullable=False)
+    slot_id: Mapped[str | None] = mapped_column(String(128))
+    outcome: Mapped[str] = mapped_column(String(24), nullable=False)
+    __table_args__ = (Index("ix_studio_dispatch_window", "workspace_id", "started_at"),)
+
+
+class SqlStudioReviewRevision(OmnigentBase):
+    """Immutable automation input, with a separate frozen native result and decision ledger."""
+
+    __tablename__ = "studio_review_revisions"
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, default=current_workspace_id
+    )
+    id: Mapped[str] = mapped_column(Uuid16, primary_key=True)
+    repository: Mapped[str] = mapped_column(String(256))
+    created_at: Mapped[int] = mapped_column(BigInteger)
+    state: Mapped[str] = mapped_column(String(16))
+    mode: Mapped[str] = mapped_column(String(8))
+    expires_at: Mapped[int | None] = mapped_column(BigInteger)
+    capture_json: Mapped[str] = mapped_column(Text)
+    active_slot: Mapped[int | None] = mapped_column(Integer)
+    result_json: Mapped[str | None] = mapped_column(Text)
+    decisions_json: Mapped[str] = mapped_column(Text)
+    __table_args__ = (
+        Index("ix_studio_review_queue", "workspace_id", "repository", "created_at", "id"),
+        UniqueConstraint(
+            "workspace_id", "repository", "active_slot", name="uq_studio_review_active_repo"
+        ),
+    )
+
+
+class SqlStudioApiBudget(OmnigentBase):
+    """Conservative allocations held before issuing any paid fallback credential."""
+
+    __tablename__ = "studio_api_budgets"
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, default=current_workspace_id
+    )
+    budget_key: Mapped[str] = mapped_column(String(96), primary_key=True)
+    reserved_cents: Mapped[int] = mapped_column(Integer, nullable=False)

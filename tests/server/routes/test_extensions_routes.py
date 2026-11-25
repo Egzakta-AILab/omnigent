@@ -462,7 +462,11 @@ async def test_studio_shared_issue_private_session_and_confirmation(db_uri, tmp_
     from omnigent.server.accounts_store import SqlAlchemyAccountStore
     from omnigent.server.auth import LEVEL_OWNER
     from omnigent.server.passwords import hash_password
+    from omnigent.stores.studio_review_queue import ReviewQueue
+    from omnigent.stores.studio_review_store import StudioReviewStore
     from omnigent.stores.studio_tasks import StudioTaskStore
+    from omnigent.studio.reviews.automated import LensResult, freeze
+    from omnigent.studio.reviews.product_pack import Trigger
 
     config = AccountsConfig(
         cookie_secret=b"x" * 32,
@@ -512,6 +516,11 @@ async def test_studio_shared_issue_private_session_and_confirmation(db_uri, tmp_
             }
         ),
     )
+    review_manifest = replace(
+        _manifest("egzakta.review"),
+        entrypoints=ExtensionEntrypoints(),
+        permissions=frozenset({ExtensionPermission.STUDIO_REVIEWS}),
+    )
     artifacts = LocalArtifactStore(str(tmp_path / "artifacts"))
     app = create_app(
         agent_store=agents,
@@ -519,9 +528,10 @@ async def test_studio_shared_issue_private_session_and_confirmation(db_uri, tmp_
         conversation_store=SqlAlchemyConversationStore(db_uri),
         artifact_store=artifacts,
         agent_cache=AgentCache(artifact_store=artifacts, cache_dir=tmp_path / "cache"),
-        extension_state=ExtensionPluginState((manifest,), {}),
+        extension_state=ExtensionPluginState((manifest, review_manifest), {}),
         permission_store=permissions,
         studio_task_store=StudioTaskStore(db_uri),
+        studio_review_store=StudioReviewStore(db_uri),
         account_store=accounts,
         auth_provider=auth,
     )
@@ -540,7 +550,13 @@ async def test_studio_shared_issue_private_session_and_confirmation(db_uri, tmp_
         task = (await alice.post(f"{prefix}/tasks/getOrCreate", json=key)).json()
         assert (await bob.post(f"{prefix}/tasks/getOrCreate", json=key)).json() == task
         args = {"task_id": task["task_id"], "session_id": source.id}
+        association = f"{prefix}/tasks/forSession"
+        session_ref = {"session_id": source.id}
+        assert (await alice.post(association, json=session_ref)).json() == {"items": []}
         assert (await alice.post(f"{prefix}/tasks/linkSession", json=args)).json()["session_ids"]
+        linked_tasks = (await alice.post(association, json=session_ref)).json()["items"]
+        assert [item["task_id"] for item in linked_tasks] == [task["task_id"]]
+        assert (await bob.post(association, json=session_ref)).status_code == 404
         assert (await bob.post(f"{prefix}/tasks/list", json={})).json()["items"][0][
             "session_ids"
         ] == []
@@ -556,6 +572,140 @@ async def test_studio_shared_issue_private_session_and_confirmation(db_uri, tmp_
         assert (
             await alice.post(f"{prefix}/tasks/list", json={"after": "bogus"})
         ).status_code == 422
+        review_prefix = f"/v1/extensions/{review_manifest.id}/studio/v1/reviews"
+        trigger = Trigger(
+            schema_version="studio-review-trigger@1",
+            repository="Egzakta-AILab/KVARK",
+            pull_number=7,
+            base_ref="main",
+            base_sha="1" * 40,
+            head_sha="2" * 40,
+            mode="delta",
+        )
+        assert (
+            await alice.post("/v1/studio/reviews/dispatch", json=trigger.model_dump())
+        ).status_code == 403
+        receipt_args = {
+            "author_login": "author",
+            "asked_logins": ["asked"],
+            "selected_lenses": ["backend"],
+            "protected_paths": [],
+            "services_revision": None,
+            "services": {},
+            "labels": [],
+            "head_ref": "feature",
+            "policy": {
+                "lanes": {
+                    "otherwise": "human_review",
+                    "blocks_merge": "fail_check",
+                    "env_blocked": "environment_owner",
+                },
+                "auto_lane": {
+                    "max_changed_files": 5,
+                    "max_changed_lines": 150,
+                    "max_components": 1,
+                    "allowed_severities": ["note"],
+                },
+            },
+            "files": [
+                {
+                    "filename": "backend/task.py",
+                    "additions": 1,
+                    "deletions": 0,
+                    "status": "added",
+                    "patch": "@@ -0,0 +1 @@\n+limit = 1",
+                }
+            ],
+        }
+        queue = ReviewQueue(db_uri)
+        receipt = queue.enqueue(
+            "studio-bot", trigger, receipt_args, {"author": _USER, "asked": second}, [_ADMIN]
+        )
+        rid = receipt["review_id"]
+        assert (
+            queue.enqueue(
+                "studio-bot", trigger.model_copy(update={"mode": "full"}), receipt_args, {}, []
+            )["mode"]
+            == "full"
+        )
+        job = queue.claim(trigger.repository)
+        assert job and queue.claim(trigger.repository) is None
+        cited = {"path": "backend/task.py", "line": 1, "text": "limit changed"}
+        finding = {
+            **cited,
+            "severity": "blocks_merge",
+            "status": "check_failed",
+            "command": "pytest",
+            "observed": "assert 1 == 2",
+        }
+        envelope = LensResult.model_validate(
+            {
+                "review_id": rid,
+                "base_sha": trigger.base_sha,
+                "head_sha": trigger.head_sha,
+                "needs_manual_trial": False,
+                "walkthrough": [{**cited, "layer": "summary"}],
+                "proofs": [finding],
+            }
+        )
+        queue.finish(job[0], freeze(job[1], {"backend": envelope}, False))
+        queue.finish(job[0], {"lane": "auto"})  # A replay cannot replace a frozen verdict.
+        card = {
+            "task_id": task["task_id"],
+            "schema_version": "studio-handoff@1",
+            "request_id": str(uuid4()),
+            "recipient": second,
+            "question": "Check this revision",
+            "evidence": [rid],
+        }
+        (await alice.post(f"{prefix}/tasks/createHandoff", json=card)).raise_for_status()
+        inbox = (
+            (await bob.post(f"{prefix}/inbox/list", json={})).raise_for_status().json()["items"]
+        )
+        assert inbox[0]["evidence"] == [rid]
+        ref = {"review_id": rid}
+        for client in [alice, bob]:
+            listed = (
+                (await client.post(f"{review_prefix}/listQueue", json={}))
+                .raise_for_status()
+                .json()
+            )
+            assert listed["items"][0]["head_sha"] == trigger.head_sha
+            view = (
+                (await client.post(f"{review_prefix}/getWalkthrough", json=ref))
+                .raise_for_status()
+                .json()
+            )
+            assert view["walkthrough"][0]["url"].endswith(
+                f"/{trigger.head_sha}/backend/task.py#L1"
+            )
+            assert view["evidence_status"] == "check_failed"
+            answer = (
+                (
+                    await client.post(
+                        f"{review_prefix}/askFrozen",
+                        json={**ref, "question": "What limit changed?"},
+                    )
+                )
+                .raise_for_status()
+                .json()
+            )
+            assert answer["citations"] and answer["head_sha"] == trigger.head_sha
+            assert "Private transcript fixture" not in str(answer)
+        decision = {
+            **ref,
+            "proof_id": view["proofs"][0]["id"],
+            "path": "backend/task.py",
+            "line": 1,
+            "lens": "backend",
+            "reason": "The accepted limit changed.",
+        }
+        (await alice.post(f"{review_prefix}/dispute", json=decision)).raise_for_status()
+        assert (await bob.post(f"{review_prefix}/dismiss", json=decision)).status_code == 403
+        dismissed = (
+            (await admin.post(f"{review_prefix}/dismiss", json=decision)).raise_for_status().json()
+        )
+        assert dismissed["dispositions"][-1]["actor"] == _ADMIN
         seat = {
             "slot_id": "work",
             "harness": "codex-native",
@@ -569,6 +719,18 @@ async def test_studio_shared_issue_private_session_and_confirmation(db_uri, tmp_
             .raise_for_status()
             .json()
         )
+        inventory = f"{prefix}/fleet/inventory"
+        public = (await bob.post(inventory, json={})).raise_for_status().json()
+        assert public["can_admin_seats"] is False and public["capacity"] is None
+        assert "usage_7d" not in public["seats"][0]
+        assert (await bob.post(inventory, json={"can_admin_seats": True})).status_code == 422
+        operator = (await admin.post(inventory, json={})).raise_for_status().json()
+        assert operator["can_admin_seats"] is True and operator["seats"][0]["usage_7d"] == 0
+        toggle = {k: v for k, v in seat.items() if k != "encrypted_profile_ref"}
+        toggle["enabled"] = False
+        path = f"{prefix}/fleet/adminSeats"
+        assert (await admin.post(path, json={**toggle, "slot_id": "new"})).status_code == 422
+        assert (await admin.post(path, json=toggle)).raise_for_status().json()["enabled"] is False
         comment = {
             "task_id": task["task_id"],
             "request_id": str(uuid4()),
@@ -607,3 +769,94 @@ async def test_studio_shared_issue_private_session_and_confirmation(db_uri, tmp_
         assert (await alice.post(send, json={**confirm, "body": "changed"})).status_code == 403
         assert (await alice.post(send, json=confirm)).status_code == 503
         assert (await alice.post(send, json=confirm)).status_code == 403
+
+
+async def test_release_issue_consent_requires_owning_extension_and_interactive_login(
+    db_uri, tmp_path, monkeypatch
+):
+    from unittest.mock import Mock
+    from uuid import uuid4
+
+    from omnigent.server.accounts_config import AccountsConfig
+    from omnigent.server.accounts_store import SqlAlchemyAccountStore
+    from omnigent.server.passwords import hash_password
+    from omnigent.stores.studio_tasks import StudioTaskStore
+
+    config = AccountsConfig(
+        cookie_secret=b"x" * 32,
+        session_ttl_hours=2,
+        base_url="http://test",
+        init_admin_password=None,
+        invite_ttl_seconds=300,
+        magic_ttl_seconds=300,
+    )
+    auth = UnifiedAuthProvider(source="accounts", accounts_config=config)
+    accounts = SqlAlchemyAccountStore(db_uri)
+    password = uuid4().hex
+    accounts.create_user_with_password(_USER, hash_password(password))
+    permissions = SqlAlchemyPermissionStore(db_uri)
+    manifest = replace(
+        _manifest("egzakta.release"),
+        distribution="egzakta-release",
+        entrypoints=ExtensionEntrypoints(),
+        permissions=frozenset({ExtensionPermission.STUDIO_RELEASES}),
+    )
+    other = replace(manifest, id="another.release", distribution="another-release")
+    handler = Mock()
+    handler.invoke.return_value = {"confirmation_token": uuid4().hex}
+    monkeypatch.setattr(
+        "omnigent.server.routes.studio_rpc.load_studio_handlers",
+        lambda state: {"egzakta.release": handler},
+    )
+    monkeypatch.setenv("OMNIGENT_WS_ALLOWED_ORIGINS", "http://test")
+    artifacts = LocalArtifactStore(str(tmp_path / "artifacts"))
+    app = create_app(
+        agent_store=SqlAlchemyAgentStore(db_uri),
+        file_store=SqlAlchemyFileStore(db_uri),
+        conversation_store=SqlAlchemyConversationStore(db_uri),
+        artifact_store=artifacts,
+        agent_cache=AgentCache(artifact_store=artifacts, cache_dir=tmp_path / "cache"),
+        extension_state=ExtensionPluginState((manifest, other), {}),
+        permission_store=permissions,
+        studio_task_store=StudioTaskStore(db_uri),
+        account_store=accounts,
+        auth_provider=auth,
+    )
+    prefix = "/v1/extensions/egzakta.release/studio/v1/releases"
+    intent = {
+        "candidate_id": "rc",
+        "scenario_id": "qa-01",
+        "head_sha": "a" * 40,
+        "request_id": str(uuid4()),
+        "preview_digest": "b" * 64,
+    }
+    browser = {"Origin": "http://test", "Sec-Fetch-Site": "same-origin"}
+    async with _client(app, _USER) as ui, _client(app) as cli:
+        (
+            await ui.post("/auth/login", json={"username": _USER, "password": password})
+        ).raise_for_status()
+        assert (await ui.post(prefix + "/confirmIssue", json=intent)).status_code == 403
+        assert (
+            await cli.post(
+                prefix + "/confirmIssue",
+                json=intent,
+                headers={
+                    **browser,
+                    "Authorization": "Bearer " + ui.cookies[config.session_cookie_name],
+                },
+            )
+        ).status_code == 403
+        assert (
+            await ui.post(
+                prefix.replace("egzakta.release", "another.release") + "/confirmIssue",
+                json=intent,
+                headers=browser,
+            )
+        ).status_code == 403
+        assert (
+            await ui.post(prefix + "/createIssueConfirmed", json=intent, headers=browser)
+        ).status_code == 422
+        handler.invoke.assert_not_called()
+        (await ui.post(prefix + "/confirmIssue", json=intent, headers=browser)).raise_for_status()
+        method, bound_intent, context = handler.invoke.call_args.args
+        assert method == "confirmIssue" and bound_intent == intent and context.actor == _USER

@@ -32,6 +32,7 @@ import {
   useReplaceSearchParams,
   useSearchParams,
 } from "@/lib/routing";
+import { peekStudioSelection, type StudioSelection } from "@/extensions/services/studioSession";
 import { useViewerId } from "@/hooks/useViewerId";
 import { readCreatorAuthoringDraft } from "@/lib/creatorAuthoringDraft";
 import { STUDIO_ISSUE_LABEL, linearIssueKey } from "@/lib/studioIssue";
@@ -2332,8 +2333,20 @@ function NewChatWorkspaceControls({
 
 export function NewChatLandingScreen() {
   const location = useLocation();
+  const token = new URLSearchParams(location.search).get("studioStart");
+  if (token) return <StudioTaskLanding token={token} />;
   const id: unknown = location.state?.creatorAuthoringId;
   return typeof id === "string" ? <CreatorAuthoringLanding id={id} /> : <NewChatLanding />;
+}
+
+function StudioTaskLanding({ token }: { token: string }) {
+  const viewer = useViewerId();
+  const selection = peekStudioSelection(token, viewer, getOmnigentServerIdentity());
+  return selection ? (
+    <NewChatLanding key={token} studio={selection} />
+  ) : (
+    <p role="alert">Open the task again in Work to choose a session.</p>
+  );
 }
 
 function CreatorAuthoringLanding({ id }: { id: string }) {
@@ -2343,9 +2356,11 @@ function CreatorAuthoringLanding({ id }: { id: string }) {
 }
 
 function NewChatLanding({
+  studio = null,
   creatorDraft,
 }: {
   creatorDraft?: ReturnType<typeof readCreatorAuthoringDraft>;
+  studio?: StudioSelection | null;
 }) {
   const [params] = useSearchParams();
   const navigate = useNavigate();
@@ -2357,6 +2372,8 @@ function NewChatLanding({
     queryFn: () => getSessionSlim(siblingSourceId!),
     enabled: siblingSourceId !== null && supportsNested,
   });
+  if (studio && siblingSourceId)
+    return <p role="alert">Open the task again in Work to choose a session.</p>;
   if (siblingSourceId && info !== "loading" && !supportsNested)
     return (
       <div role="alert" className="p-6">
@@ -2386,7 +2403,8 @@ function NewChatLanding({
     );
   return (
     <NewChatLandingContent
-      key={siblingSourceId ?? "standalone"}
+      key={siblingSourceId ?? studio?.taskId ?? "standalone"}
+      studio={studio}
       siblingSourceId={siblingSourceId}
       creatorDraft={creatorDraft}
       siblingSource={source.data}
@@ -2395,15 +2413,18 @@ function NewChatLanding({
 }
 
 function NewChatLandingContent({
+  studio,
   creatorDraft,
   siblingSourceId,
   siblingSource,
 }: {
+  studio: StudioSelection | null;
   creatorDraft?: ReturnType<typeof readCreatorAuthoringDraft>;
   siblingSourceId: string | null;
   siblingSource?: Awaited<ReturnType<typeof getSessionSlim>>;
 }) {
   const [draftState] = useState(() => {
+    if (studio) return { draft: null, revision: 0 };
     const state = landingDrafts.get(siblingSourceId) ?? { draft: null, revision: 0 };
     landingDrafts.set(siblingSourceId, state);
     return state;
@@ -2413,6 +2434,7 @@ function NewChatLandingContent({
   const replaceSearchParams = useReplaceSearchParams();
   const [searchParams] = useSearchParams();
   const linkedPrompt = searchParams.get("prompt");
+  const studioTask = studio?.taskId;
   const handoffToken = searchParams.get(NEW_SESSION_HANDOFF_PARAM);
   // A copied message replaces the whole draft, even with no text or files. Read
   // once: the link effect below releases the token.
@@ -2432,7 +2454,7 @@ function NewChatLandingContent({
 
   // Project driving this visit, when the sidebar's per-project "new session"
   // pencil landed here with a `?project=` query param. Empty otherwise.
-  const projectParam = searchParams.get("project") ?? "";
+  const projectParam = studio?.project ?? searchParams.get("project") ?? "";
   const issueKey = linearIssueKey(searchParams.get("issue") ?? "");
   const taskWorktreeRequested = !!issueKey && searchParams.get("taskWorktree") === "1";
   const [cacheUser, setCacheUser] = useState(getCurrentUserId);
@@ -2629,7 +2651,7 @@ function NewChatLandingContent({
   // visit (or a plain one) must not beat THIS visit's project defaults —
   // strip them so the prefill machine (fill-empty-only) can seed. Read once
   // per mount; only the lazy state initializers below consume it.
-  const parkedDraft = creatorDraft ? null : landingDraft;
+  const parkedDraft = creatorDraft || studio ? null : landingDraft;
   const restoredDraft: LandingDraft | null =
     parkedDraft === null || parkedDraft.project === projectParam
       ? parkedDraft
@@ -2849,11 +2871,14 @@ function NewChatLandingContent({
   // project-driven visit defers to the project-prefill effect instead
   // (which falls back to the same last pick).
   const [pickedAgentId, setPickedAgentId] = useState<string | null>(
-    () => restoredDraft?.pickedAgentId ?? (projectParam !== "" ? null : readLastAgentId()),
+    () =>
+      studio?.agent ??
+      restoredDraft?.pickedAgentId ??
+      (projectParam !== "" ? null : readLastAgentId()),
   );
   const agentExplicitlySelectedRef = useRef(false);
   const [selectedHostId, setSelectedHostId] = useState<string | null>(
-    () => restoredDraft?.selectedHostId ?? siblingSource?.hostId ?? null,
+    () => studio?.hostId ?? restoredDraft?.selectedHostId ?? siblingSource?.hostId ?? null,
   );
   // Sessions on the selected host — fetched only when a host is selected,
   // to avoid registering hundreds of sessions into the health poll at idle.
@@ -2862,7 +2887,7 @@ function NewChatLandingContent({
   // host — the server provisions a sandbox host at create time
   // (host_type: "managed"), so no host_id or workspace is sent.
   const [sandboxSelected, setSandboxSelected] = useState(
-    () => restoredDraft?.sandboxSelected ?? false,
+    () => !studioTask && (restoredDraft?.sandboxSelected ?? false),
   );
   // Provider the sandbox pick launches on. Seeded to the sticky last pick (or
   // the first offered row) once the picker rows load; null both before that
@@ -2956,7 +2981,7 @@ function NewChatLandingContent({
   const [sandboxRepoPopoverOpen, setSandboxRepoPopoverOpen] = useState(false);
   const sandboxRepoPopoverRef = useRef<HTMLDivElement>(null);
   const [workspace, setWorkspace] = useState<string>(
-    () => restoredDraft?.workspace ?? siblingSource?.workspace ?? "",
+    () => studio?.workspace ?? restoredDraft?.workspace ?? siblingSource?.workspace ?? "",
   );
   useEffect(() => {
     if (!siblingSourceId || !siblingSource || info === "loading") return;
@@ -2986,7 +3011,9 @@ function NewChatLandingContent({
   // exact config value counts as explicit and is SENT with the create.
   const agentFromConfigRef = useRef<boolean>(restoredDraft?.agentFromConfig ?? false);
   const workspaceFromConfigRef = useRef<boolean>(restoredDraft?.workspaceFromConfig ?? false);
-  const [branchName, setBranchName] = useState<string>(() => restoredDraft?.branchName ?? "");
+  const [branchName, setBranchName] = useState<string>(
+    () => studio?.branch ?? restoredDraft?.branchName ?? "",
+  );
   // Branch the worktree-default effect auto-seeded (empty = none), so it can
   // retract its own seed when the default turns off. In the preserved draft so
   // it survives the composer unmounting (e.g. a trip to Settings) and remounting.
@@ -3054,6 +3081,7 @@ function NewChatLandingContent({
   // switch, seeded from the user's last stored pick for that agent.
   const [pickedHarness, setPickedHarness] = useState<string | null>(
     () =>
+      studio?.harness ??
       restoredDraft?.pickedHarness ??
       readLastHarness(restoredDraft?.pickedAgentId ?? readLastAgentId()),
   );
@@ -5875,6 +5903,21 @@ function NewChatLandingContent({
       }
     }
     if (
+      studioTask &&
+      (sandboxSelected ||
+        !shouldCreateWorktree ||
+        selectedHostId !== studio?.hostId ||
+        workspace.trim() !== studio?.workspace ||
+        branchName.trim() !== studio?.branch ||
+        selectedNativeHarness !== studio?.harness ||
+        selectedProject !== projectParam)
+    ) {
+      return {
+        field: "other",
+        message: "The host, checkout, branch and harness must match your Studio task selection.",
+      };
+    }
+    if (
       taskWorktreeRequested &&
       selectedProject === projectParam &&
       (sandboxSelected || !shouldCreateWorktree)
@@ -6859,6 +6902,21 @@ function NewChatLandingContent({
           });
         }
       }
+      if (studioTask) {
+        try {
+          const response = await authenticatedFetch(
+            "/v1/extensions/egzakta.work/studio/v1/tasks/linkSession",
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ task_id: studioTask, session_id: data.id }),
+            },
+          );
+          if (!response.ok) throw new Error();
+        } catch {
+          showToast("Session started. The shared task link could not be saved.");
+        }
+      }
       // Persist the configuration that actually launched. Modal Save updates
       // storage eagerly so an immediate Send cannot observe stale state; this
       // successful-create snapshot also covers restored drafts and every
@@ -7550,6 +7608,11 @@ function NewChatLandingContent({
       )}
       data-testid="new-chat-landing"
     >
+      {studioTask && (
+        <p className="text-sm text-muted-foreground">
+          {studio?.repository} · {studio?.branch} · {studio?.harness}
+        </p>
+      )}
       {taskWorktreeRequested && selectedProject === projectParam && (
         <div className="absolute inset-x-0 top-0 z-10 mx-auto max-w-2xl px-4 text-xs text-muted-foreground">
           <p className="break-all">

@@ -76,7 +76,10 @@ export interface ExtensionContext {
       params?: Record<string, string | number | boolean>,
     ): Promise<void>;
     openSession(sessionId: string): Promise<void>;
+    /** Available in an authenticated, session-bound Studio human thread. */
+    currentStudioTask(): Promise<{ task_id: string; thread_id: string }>;
     /** Opens the composer; with `projectId`, the new session is filed under that project. */
+    openStudioSession(options: {hostId:string;repository:string;branch:string;harness:string;taskId:string;projectId?:string;prompt?:string;issue?:string}): Promise<void>;
     openNewSession(options?: {
       projectId?: string;
       prompt?: string;
@@ -268,6 +271,8 @@ export function defineExtension(lifecycle: ExtensionLifecycle): void {
       async openSession(sessionId) {
         await request("navigation.openSession", { sessionId });
       },
+      async currentStudioTask() { return request<{ task_id:string; thread_id:string }>("navigation.currentStudioTask", {}); },
+      async openStudioSession(options) { await request("navigation.openStudioSession", options); },
       async openNewSession(options) {
         await request("navigation.openNewSession", {
           ...(options?.projectId !== undefined

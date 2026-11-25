@@ -2123,7 +2123,21 @@ class HostProcess:
             and frame.inference_config is not None
             and (binding_for_harness(frame.inference_config, frame.harness) is not None)
         )
-        if has_binding:
+        seat_env = {}
+        if frame.studio_seat_profile is not None:
+            from omnigent.studio.seat_pool import profile_environment
+
+            if frame.inference_config is not None or frame.session_env_handoff_id:
+                return self._launch_failed(
+                    frame, "Pooled launches require the assigned seat profile"
+                )
+            try:
+                seat_env = await asyncio.to_thread(
+                    profile_environment, frame.studio_seat_profile, frame.harness
+                )
+            except (ValueError, OSError):
+                return self._launch_failed(frame, "Studio seat mount is unavailable")
+        if has_binding or seat_env:
             from omnigent.onboarding.harness_install import (
                 READINESS_CLI_PROBE_TIMEOUT_S,
                 missing_harness_cli,
@@ -2221,8 +2235,17 @@ class HostProcess:
             if frame.session_id
             else {}
         )
+        inherited = (
+            {
+                k: v
+                for k, v in os.environ.items()
+                if k in _RUNNER_ENV_ALLOWLIST or k.startswith(_RUNNER_ENV_ALLOWLIST_PREFIXES)
+            }
+            if seat_env
+            else os.environ
+        )
         env = _build_runner_env(
-            os.environ,
+            inherited,
             server_url=self._server_url,
             runner_id=runner_id,
             binding_token=frame.binding_token,
@@ -2238,6 +2261,11 @@ class HostProcess:
             inference_config=frame.inference_config,
             session_env=session_env,
         )
+        if seat_env:
+            # A pooled session must never inherit another API key from host setup.
+            for name in HARNESS_CREDENTIAL_ENV_VARS | {"CODEX_HOME", "CLAUDE_CONFIG_DIR"}:
+                env.pop(name, None)
+            env.update(seat_env)
         if frame.inference_config is not None:
             try:
                 inference_path = await asyncio.to_thread(

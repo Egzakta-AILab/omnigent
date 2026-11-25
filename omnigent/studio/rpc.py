@@ -19,6 +19,10 @@ class Page(Params):
     after: str | None = Field(default=None, max_length=128)
 
 
+class FleetPage(Page):
+    task_id: UUID | None = None
+
+
 class TaskKey(Params):
     linear_workspace: UUID
     linear_issue_id: UUID
@@ -38,6 +42,10 @@ class PullRequest(TaskRef):
     head_sha: Annotated[str, StringConstraints(pattern=r"^[a-f0-9]{40}$")]
 
 
+class SessionRef(Params):
+    session_id: UUID
+
+
 class SessionLink(TaskRef):
     session_id: UUID
 
@@ -54,6 +62,21 @@ class Response(Params):
     request_id: UUID
     decision: Literal["accept", "not_me", "away", "reply"]
     message: Text | None = None
+
+
+class ReleaseFailure(Params):
+    candidate_id: Name
+    scenario_id: Name
+    head_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
+    request_id: UUID4
+
+
+class BoundReleaseFailure(ReleaseFailure):
+    preview_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class ConfirmedReleaseFailure(BoundReleaseFailure):
+    confirmation_token: str = Field(min_length=1, max_length=256)
 
 
 class LinearComment(TaskRef):
@@ -92,6 +115,18 @@ class FinishRound(LeaseRef):
 class Seat(Params):
     slot_id: Name
     harness: Literal["claude-native", "codex-native"]
-    encrypted_profile_ref: Annotated[str, StringConstraints(min_length=1, max_length=512)]
+    encrypted_profile_ref: (
+        Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=512)]
+        | None
+    ) = None
+    routing_mode: Literal["subscription", "fallback"] | None = None
     enabled: bool = Field(strict=True)
     weight: int = Field(default=1, ge=1, le=100)
+
+
+class WorkspaceRef(Params):
+    host_id: UUID
+
+
+class Preview(PullRequest):
+    """Preview allocation requires the current task-linked pull request revision."""

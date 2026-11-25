@@ -1632,7 +1632,7 @@ def create_hosts_router(
             )
         )
         try:
-            host_registry.send_text(conn, launch_frame)
+            await host_registry.send_launch(conn, launch_frame)
         except ConnectionError:
             conn.pending_launches.pop(request_id, None)
             await _rollback_failed_launch()
