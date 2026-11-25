@@ -24,12 +24,16 @@
 // PR each render their own empty state, and an associated PR falls through to
 // the header + stacked diff.
 
+import { useViewerId } from "@/hooks/useViewerId";
+import { getProject } from "@/lib/projectsApi";
+import { useSession } from "@/hooks/useSession";
+import { STUDIO_ISSUE_LABEL } from "@/lib/studioIssue";
 import { createPortal } from "react-dom";
 import { useMobilePanelHeaderTarget } from "./MobilePanelDrawer";
 import { PullRequestCommentComposer } from "./PullRequestCommentComposer";
 import { usePullRequestReviewThreads } from "@/hooks/usePullRequestReviewThreads";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { skipToken, useQuery, useQueryClient } from "@tanstack/react-query";
+import { skipToken, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import {
   ArrowLeftIcon,
   CopyIcon,
@@ -57,6 +61,7 @@ import {
 import { cn } from "@/lib/utils";
 import { copyText } from "@/lib/clipboard";
 import { toast } from "sonner";
+import { useLocalReviewNavigation } from "@/lib/localReviewContext";
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -85,6 +90,7 @@ import {
   useWorkspaceAsleep,
   useWorkspaceServeable,
 } from "@/hooks/useWorkspaceChangedFiles";
+import { useSandboxStarting } from "@/hooks/useSessionReconnect";
 import {
   sessionPullRequestsKey,
   type StoredPullRequests,
@@ -97,6 +103,17 @@ import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { gitProviderCopy, type GitProviderCopy } from "@/lib/gitProviders";
 import { parseHttpUrl } from "@/lib/openLinkInApp";
 import { absoluteTime, relativeTime } from "@/lib/relativeTime";
+import { isTempConvId } from "@/lib/tempConversationId";
+import { Link, useNavigate, useSearchParams } from "@/lib/routing";
+import { ProjectPullRequestDetails } from "@/studio/ProjectWorkspace";
+import { useReviewerSessionLookup } from "@/studio/reviews/ReviewerSessionView";
+import { WorkspaceRepositories } from "@/studio/WorkspaceRepositories";
+import {
+  ProjectReviewPanel,
+  ReviewPanel,
+  useStudioReviewHistory,
+} from "@/studio/reviews/ReviewPanel";
+import type { ReviewSource } from "@/studio/reviews/api";
 import {
   normalizePullRequestInfo,
   usePullRequestChangedFiles,
@@ -185,7 +202,8 @@ function codeSpans(text: string): React.ReactNode {
  * resolves, the account is correct — surfacing the knob then would just invite a
  * misconfiguration, so it's absent from the header and the `no-pr` state. Renders
  * nothing with a single account (nothing to choose) or when the provider can't
- * switch accounts.
+ * switch accounts. The merge dialog has its own account picker, because an
+ * account that can read a PR may still be refused the merge.
  */
 function GithubAccountSelector({
   conversationId,
@@ -229,6 +247,13 @@ function GithubAccountSelector({
       )}
     </div>
   );
+}
+
+/** The accounts the merge dialog offers, when the host merges as the one it sends. */
+function mergeAccounts(info: NormalizedPullRequestInfo | undefined) {
+  return info?.capabilities.account_switching && info.capabilities.merge_as_account
+    ? info.auth
+    : undefined;
 }
 
 /** The one thing the panel should show, derived from the info query. Every
@@ -634,9 +659,9 @@ function PullRequestCheckCounts({
   );
 }
 
-/** The Summary tab body: reviewers beside labels, then CI checks with the Merge button, then
- *  the PR description, with dividers between. When the token can't read check runs, the
- *  Checks area says so instead of counts. */
+/** The Summary tab body: reviewers beside labels (stacked when narrow), then CI checks with the
+ *  Merge button, then the PR description, with dividers between. When the token can't read
+ *  check runs, the Checks area says so instead of counts. */
 function PullRequestSummaryTab({
   reviewers,
   labels,
@@ -662,10 +687,18 @@ function PullRequestSummaryTab({
     // Blocks carry their own padding so the dividers between them span the full width.
     <div>
       {showPeople && (
-        <div className="flex">
+        <div className="flex @max-[480px]:flex-col">
           {showReviewers && <div className="min-w-0 flex-1 p-3">{reviewers}</div>}
-          {showReviewers && labels && <Separator orientation="vertical" />}
-          {labels && <div className="min-w-0 flex-1 p-3">{labels}</div>}
+          {labels && (
+            <div
+              className={cn(
+                "min-w-0 flex-1 p-3",
+                showReviewers && "border-l @max-[480px]:border-t @max-[480px]:border-l-0",
+              )}
+            >
+              {labels}
+            </div>
+          )}
         </div>
       )}
       {showPeople && showStatus && <Separator />}
@@ -789,7 +822,7 @@ type Associations = Pick<
   PullRequestInfo,
   "prs" | "tracking_available" | "selected_pr_url" | "provider" | "provider_display"
 >;
-type PullRequestSubtab = "summary" | "comments" | "changes";
+type PullRequestSubtab = "summary" | "comments" | "changes" | "review";
 
 function PullRequestListRow({
   conversationId,
@@ -810,6 +843,7 @@ function PullRequestListRow({
   hostOffline: boolean;
   sandboxAsleep: boolean;
 }) {
+  const sandboxStarting = useSandboxStarting(conversationId);
   const info = usePullRequestInfo(conversationId, {
     poll: active ? "list" : false,
     prUrl: association.url,
@@ -893,11 +927,15 @@ function PullRequestListRow({
                 <TooltipTrigger asChild>
                   <span tabIndex={0} role="status" className="inline-flex items-center gap-1">
                     <ServerOffIcon aria-hidden className="size-3" />
-                    {sandboxAsleep ? "Sandbox asleep" : "Host offline"}
+                    {sandboxAsleep
+                      ? sandboxStarting
+                        ? "Sandbox starting"
+                        : "Sandbox asleep"
+                      : "Host offline"}
                   </span>
                 </TooltipTrigger>
                 <TooltipContent className="max-w-xs">
-                  {storedPullRequestHint(association, sandboxAsleep)}
+                  {storedPullRequestHint(association, sandboxAsleep, sandboxStarting)}
                 </TooltipContent>
               </Tooltip>
             </TooltipProvider>
@@ -929,6 +967,7 @@ function PullRequestListRow({
             conversationId={conversationId}
             prUrl={association.url}
             pr={cachedPr}
+            accounts={mergeAccounts(data)}
           />
         )}
       </div>
@@ -983,7 +1022,110 @@ interface PullRequestPanelView {
 
 const DEFAULT_PANEL_VIEW: PullRequestPanelView = { showingDetails: false, subtab: "summary" };
 
+export function selectPullRequestInPanel(
+  queryClient: QueryClient,
+  conversationId: string,
+  prUrl: string,
+) {
+  queryClient.setQueryData<PullRequestPanelView>(["pull-request-panel-view", conversationId], {
+    selected: prUrl,
+    showingDetails: true,
+    subtab: "summary",
+  });
+}
+
 export function PullRequestPanel({
+  conversationId,
+  active = true,
+  reviewSession = false,
+}: {
+  conversationId: string;
+  active?: boolean;
+  reviewSession?: boolean;
+}) {
+  return reviewSession ? (
+    <ReviewedPullRequestPanel conversationId={conversationId} active={active} />
+  ) : (
+    <BranchPullRequestPanel conversationId={conversationId} active={active} />
+  );
+}
+
+function ReviewedPullRequestPanel({
+  conversationId,
+  active,
+}: {
+  conversationId: string;
+  active: boolean;
+}) {
+  const navigate = useNavigate();
+  const lookup = useReviewerSessionLookup(conversationId, active);
+  if (lookup.isPending) {
+    return (
+      <p role="status" className="p-3 text-ui">
+        Loading the reviewed pull request…
+      </p>
+    );
+  }
+  if (lookup.isError && !lookup.data) {
+    return (
+      <div className="space-y-2 p-3 text-ui">
+        <p role="alert">Couldn’t load the reviewed pull request.</p>
+        <Button variant="outline" size="sm" onClick={() => void lookup.refetch()}>
+          Retry
+        </Button>
+      </div>
+    );
+  }
+  const review = lookup.data;
+  if (!review) {
+    return <BranchPullRequestPanel conversationId={conversationId} active={active} />;
+  }
+
+  const { target } = review;
+  return (
+    <section className="min-h-0 flex-1 overflow-y-auto" aria-label="Reviewed pull request">
+      <header className="space-y-2 border-b border-border p-3">
+        <h2 className="text-ui font-medium">Reviewed pull request</h2>
+        <a className="text-ui underline" href={target.pr_url} target="_blank" rel="noreferrer">
+          {target.repository} #{target.pr_number}
+        </a>
+        <p className="font-mono text-xs text-muted-foreground">
+          Reviewed revision · {target.head_sha.slice(0, 8)}
+        </p>
+        {review.run_id && (
+          <Button asChild variant="outline" size="sm">
+            <Link to={`/reviews/${encodeURIComponent(review.run_id)}/discussion`}>
+              Open captured diff and discussion
+            </Link>
+          </Button>
+        )}
+        {target.source_session_id && (
+          <Button asChild variant="outline" size="sm">
+            <Link to={`/c/${encodeURIComponent(target.source_session_id)}`}>
+              Open source session
+            </Link>
+          </Button>
+        )}
+      </header>
+      {target.source_project_id && target.repository_path && (
+        <ProjectPullRequestDetails
+          key={review.id}
+          projectId={target.source_project_id}
+          target={{ hostId: target.host_id, workspace: target.workspace }}
+          repository={target.repository_path}
+          url={target.pr_url}
+          initialView={review.run_id ? "patch" : "review"}
+          previousProfile={review.run_id ? undefined : review.profile}
+          onReviewStarted={(sessionId) =>
+            navigate(`/c/${encodeURIComponent(sessionId)}?view=review`)
+          }
+        />
+      )}
+    </section>
+  );
+}
+
+function BranchPullRequestPanel({
   conversationId,
   active = true,
 }: {
@@ -994,6 +1136,9 @@ export function PullRequestPanel({
   const mobileHeaderTarget = useMobilePanelHeaderTarget();
   const inMobileDrawer = mobileHeaderTarget !== undefined;
   const queryClient = useQueryClient();
+  const serverInfo = useServerInfo();
+  const hasWorkspaceCatalog =
+    serverInfo !== "loading" && serverInfo.workspace_repositories === true;
   const viewKey = ["pull-request-panel-view", conversationId];
   const { data: cachedView = DEFAULT_PANEL_VIEW } = useQuery<PullRequestPanelView>({
     queryKey: viewKey,
@@ -1002,11 +1147,13 @@ export function PullRequestPanel({
     gcTime: 30 * 60_000,
   });
   // Keep interactions synchronous; the shared entry restores the view on navigation.
-  const [localView, setLocalView] = useState({ conversationId, view: cachedView });
-  if (localView.conversationId !== conversationId) {
-    setLocalView({ conversationId, view: cachedView });
+  const [localView, setLocalView] = useState({ conversationId, cachedView, view: cachedView });
+  const cacheChanged =
+    localView.conversationId !== conversationId || localView.cachedView !== cachedView;
+  if (cacheChanged) {
+    setLocalView({ conversationId, cachedView, view: cachedView });
   }
-  const view = localView.conversationId === conversationId ? localView.view : cachedView;
+  const view = cacheChanged ? cachedView : localView.view;
   const selected = view.selected;
   const showingDetails = view.showingDetails;
   const activeTab = view.subtab;
@@ -1021,7 +1168,7 @@ export function PullRequestPanel({
           ...update,
         }),
       );
-      setLocalView({ conversationId, view: next! });
+      setLocalView((current) => ({ ...current, conversationId, view: next! }));
     },
     [queryClient, conversationId],
   );
@@ -1030,6 +1177,11 @@ export function PullRequestPanel({
     [updateView],
   );
   const setActiveTab = (value: PullRequestSubtab) => updateView({ subtab: value });
+  const localReviewTarget = useLocalReviewNavigation(conversationId);
+  useEffect(() => {
+    const prUrl = localReviewTarget?.anchor_metadata?.pr_url;
+    if (prUrl) updateView({ selected: prUrl, showingDetails: true, subtab: "changes" });
+  }, [localReviewTarget, updateView]);
   const [linking, setLinking] = useState(false);
   const [url, setUrl] = useState("");
   const info = usePullRequestInfo(conversationId, {
@@ -1057,7 +1209,10 @@ export function PullRequestPanel({
           "github-review-threads",
           "github-changed-files",
           "github-pr-diff",
+          "github-pr-commits",
+          "github-pr-commit-diff",
           "session-pull-requests",
+          ...(hasWorkspaceCatalog ? ["workspace-repositories"] : []),
         ].map((key) => queryClient.invalidateQueries({ queryKey: [key, conversationId] })),
       );
     } finally {
@@ -1076,10 +1231,11 @@ export function PullRequestPanel({
   // Servers that store PRs decide which PRs the session links, so the controls
   // survive a selection switch and the runner and host being offline. Live info
   // then only supplies the selected PR's details.
-  const storesPrs = storesSessionPullRequests(useServerInfo());
+  const storesPrs = storesSessionPullRequests(serverInfo);
   const stored = useSessionPullRequests(conversationId, info.data);
   const hostOffline = useHostOffline(conversationId, info);
   const sandboxAsleep = useWorkspaceAsleep(conversationId);
+  const sandboxStarting = useSandboxStarting(conversationId);
   // Linking verifies the PR with the host's provider account.
   const linkNeedsHost = storesPrs && hostOffline;
   const [knownAssociations, setKnownAssociations] = useState<{
@@ -1135,6 +1291,19 @@ export function PullRequestPanel({
     }
   }, [selected, associations?.selected_pr_url, linked, changeSelection]);
   const prs = associations?.prs ?? [];
+  const [searchParams] = useSearchParams();
+  const reviewRequested = searchParams.get("reviewPr") === "1";
+  const openedRequestedReview = useRef<string | null>(null);
+  const requestedPr = prs.find((pr) => pr.url === selected)?.url ?? prs[0]?.url;
+  useEffect(() => {
+    if (!reviewRequested) {
+      openedRequestedReview.current = null;
+      return;
+    }
+    if (!active || !requestedPr || openedRequestedReview.current === conversationId) return;
+    openedRequestedReview.current = conversationId;
+    updateView({ selected: requestedPr, showingDetails: true, subtab: "review" });
+  }, [active, conversationId, requestedPr, reviewRequested, updateView]);
   useEffect(() => {
     if (prs.length === 1) updateView({ showingDetails: true });
   }, [updateView, prs.length]);
@@ -1151,6 +1320,39 @@ export function PullRequestPanel({
         if (prUrl === selected) changeSelection(remaining.prs[0]?.url);
       },
     });
+  const attachPr = (prUrl: string, openDetails = false) => {
+    if (linkNeedsHost || update.isPending) return;
+    update.mutate(
+      { url: prUrl, action: "attach" },
+      {
+        onSuccess: async (data) => {
+          if (storesPrs && data.prs) {
+            const key = sessionPullRequestsKey(conversationId);
+            await queryClient.cancelQueries({ queryKey: key });
+            queryClient.setQueryData<StoredPullRequests>(key, (previous) => ({
+              prs: data.prs!.map((pr) => ({
+                ...previous?.prs.find((storedPr) => storedPr.url === pr.url),
+                ...pr,
+              })),
+              synced: previous?.synced ?? false,
+            }));
+          }
+          if (openDetails) {
+            updateView({ selected: data.selected_pr_url, showingDetails: true, subtab: "summary" });
+          } else {
+            changeSelection(data.selected_pr_url);
+          }
+          setLinking(false);
+          setUrl("");
+        },
+      },
+    );
+  };
+  const linkError = update.isError && (
+    <p role="alert" className="mt-1 text-ui text-destructive">
+      {update.error.message}
+    </p>
+  );
   const linkControls = (
     <>
       {linking && (
@@ -1165,28 +1367,7 @@ export function PullRequestPanel({
           }}
           onSubmit={(event) => {
             event.preventDefault();
-            if (linkNeedsHost) return;
-            update.mutate(
-              { url, action: "attach" },
-              {
-                onSuccess: async (data) => {
-                  if (storesPrs && data.prs) {
-                    const key = sessionPullRequestsKey(conversationId);
-                    await queryClient.cancelQueries({ queryKey: key });
-                    queryClient.setQueryData<StoredPullRequests>(key, (previous) => ({
-                      prs: data.prs!.map((pr) => ({
-                        ...previous?.prs.find((storedPr) => storedPr.url === pr.url),
-                        ...pr,
-                      })),
-                      synced: previous?.synced ?? false,
-                    }));
-                  }
-                  changeSelection(data.selected_pr_url);
-                  setLinking(false);
-                  setUrl("");
-                },
-              },
-            );
+            attachPr(url);
           }}
         >
           <Input
@@ -1208,11 +1389,7 @@ export function PullRequestPanel({
           </Button>
         </form>
       )}
-      {update.isError && (
-        <p role="alert" className="mt-1 text-ui text-destructive">
-          {update.error.message}
-        </p>
-      )}
+      {linkError}
     </>
   );
   const fallbackCopy = gitProviderCopy(
@@ -1307,6 +1484,24 @@ export function PullRequestPanel({
           {linkControls}
         </div>
       )}
+      {active && hasWorkspaceCatalog && !isTempConvId(conversationId) && (
+        <WorkspaceRepositories
+          key={conversationId}
+          conversationId={conversationId}
+          hostOffline={hostOffline}
+          linkPending={update.isPending}
+          linkedUrls={prs.map((pr) => pr.url)}
+          onLink={(prUrl) => {
+            if (!hostOffline) attachPr(prUrl, true);
+          }}
+          onOpen={(prUrl) => {
+            updateView({ selected: prUrl, showingDetails: true, subtab: "summary" });
+          }}
+        />
+      )}
+      {!showTrackingControls && !linkInEmptyState && linkError && (
+        <div className="shrink-0 border-b border-border p-2 [&>:first-child]:mt-0">{linkError}</div>
+      )}
       {unlink.isError && (
         <p role="alert" className="shrink-0 border-b border-border p-2 text-ui text-destructive">
           Couldn’t unlink: {unlink.error.message}
@@ -1362,7 +1557,9 @@ export function PullRequestPanel({
                   {linkNeedsHost ? (
                     <p role="status" className="text-ui text-muted-foreground">
                       {sandboxAsleep
-                        ? "To link a PR, send a message to start the session’s sandbox."
+                        ? sandboxStarting
+                          ? "Starting the session’s sandbox. You can link a PR once it’s back online."
+                          : "To link a PR, send a message to start the session’s sandbox."
                         : "To link a PR, please reconnect the session’s host."}
                     </p>
                   ) : (
@@ -1397,14 +1594,20 @@ function useHostOffline(
   return serveable === false || sandboxAsleep || info.error instanceof RunnerOfflineError;
 }
 
-function storedPullRequestHint(pr: PullRequestAssociation, sandboxAsleep: boolean): string {
+function storedPullRequestHint(
+  pr: PullRequestAssociation,
+  sandboxAsleep: boolean,
+  sandboxStarting: boolean,
+): string {
   const lastSync = pr.state_checked_at
     ? `Last sync time: ${absoluteTime(pr.state_checked_at * 1000)}. `
     : "";
   return (
     lastSync +
     (sandboxAsleep
-      ? "To load the PR details, send a message to start the session’s sandbox."
+      ? sandboxStarting
+        ? "Starting the session’s sandbox. The PR details will load once it’s back online."
+        : "To load the PR details, send a message to start the session’s sandbox."
       : "To load the PR details, please reconnect the session’s host.")
   );
 }
@@ -1418,12 +1621,14 @@ function StoredPullRequestDetails({
   pr,
   copy,
   sandboxAsleep,
+  sandboxStarting,
   showHeading,
   refreshButton,
 }: {
   pr: PullRequestAssociation;
   copy: GitProviderCopy;
   sandboxAsleep: boolean;
+  sandboxStarting: boolean;
   showHeading: boolean;
   refreshButton?: React.ReactNode;
 }) {
@@ -1468,7 +1673,7 @@ function StoredPullRequestDetails({
           </div>
         </div>
         <p role="status" className="p-3 text-ui text-muted-foreground">
-          {storedPullRequestHint(pr, sandboxAsleep)}
+          {storedPullRequestHint(pr, sandboxAsleep, sandboxStarting)}
         </p>
       </div>
     </TooltipProvider>
@@ -1512,7 +1717,21 @@ function PullRequestPanelDetails({
   const changes = usePullRequestChangedFiles(conversationId, hasPr, prUrl, revision);
   const prDiff = usePullRequestDiff(conversationId, hasPr, prUrl, revision);
   const sandboxAsleep = useWorkspaceAsleep(conversationId);
+  const sandboxStarting = useSandboxStarting(conversationId);
   const canEdit = useCanEdit(conversationId);
+  const serverInfo = useServerInfo();
+  const { session } = useSession(active ? conversationId : null);
+  const taskSession = session?.labels?.[STUDIO_ISSUE_LABEL] ? session : null;
+  const viewerId = useViewerId();
+  const taskProject = useQuery({
+    queryKey: ["studio-task-project", viewerId, taskSession?.projectId],
+    queryFn: taskSession?.projectId ? () => getProject(taskSession.projectId!) : skipToken,
+    enabled: active && activeTab === "review",
+  });
+  const taskCheckout = taskProject.data?.config;
+  const linearTaskReview = taskCheckout?.source_key?.startsWith("linear:") === true;
+
+  const [reviewSource, setReviewSource] = useState<ReviewSource | null>(null);
 
   // Summary (checks + PR body), Comments, and Changes (the stacked diff).
   // Summary is the landing tab — like GitHub's PR page opening on the
@@ -1532,6 +1751,15 @@ function PullRequestPanelDetails({
 
   // Mutation responses seed the query cache raw, so normalize before reading.
   const normalized = info.data && normalizePullRequestInfo(info.data);
+  const supportsStudio =
+    serverInfo !== "loading" &&
+    serverInfo.studio_reviews === true &&
+    hasPr &&
+    !!prUrl &&
+    normalized?.provider === "github";
+  const history = useStudioReviewHistory(conversationId, active && supportsStudio);
+  const showReview = supportsStudio && history.authorized;
+  const selectedTab = activeTab === "review" && !showReview ? "summary" : activeTab;
   const copy = gitProviderCopy(
     normalized?.provider ?? null,
     normalized?.auth.hint,
@@ -1544,6 +1772,7 @@ function PullRequestPanelDetails({
         pr={storedPr}
         copy={gitProviderCopy(storedPr.provider, undefined, storedPr.provider_display)}
         sandboxAsleep={sandboxAsleep}
+        sandboxStarting={sandboxStarting}
         showHeading={showHeading}
         refreshButton={refreshButton}
       />
@@ -1553,7 +1782,9 @@ function PullRequestPanelDetails({
     return (
       <p role="status" className="p-3 text-ui text-muted-foreground">
         {sandboxAsleep
-          ? "This session’s PRs haven’t synced to the server yet. To load them, send a message to start the session’s sandbox."
+          ? sandboxStarting
+            ? "This session’s PRs haven’t synced to the server yet. Starting the session’s sandbox to load them."
+            : "This session’s PRs haven’t synced to the server yet. To load them, send a message to start the session’s sandbox."
           : "This session’s PRs haven’t synced to the server yet. To load them, please reconnect the session’s host."}
       </p>
     );
@@ -1586,7 +1817,11 @@ function PullRequestPanelDetails({
     case "sandbox-offline":
       return (
         <PanelMessage>
-          <p>The sandbox is offline. Send a message in the chat to start it again.</p>
+          <p>
+            {sandboxStarting
+              ? "Starting sandbox… Pull requests will load when it’s back online."
+              : "The sandbox is offline. Send a message in the chat to start it again."}
+          </p>
           {emptyStateAction}
         </PanelMessage>
       );
@@ -1625,21 +1860,25 @@ function PullRequestPanelDetails({
           hint={
             panelState.remoteHost ? (
               <>
-                The workspace’s remote is on{" "}
-                <span className="font-mono">{panelState.remoteHost}</span>, which isn’t a supported
-                git provider.
+                Omnigent couldn’t identify the git provider for{" "}
+                <span className="font-mono">{panelState.remoteHost}</span>.
               </>
             ) : (
-              "This workspace’s remote isn’t on a supported git provider."
+              "Omnigent couldn’t identify this workspace’s git provider."
             )
           }
-          // A GitHub Enterprise host the user never signed in to lands here.
           note={
             panelState.remoteHost && (
               <>
-                For a GitHub Enterprise host, run{" "}
+                On the execution host, run{" "}
+                <span className="font-mono">
+                  glab auth login --hostname {panelState.remoteHost}
+                </span>{" "}
+                for GitLab or{" "}
                 <span className="font-mono">gh auth login --hostname {panelState.remoteHost}</span>{" "}
-                on the host.
+                for GitHub Enterprise. For a GitHub SSH alias, run{" "}
+                <span className="font-mono">git config --local omnigent.gitprovider github</span> in
+                this checkout, then refresh for installation or sign-in help.
               </>
             )
           }
@@ -1715,8 +1954,11 @@ function PullRequestPanelDetails({
   return (
     <TooltipProvider delayDuration={0}>
       <Tabs
-        value={activeTab}
-        onValueChange={(v) => setActiveTab(v === "comments" || v === "changes" ? v : "summary")}
+        value={selectedTab}
+        onValueChange={(v) => {
+          setReviewSource(null);
+          setActiveTab(v === "comments" || v === "changes" || v === "review" ? v : "summary");
+        }}
         componentId="github.panel.tabs"
         className="flex h-full min-h-0 flex-col gap-0"
       >
@@ -1774,6 +2016,11 @@ function PullRequestPanelDetails({
             <TabsTrigger value="changes" className="flex-none border-0 px-3 leading-none">
               Changes
             </TabsTrigger>
+            {showReview && (
+              <TabsTrigger value="review" className="flex-none border-0 px-3 leading-none">
+                Review
+              </TabsTrigger>
+            )}
           </TabsList>
         </div>
 
@@ -1818,6 +2065,7 @@ function PullRequestPanelDetails({
                   conversationId={conversationId}
                   prUrl={data.selected_pr_url}
                   pr={pr}
+                  accounts={mergeAccounts(data)}
                 />
               )
             }
@@ -1863,17 +2111,67 @@ function PullRequestPanelDetails({
           )}
         </TabsContent>
 
+        {showReview && prUrl && (
+          <TabsContent
+            value="review"
+            forceMount
+            className="min-h-0 flex-1 overflow-y-auto data-[state=inactive]:hidden"
+          >
+            {linearTaskReview &&
+            taskSession?.projectId &&
+            taskCheckout?.host_id &&
+            taskCheckout.workspace ? (
+              <ProjectReviewPanel
+                projectId={taskSession.projectId}
+                hostId={taskCheckout.host_id}
+                workspace={taskCheckout.workspace}
+                repository="."
+                singleReviewerOnly
+                active={active && selectedTab === "review"}
+                revision={{ prUrl, baseSha: baseSha ?? "", headSha: headSha ?? "" }}
+                headRepoUrl={pr.head_repository_url}
+                onOpenSource={(source) => {
+                  setReviewSource(source);
+                  setActiveTab("changes");
+                }}
+              />
+            ) : taskSession?.projectId &&
+              (linearTaskReview || taskProject.isPending || taskProject.isError) ? (
+              <p className="p-3 text-sm text-muted-foreground" role="status">
+                {taskProject.isPending
+                  ? "Loading the task’s review checkout…"
+                  : "Set a trusted checkout and connected host in the task project settings to run a review."}
+              </p>
+            ) : (
+              <ReviewPanel
+                key={`${history.viewerId}:${conversationId}:${prUrl}`}
+                conversationId={conversationId}
+                active={active && selectedTab === "review"}
+                revision={{ prUrl, baseSha: baseSha ?? "", headSha: headSha ?? "" }}
+                headRepoUrl={pr.head_repository_url}
+                history={history}
+                onOpenSource={(source) => {
+                  setReviewSource(source);
+                  setActiveTab("changes");
+                }}
+              />
+            )}
+          </TabsContent>
+        )}
+
         <PullRequestChangesTab
           conversationId={conversationId}
           data={data}
           pr={pr}
           prUrl={prUrl}
           canEdit={canEdit}
-          selected={activeTab === "changes"}
+          selected={active && activeTab === "changes"}
           changes={changes}
           prDiff={prDiff}
           reviews={reviews}
           identity={identity}
+          reviewSource={showReview ? reviewSource : null}
+          onClearReviewSource={() => setReviewSource(null)}
         />
       </Tabs>
     </TooltipProvider>

@@ -8,16 +8,13 @@ import re
 from typing import Any
 
 import zstandard
-from sqlalchemy import LargeBinary, asc, select, type_coerce, update
-from sqlalchemy.dialects.mysql import insert as mysql_insert
-from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy import LargeBinary, asc, select, tuple_, type_coerce, update
 from sqlalchemy.orm import Session
-from sqlalchemy.sql.dml import Insert
 
 from omnigent.db.account_authority import require_active_account
 from omnigent.db.compression import decode, encode
 from omnigent.db.db_models import SqlPreference, SqlProject, current_workspace_id
+from omnigent.db.preference_rows import upsert_preference_row
 from omnigent.db.utils import (
     get_or_create_engine,
     make_named_managed_session_maker,
@@ -259,6 +256,29 @@ class SqlAlchemyProjectStore(ProjectStore):
             rows = session.execute(stmt).scalars().all()
             return [_to_entity(r) for r in rows]
 
+    def list_page(
+        self, *, user_id: str | None, limit: int, after_id: str | None = None
+    ) -> tuple[builtins.list[Project], bool]:
+        """Return a ``(created_at, id)`` keyset page served by ``ix_projects_user_id``."""
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        with self._session("list_projects_page") as session:
+            stmt = (
+                select(SqlProject)
+                .where(SqlProject.workspace_id == current_workspace_id())
+                .where(SqlProject.user_id == user_id)
+            )
+            if after_id is not None:
+                after = session.get(SqlProject, (current_workspace_id(), after_id))
+                if after is None or after.user_id != user_id:
+                    raise ValueError("after must be the id of one of your projects")
+                stmt = stmt.where(
+                    tuple_(SqlProject.created_at, SqlProject.id) > (after.created_at, after.id)
+                )
+            stmt = stmt.order_by(asc(SqlProject.created_at), asc(SqlProject.id)).limit(limit + 1)
+            rows = session.execute(stmt).scalars().all()
+            return [_to_entity(row) for row in rows[:limit]], len(rows) > limit
+
     def update(
         self,
         project_id: str,
@@ -266,6 +286,7 @@ class SqlAlchemyProjectStore(ProjectStore):
         user_id: str | None,
         name: str | None = None,
         config: dict[str, Any] | None = None,
+        linear_issue: dict[str, str] | None = None,
     ) -> Project | None:
         """Update mutable fields of an owned project.
 
@@ -277,7 +298,6 @@ class SqlAlchemyProjectStore(ProjectStore):
         only uniqueness guard, so concurrent renames to the same name can both
         land.
         """
-        encoded_config = _encode_config(config) if config is not None else None
         updated_at = now_epoch()
 
         def write(session: Session) -> Project | None:
@@ -295,8 +315,20 @@ class SqlAlchemyProjectStore(ProjectStore):
                 row.name = name
                 changed = True
             if config is not None:
+                saved = _decode_config(row.config)
+                inherited = {
+                    key: saved[key]
+                    for key in ("template_project_id", "source_key", "linear_issue")
+                    if key in saved
+                }
+                encoded_config = _encode_config({**config, **inherited})
                 if row.config != encoded_config:
                     row.config = encoded_config
+                    changed = True
+            if linear_issue is not None:
+                saved = _decode_config(row.config)
+                if "linear_issue" not in saved:
+                    row.config = _encode_config({**saved, "linear_issue": linear_issue})
                     changed = True
             if changed:
                 row.updated_at = updated_at
@@ -383,40 +415,12 @@ class SqlAlchemyProjectStore(ProjectStore):
                 "sort_mode": "manual",
                 "ordered_project_ids": ids,
             }
-            encoded = _encode_order(preference)
-            values = {
-                "workspace_id": workspace_id,
-                "user_id": preference_user_id,
-                "key": _PROJECT_ORDER_KEY,
-                "value": encoded,
-            }
-            dialect = self._engine.dialect.name
-            stmt: Insert
-            if dialect == "mysql":
-                stmt = (
-                    mysql_insert(SqlPreference)
-                    .values(**values)
-                    .on_duplicate_key_update(value=encoded)
-                )
-            elif dialect == "sqlite":
-                stmt = (
-                    sqlite_insert(SqlPreference)
-                    .values(**values)
-                    .on_conflict_do_update(
-                        index_elements=["workspace_id", "user_id", "key"],
-                        set_={"value": encoded},
-                    )
-                )
-            else:
-                stmt = (
-                    pg_insert(SqlPreference)
-                    .values(**values)
-                    .on_conflict_do_update(
-                        index_elements=["workspace_id", "user_id", "key"],
-                        set_={"value": encoded},
-                    )
-                )
-            session.execute(stmt)
+            upsert_preference_row(
+                session,
+                user_id=preference_user_id,
+                key=_PROJECT_ORDER_KEY,
+                value=_encode_order(preference),
+            )
             return preference
 
         return run_write_transaction(self._session_immediate, "save_project_order", write)

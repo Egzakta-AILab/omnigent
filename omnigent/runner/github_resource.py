@@ -66,17 +66,19 @@ import time
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import quote
 
 from omnigent import config as _config
-from omnigent.git_providers import host_of
+from omnigent.git_providers import ParsedRemote, host_of, resolve_pr_url
 from omnigent.host.identity_env import in_managed_sandbox
 from omnigent.runner import pr_resource
 from omnigent.runner.git_providers import (
+    COMMIT_OBJECT,
     MERGE_OPTIONS_OBJECT,
     PR_ATTACHMENT_OBJECT,
     PR_DETAILS_OBJECT,
+    PR_DIFF_OBJECT,
     PR_LABELS_OBJECT,
     PR_MERGE_OBJECT,
     PR_REVIEWERS_OBJECT,
@@ -183,7 +185,8 @@ def _in_sandbox() -> bool:
 def _gh(
     argv: list[str], *, cwd: str, token: str | None = None, timeout: float | None = None
 ) -> tuple[int | None, str, str]:
-    # ``timeout`` raises the per-call limit for a slow call, such as a video upload.
+    # ``timeout`` replaces the per-call limit: higher for a slow call such as a video
+    # upload, lower for a best-effort one.
     timeout = timeout or _gh_timeout_seconds()
     if (deadline := _gh_deadline.get()) is not None:
         timeout = min(timeout, deadline - time.monotonic())
@@ -333,7 +336,7 @@ def _resolved_base_nwo(root: str) -> str | None:
     return None
 
 
-def _workspace_key(root: str) -> str | None:
+def _workspace_key(root: str, *, timeout: float | None = None) -> str | None:
     """Return the stable per-workspace key for the account preference, or ``None``.
 
     The account preference is keyed by the **main worktree path** — the first
@@ -342,7 +345,11 @@ def _workspace_key(root: str) -> str | None:
     distinct. Purely local (no network, no auth), so it's available before any
     ``gh`` call — the constraint that rules out keying on the resolved base repo.
     """
-    rc, out, _ = _git(["worktree", "list", "--porcelain"], cwd=root)
+    argv = ["worktree", "list", "--porcelain"]
+    if timeout is None:
+        rc, out, _ = _git(argv, cwd=root)
+    else:
+        rc, out, _ = _run(["git", *argv], cwd=root, timeout=timeout)
     if rc != 0:
         return None
     for line in out.splitlines():
@@ -979,6 +986,180 @@ def _pr_view_json(root: str, fields: str, *, token: str | None = None) -> dict[s
     return _gh_pr_view([str(number), "-R", base_repo], fields, cwd=root, token=token)
 
 
+def read_workspace_branch_pr(
+    root: str, remote: ParsedRemote, branch: str, *, deadline: float
+) -> tuple[Literal["found", "no_pr", "unavailable"], dict[str, str | int] | None]:
+    """Read the unique open same-repository PR for an explicitly scoped branch."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0 or not _gh_installed():
+        return "unavailable", None
+    # An explicit repo avoids the checkout's gh default, while the existing
+    # provider wrapper preserves local account and managed sandbox auth. The
+    # account preference retrieves a github.com token, so it is public-host only.
+    with _gh_deadline_scope(deadline):
+        token = None
+        if remote.host == "github.com" and not _in_sandbox():
+            key = _workspace_key(root, timeout=min(remaining, 1.0))
+            if key:
+                token = _account_token_for(root, workspace_key=key)
+        rc, stdout, _ = _gh(
+            [
+                "pr",
+                "list",
+                f"--repo={remote.host}/{remote.repository}",
+                f"--head={branch}",
+                "--state",
+                "open",
+                "--limit",
+                "2",
+                "--json",
+                "number,title,url,headRefName,isCrossRepository",
+            ],
+            cwd=root,
+            token=token,
+        )
+    if rc != 0:
+        return "unavailable", None
+    try:
+        prs = json.loads(stdout)
+    except ValueError:
+        return "unavailable", None
+    if not isinstance(prs, list):
+        return "unavailable", None
+    if not prs:
+        return "no_pr", None
+    if len(prs) != 1 or not isinstance(pr := prs[0], dict):
+        return "unavailable", None
+    url = pr.get("url")
+    title = pr.get("title")
+    parsed = resolve_pr_url(url) if isinstance(url, str) and len(url) <= 2048 else None
+    if (
+        pr.get("headRefName") != branch
+        or pr.get("isCrossRepository") is not False
+        or not isinstance(title, str)
+        or not title.strip()
+        or len(title) > 1024
+        or parsed is None
+        or parsed.provider != remote.provider
+        or parsed.host != remote.host
+        or parsed.repository.casefold() != remote.repository.casefold()
+        or type(pr.get("number")) is not int
+        or pr["number"] != parsed.number
+    ):
+        return "unavailable", None
+    return "found", {"url": parsed.url, "title": title, "number": parsed.number}
+
+
+def list_workspace_pull_requests(root: str, remote: ParsedRemote) -> list[dict[str, Any]]:
+    """List open pull requests for one explicitly scoped checkout origin."""
+    repository = f"{remote.host}/{remote.repository}"
+    reference = PullRequestRef.from_url(f"https://{repository}/pull/1")
+    with _gh_deadline_scope(time.monotonic() + _PR_EDIT_REQUEST_SECONDS):
+        _host_args(root, reference)
+        rc, output, _ = _gh(
+            [
+                "pr",
+                "list",
+                f"--repo={repository}",
+                "--state",
+                "open",
+                "--limit",
+                "30",
+                "--json",
+                "number,title,url,isDraft,baseRefName,headRefName,updatedAt",
+            ],
+            cwd=root,
+            token=_pr_token(root, reference),
+        )
+    if rc != 0:
+        raise ValueError("GitHub could not list pull requests. Check gh access on the host.")
+    rows = json.loads(output)
+    if not isinstance(rows, list):
+        raise ValueError("GitHub returned an invalid pull request list.")
+    results = []
+    for row in rows[:30]:
+        if not isinstance(row, dict) or not isinstance(row.get("url"), str):
+            continue
+        parsed = resolve_pr_url(row["url"])
+        if (
+            parsed is None
+            or parsed.provider != "github"
+            or parsed.host != remote.host
+            or parsed.repository.casefold() != remote.repository.casefold()
+            or type(row.get("number")) is not int
+            or row["number"] != parsed.number
+            or not isinstance(row.get("title"), str)
+        ):
+            continue
+        results.append(
+            {
+                "number": parsed.number,
+                "title": row["title"],
+                "url": parsed.url,
+                "is_draft": row.get("isDraft") is True,
+                "base_ref": row.get("baseRefName"),
+                "head_ref": row.get("headRefName"),
+                "updated_at": row.get("updatedAt"),
+            }
+        )
+    return results
+
+
+def read_workspace_pull_request(
+    root: str, reference: PullRequestRef, *, include_files: bool
+) -> dict[str, Any]:
+    """Read an explicitly scoped PR without associating it with a session."""
+    endpoint = f"repos/{reference.repository}/pulls/{reference.number}"
+    with _gh_deadline_scope(time.monotonic() + _PR_EDIT_REQUEST_SECONDS):
+        data = _pr_api(root, reference, endpoint, resource="the pull request details")
+        if data.get("number") != reference.number:
+            raise ValueError("GitHub returned a different pull request.")
+        base_sha = _api_string(data, "base", "sha")
+        head_sha = _api_string(data, "head", "sha")
+        files = []
+        if include_files:
+            rc, output, _ = _gh(
+                ["api", *_host_args(root, reference), f"{endpoint}/files?per_page=40"],
+                cwd=root,
+                token=_pr_token(root, reference),
+            )
+            if rc != 0:
+                raise ValueError("GitHub could not load the PR's changed files. Refresh to retry.")
+            rows = json.loads(output)
+            if not isinstance(rows, list):
+                raise ValueError("GitHub returned an invalid changed-file list.")
+            files = _shape_changed_files(rows[:40])
+            _check_pr_revision(root, reference, head_sha=head_sha, base_sha=base_sha)
+    body = data.get("body")
+    count = data.get("changed_files")
+    return {
+        "pr": {
+            "number": reference.number,
+            "title": _api_string(data, "title"),
+            "url": reference.url,
+            "state": "MERGED"
+            if data.get("merged") is True
+            else _api_string(data, "state").upper(),
+            "is_draft": data.get("draft") is True,
+            "base_ref": _api_string(data, "base", "ref"),
+            "head_ref": _api_string(data, "head", "ref"),
+            "base_sha": base_sha,
+            "head_sha": head_sha,
+            "body": body[:16384] if isinstance(body, str) else None,
+        },
+        "files": files,
+        "files_truncated": include_files
+        and (len(files) < count if type(count) is int else len(files) == 40),
+    }
+
+
+def read_workspace_pull_request_patch(
+    root: str, reference: PullRequestRef, *, head_sha: str, base_sha: str
+) -> dict[str, Any]:
+    """Read the provider patch and confirm both revisions before and after."""
+    return _pr_patch_at_revision(root, reference, head_sha=head_sha, base_sha=base_sha)
+
+
 def _workspace_github_info(root: str) -> dict[str, Any]:
     """Resolve GitHub context for the workspace: repo, branch, base, and PR.
 
@@ -1399,6 +1580,10 @@ def _pr_changed_files(root: str, reference: PullRequestRef | None) -> dict[str, 
         entries = [
             entry for page in entries for entry in (page if isinstance(page, list) else [page])
         ]
+    return {"object": "list", "data": _shape_changed_files(entries), "has_more": False}
+
+
+def _shape_changed_files(entries: list[Any]) -> list[dict[str, Any]]:
     data: list[dict[str, Any]] = []
     for entry in entries:
         if not isinstance(entry, dict):
@@ -1419,7 +1604,7 @@ def _pr_changed_files(root: str, reference: PullRequestRef | None) -> dict[str, 
                 "previous_path": entry.get("previous_filename"),
             }
         )
-    return {"object": "list", "data": data, "has_more": False}
+    return data
 
 
 def _pr_changed_files_at_revision(
@@ -1558,13 +1743,214 @@ def _pr_patch_at_revision(
 
 
 def _check_pr_revision(
-    root: str, reference: PullRequestRef, *, head_sha: str, base_sha: str
+    root: str, reference: PullRequestRef, *, head_sha: str, base_sha: str | None = None
 ) -> dict[str, Any]:
-    """Return the PR's REST payload, raising when its head or base moved."""
-    pr = _pr_api(root, reference, f"repos/{reference.repository}/pulls/{reference.number}")
-    if _api_string(pr, "head", "sha") != head_sha or _api_string(pr, "base", "sha") != base_sha:
-        raise ValueError("The pull request changed; refresh before viewing its conversations.")
+    """Return the PR's REST payload, raising when its head, or its base if given, moved."""
+    pr = _pr_api(
+        root,
+        reference,
+        f"repos/{reference.repository}/pulls/{reference.number}",
+        resource="the pull request details",
+    )
+    moved_head = _api_string(pr, "head", "sha") != head_sha
+    moved_base = base_sha is not None and _api_string(pr, "base", "sha") != base_sha
+    if moved_head or moved_base:
+        raise ValueError("The pull request changed; refresh to see its latest revision.")
     return pr
+
+
+# GitHub lists at most this many commits for one pull request.
+_MAX_PR_COMMITS = 250
+
+
+def _commit_payload(entry: dict[str, Any]) -> dict[str, Any]:
+    """Shape one REST commit as ``session.github.commit``: title is the message's first line."""
+    commit = entry.get("commit") if isinstance(entry.get("commit"), dict) else {}
+    author = commit.get("author") if isinstance(commit.get("author"), dict) else {}
+    message = commit.get("message") if isinstance(commit.get("message"), str) else ""
+    return {
+        "object": COMMIT_OBJECT,
+        "sha": entry["sha"],
+        "title": message.strip().split("\n", 1)[0].strip(),
+        "author": author.get("name"),
+        "date": author.get("date"),
+    }
+
+
+def _pr_commit_entries(root: str, reference: PullRequestRef) -> list[dict[str, Any]]:
+    """Fetch every commit page GitHub returns for the PR, oldest first."""
+    rc, out, _ = _gh(
+        [
+            "api",
+            *_host_args(root, reference),
+            "--paginate",
+            "--slurp",
+            f"repos/{reference.repository}/pulls/{reference.number}/commits?per_page=100",
+        ],
+        cwd=root,
+        token=_pr_token(root, reference),
+    )
+    if rc != 0:
+        raise ValueError("GitHub could not load the PR's commits. Refresh to retry.")
+    try:
+        pages = json.loads(out)
+    except ValueError:
+        raise ValueError("GitHub returned an invalid commit list. Refresh to retry.") from None
+    if not isinstance(pages, list):
+        raise ValueError("GitHub returned an invalid commit list. Refresh to retry.")
+    entries = [entry for page in pages for entry in (page if isinstance(page, list) else [page])]
+    return [
+        _commit_payload(entry)
+        for entry in entries
+        if isinstance(entry, dict) and isinstance(entry.get("sha"), str)
+    ]
+
+
+def _pr_commits(root: str, reference: PullRequestRef, *, head_sha: str) -> dict[str, Any]:
+    """List the PR's commits at ``head_sha``, capped at 250; ``has_more`` reports the rest.
+
+    The PR's head is checked before and after the listing, so the list describes the
+    revision the panel shows.
+    """
+    with _gh_deadline_scope(time.monotonic() + _PR_EDIT_REQUEST_SECONDS):
+        pr = _check_pr_revision(root, reference, head_sha=head_sha)
+        commits = _pr_commit_entries(root, reference)
+        _check_pr_revision(root, reference, head_sha=head_sha)
+        shown = commits[:_MAX_PR_COMMITS]
+        heads = _other_pr_heads(root, reference, pr, [commit["sha"] for commit in shown])
+    for commit in shown:
+        if commit["sha"] in heads:
+            commit["head_of"] = heads[commit["sha"]]
+    total = pr.get("commits")
+    return {
+        "object": "list",
+        "data": shown,
+        "has_more": isinstance(total, int) and total > len(shown),
+    }
+
+
+# How many of the author's recently updated PRs one lookup reads for stack parents.
+_AUTHOR_PR_LOOKUPS = 100
+# The lookup only adds hints, so a slow search must not cost the commit list its deadline.
+_AUTHOR_PR_LOOKUP_SECONDS = 4.0
+_AUTHOR_PRS_QUERY = """query($search: String!, $first: Int!) {
+  search(query: $search, type: ISSUE, first: $first) {
+    nodes { ... on PullRequest { number url state headRefOid } }
+  }
+}"""
+
+
+def _other_pr_heads(
+    root: str, reference: PullRequestRef, pr: dict[str, Any], shas: list[str]
+) -> dict[str, list[dict[str, Any]]]:
+    """Map each commit that is the head of another PR by the same author, best effort.
+
+    Marks a stacked PR's parents in its commit list with one search over the author's
+    recently updated PRs in the repository; a per-commit lookup is too slow on large
+    repositories. Any failure leaves the commits unmarked.
+    """
+    user = pr.get("user") if isinstance(pr.get("user"), dict) else {}
+    author = user.get("login")
+    if not isinstance(author, str) or not author or not shas:
+        return {}
+    search = f"repo:{reference.repository} is:pr author:{author} sort:updated-desc"
+    try:
+        rc, out, _ = _gh(
+            [
+                "api",
+                *_host_args(root, reference),
+                "graphql",
+                "-f",
+                f"query={_AUTHOR_PRS_QUERY}",
+                "-f",
+                f"search={search}",
+                "-F",
+                f"first={_AUTHOR_PR_LOOKUPS}",
+            ],
+            cwd=root,
+            token=_pr_token(root, reference),
+            timeout=_AUTHOR_PR_LOOKUP_SECONDS,
+        )
+    except ValueError:
+        return {}
+    if rc != 0:
+        return {}
+    try:
+        nodes = json.loads(out)["data"]["search"]["nodes"]
+    except (ValueError, KeyError, TypeError):
+        return {}
+    wanted = set(shas)
+    heads: dict[str, list[dict[str, Any]]] = {}
+    for node in nodes if isinstance(nodes, list) else []:
+        if not isinstance(node, dict) or node.get("number") == reference.number:
+            continue
+        sha = node.get("headRefOid")
+        if isinstance(sha, str) and sha in wanted:
+            heads.setdefault(sha, []).append(
+                {"number": node.get("number"), "url": node.get("url"), "state": node.get("state")}
+            )
+    return heads
+
+
+def _pr_commit_patch(root: str, reference: PullRequestRef, *, commit_sha: str) -> dict[str, Any]:
+    """Return one commit's patch, read as GitHub's diff media type for that commit.
+
+    The commit must be one of the pull request's own commits; otherwise any commit
+    the token can read in the repository would be served. ``commit_sha`` is a full
+    object id, so the patch is the commit the user selected.
+    """
+    with _gh_deadline_scope(time.monotonic() + _PR_EDIT_REQUEST_SECONDS):
+        if commit_sha not in {entry["sha"] for entry in _pr_commit_entries(root, reference)}:
+            raise ValueError("That commit is not part of the selected pull request.")
+        rc, out, _ = _gh(
+            [
+                "api",
+                *_host_args(root, reference),
+                "-H",
+                "Accept: application/vnd.github.diff",
+                f"repos/{reference.repository}/commits/{commit_sha}",
+            ],
+            cwd=root,
+            token=_pr_token(root, reference),
+        )
+    if rc != 0:
+        raise ValueError("GitHub could not load the commit's diff. Refresh or open it on GitHub.")
+    return {"object": PR_DIFF_OBJECT, "patch": out}
+
+
+_COMPARE_FAILED = "GitHub could not load the changes since that commit. Refresh to retry."
+
+
+def _pr_compare(
+    root: str, reference: PullRequestRef, *, head_sha: str, from_sha: str
+) -> dict[str, Any]:
+    """Return the PR's changes after ``from_sha``, up to its head.
+
+    ``from_sha`` must be one of the PR's own commits, so only the PR's history is
+    served, and the head is checked before and after the reads so the patch describes
+    the revision the panel shows.
+    """
+    with _gh_deadline_scope(time.monotonic() + _PR_EDIT_REQUEST_SECONDS):
+        host = _host_args(root, reference)
+        token = _pr_token(root, reference)
+        _check_pr_revision(root, reference, head_sha=head_sha)
+        if from_sha not in {entry["sha"] for entry in _pr_commit_entries(root, reference)}:
+            raise ValueError("That commit is not part of the selected pull request.")
+        rc, out, _ = _gh(
+            [
+                "api",
+                *host,
+                "-H",
+                "Accept: application/vnd.github.diff",
+                f"repos/{reference.repository}/compare/{from_sha}...{head_sha}",
+            ],
+            cwd=root,
+            token=token,
+        )
+        if rc != 0:
+            raise ValueError(_COMPARE_FAILED)
+        _check_pr_revision(root, reference, head_sha=head_sha)
+    return {"object": PR_DIFF_OBJECT, "patch": out}
 
 
 def _host_args(root: str, reference: PullRequestRef) -> list[str]:
@@ -1575,14 +1961,36 @@ def _host_args(root: str, reference: PullRequestRef) -> list[str]:
     return ["--hostname", reference.host]
 
 
-def _pr_api(root: str, reference: PullRequestRef, endpoint: str) -> dict[str, Any]:
-    rc, out, _ = _gh(
-        ["api", *_host_args(root, reference), endpoint],
-        cwd=root,
-        token=_pr_token(root, reference),
-    )
-    if rc != 0:
-        raise ValueError("GitHub could not load the selected PR's file content")
+def _pr_api(
+    root: str, reference: PullRequestRef, endpoint: str, *, resource: str
+) -> dict[str, Any]:
+    args = ["api", *_host_args(root, reference), endpoint]
+    token = _pr_token(root, reference)
+    # GETs can be retried within the caller's existing deadline.
+    transient_statuses = {500, 502, 503, 504}
+    for attempt in range(2):
+        rc, out, err = _gh(args, cwd=root, token=token)
+        if rc == 0:
+            break
+        match = re.search(r"\bHTTP (\d{3})\b", err)
+        status = int(match[1]) if match else None
+        if status in transient_statuses and attempt == 0:
+            continue
+        if status == 404:
+            raise ValueError(
+                f"GitHub could not find {resource}. Check the link and account access."
+            )
+        if status == 429 or (status == 403 and "rate limit" in err.lower()):
+            raise ValueError(f"GitHub rate-limited the request for {resource}. Try again later.")
+        if status in {401, 403}:
+            raise ValueError(
+                f"GitHub denied access to {resource} (HTTP {status}). "
+                "Check GitHub access on the host."
+            )
+        if err in {"timed out", "gh deadline exceeded"}:
+            raise ValueError(f"GitHub timed out while loading {resource}. Refresh to retry.")
+        detail = f" (HTTP {status})" if status is not None else ""
+        raise ValueError(f"GitHub could not load {resource}{detail}. Refresh to retry.")
     try:
         result = json.loads(out)
     except ValueError as exc:
@@ -1603,6 +2011,16 @@ def _api_string(value: object, *keys: str) -> str:
     return value
 
 
+def read_review_comment(root: str, reference: PullRequestRef, comment_id: int) -> dict[str, Any]:
+    with _gh_deadline_scope(time.monotonic() + _PR_EDIT_REQUEST_SECONDS):
+        return _pr_api(
+            root,
+            reference,
+            f"repos/{reference.repository}/pulls/comments/{comment_id}",
+            resource="the review comment",
+        )
+
+
 def _pr_file_contents(
     root: str,
     reference: PullRequestRef,
@@ -1615,7 +2033,12 @@ def _pr_file_contents(
     for candidate in (path, previous_path or path):
         if candidate.startswith("/") or any(p in {"", ".."} for p in candidate.split("/")):
             raise ValueError("Invalid repository-relative path")
-    pr = _pr_api(root, reference, f"repos/{reference.repository}/pulls/{reference.number}")
+    pr = _pr_api(
+        root,
+        reference,
+        f"repos/{reference.repository}/pulls/{reference.number}",
+        resource="the pull request details",
+    )
     current_head = _api_string(pr, "head", "sha")
     current_base = _api_string(pr, "base", "sha")
     if (head_sha and head_sha != current_head) or (base_sha and base_sha != current_base):
@@ -1628,6 +2051,7 @@ def _pr_file_contents(
         root,
         reference,
         f"repos/{reference.repository}/compare/{current_base}...{current_head}",
+        resource="the comparison between the pull request commits",
     )
     merge_base = _api_string(comparison, "merge_base_commit", "sha")
 
@@ -1825,7 +2249,13 @@ def _merge_error(stderr: str, *, action: str) -> str:
             "The pull request's branch changed since the panel loaded. "
             "Review the new commits, then merge again."
         )
-    if re.search(r"\(HTTP 40[13]\)|Resource not accessible|must have (?:write|push)", stderr):
+    # An Enterprise Managed User can read public repositories outside its
+    # enterprise but not write to them; GitHub says so in a GraphQL error, not a 403.
+    if re.search(
+        r"\(HTTP 40[13]\)|Resource not accessible|must have (?:write|push)"
+        r"|As an Enterprise Managed User",
+        stderr,
+    ):
         return f"The GitHub account on the host cannot {action}."
     detail = next((line.strip() for line in stderr.splitlines() if line.strip()), "")
     # gh prefixes GraphQL errors and its failure marks; neither helps the reader.
@@ -1835,27 +2265,59 @@ def _merge_error(stderr: str, *, action: str) -> str:
     return f"GitHub could not {action}: {detail}"
 
 
-def _run_pr_merge(
-    root: str, reference: PullRequestRef, flags: list[str], *, action: str, timed_out: str
-) -> None:
-    """Run ``gh pr merge <flags>`` on the PR as its selected account.
+def _active_login(root: str, host: str) -> str | None:
+    """``gh``'s active account on ``host``, or ``None`` when there is none."""
+    _, accounts = _list_accounts(root)
+    return next(
+        (a.get("login") for a in accounts if a.get("host") == host and a.get("active")), None
+    )
 
-    Every ``gh`` call shares :data:`_PR_EDIT_REQUEST_SECONDS`. Without a saved
-    account, ``gh``'s active account runs it; a saved one without a token refuses.
+
+def _run_pr_merge(
+    root: str,
+    reference: PullRequestRef,
+    flags: list[str],
+    *,
+    action: str,
+    timed_out: str,
+    account: str | None = None,
+) -> None:
+    """Run ``gh pr merge <flags>`` on the PR as ``account`` or its selected account.
+
+    Every ``gh`` call shares :data:`_PR_EDIT_REQUEST_SECONDS`. ``account`` binds
+    this call alone; it is never read back from the saved preference, which a
+    concurrent request can change. Without either, ``gh``'s active account runs
+    it; a named account without a token refuses. A sandbox keeps its single
+    broker identity, so it refuses any other ``account``.
 
     :param action: What the command does, for error messages.
     :param timed_out: Message when the deadline leaves the outcome unknown.
+    :param account: The account the user confirmed for this command.
     :raises ValueError: With a user-facing message when GitHub refuses.
     """
     with _gh_deadline_scope(time.monotonic() + _PR_EDIT_REQUEST_SECONDS):
         _host_args(root, reference)
-        token = _pr_token(root, reference)
+        sandbox_login: str | None = None
+        if account is None:
+            token = _pr_token(root, reference)
+            login = (
+                None
+                if _in_sandbox()
+                else _config.github_account_preference(_repo_argument(reference))
+            )
+        elif _in_sandbox():
+            token, login = None, None
+            sandbox_login = _active_login(root, reference.host)
+        else:
+            token, login = _gh_auth_token(root, account, reference.host), account
         # Without the selected account's token gh would run as another account.
         if _gh_timed_out.get():
             raise ValueError(timed_out)
-        login = (
-            None if _in_sandbox() else _config.github_account_preference(_repo_argument(reference))
-        )
+        if account is not None and _in_sandbox() and sandbox_login != account:
+            raise ValueError(
+                "This sandbox can only use its own GitHub account"
+                + (f", {sandbox_login}." if sandbox_login else ".")
+            )
         if login and token is None:
             raise ValueError(
                 f"The selected GitHub account {login} isn't signed in on the host. "
@@ -1873,13 +2335,19 @@ def _run_pr_merge(
 
 
 def _merge_pr(
-    root: str, reference: PullRequestRef, *, merge_method: str, expected_head: str
+    root: str,
+    reference: PullRequestRef,
+    *,
+    merge_method: str,
+    expected_head: str,
+    account: str | None = None,
 ) -> dict[str, Any]:
     """Merge the PR with ``gh pr merge``, only while its head is ``expected_head``.
 
     ``--match-head-commit`` makes GitHub refuse the merge when the branch moved
     since the panel showed it.
 
+    :param account: Run as this account instead of the PR's saved one.
     :raises ValueError: With a user-facing message when GitHub refuses the merge.
     """
     _run_pr_merge(
@@ -1888,6 +2356,7 @@ def _merge_pr(
         [f"--{merge_method}", "--match-head-commit", expected_head],
         action="merge this pull request",
         timed_out=_MERGE_TIMED_OUT,
+        account=account,
     )
     return {"object": PR_MERGE_OBJECT, "pr_url": reference.url}
 

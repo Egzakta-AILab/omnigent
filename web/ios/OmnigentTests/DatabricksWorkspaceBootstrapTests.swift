@@ -155,7 +155,7 @@ final class DatabricksWorkspaceBootstrapTests: XCTestCase {
     defer { defaults.removePersistentDomain(forName: suite) }
     let parent = OmnigentWebView(
       initialURL: context.pageURL, model: model, settings: SettingsStore(defaults: defaults),
-      databricksInternalFeaturesEnabled: false,
+      managedDeviceGuidanceEnabled: false,
       loadFailed: { _, _ in XCTFail("Unexpected load failure") }, loadSucceeded: {},
       pushServerPicker: {}, requestSwitchServer: { _ in }, openServerSetup: {})
     let coordinator = OmnigentWebView.Coordinator(parent, context: context, bootstrap: bootstrap)
@@ -203,7 +203,7 @@ final class DatabricksWorkspaceBootstrapTests: XCTestCase {
     defer { defaults.removePersistentDomain(forName: suite) }
     let parent = OmnigentWebView(
       initialURL: url, model: model, settings: SettingsStore(defaults: defaults),
-      databricksInternalFeaturesEnabled: false, loadFailed: { _, _ in }, loadSucceeded: {},
+      managedDeviceGuidanceEnabled: false, loadFailed: { _, _ in }, loadSucceeded: {},
       pushServerPicker: {}, requestSwitchServer: { _ in }, openServerSetup: {})
     let coordinator = parent.makeCoordinator()
     let webView = WKWebView()
@@ -245,7 +245,8 @@ final class DatabricksWorkspaceBootstrapTests: XCTestCase {
   func testConfigurationAndSessionFailuresStillHaveMessages() {
     for error: Error in [
       DatabricksOAuthError.invalidClientID, DatabricksSessionError.missingCookie,
-      DatabricksSessionError.networkUnavailable, DatabricksSessionError.rejected(403),
+      DatabricksSessionError.networkUnavailable(DatabricksTransportFailure(URLError(.timedOut))),
+      DatabricksSessionError.rejected(403),
     ] {
       XCTAssertEqual(
         OmnigentWebView.Coordinator.workspaceErrorMessage(error), error.localizedDescription)
@@ -255,17 +256,29 @@ final class DatabricksWorkspaceBootstrapTests: XCTestCase {
   func testUnreachableManagedHostKeepsTheSharedPageLoadGuidance() {
     let unreachable = NSError(domain: NSURLErrorDomain, code: NSURLErrorCannotFindHost)
     let guidance = OmnigentWebView.connectionErrorMessage(
-      for: unreachable, databricksInternalFeaturesEnabled: true)
+      for: unreachable, managedDeviceGuidanceEnabled: true)
+    let message = OmnigentWebView.Coordinator.workspaceErrorMessage
+    let failure = DatabricksTransportFailure(unreachable)
+    let wrappedMessage = "Could not reach Databricks. Please try again. (NSURLErrorDomain -1003)"
+    let cases: [(Error, String)] = [
+      (unreachable, unreachable.localizedDescription),
+      (DatabricksSessionError.networkUnavailable(failure), wrappedMessage),
+      (DatabricksOAuthError.networkUnavailable(failure), wrappedMessage),
+    ]
+    for (error, ordinaryMessage) in cases {
+      XCTAssertEqual(message(error, true), guidance)
+      XCTAssertEqual(message(error, false), ordinaryMessage)
+    }
+
+    let timedOut = DatabricksSessionError.networkUnavailable(
+      DatabricksTransportFailure(URLError(.timedOut)))
     XCTAssertEqual(
-      OmnigentWebView.Coordinator.workspaceErrorMessage(
-        unreachable, databricksInternalFeaturesEnabled: true), guidance)
-    XCTAssertEqual(
-      OmnigentWebView.Coordinator.workspaceErrorMessage(
-        unreachable, databricksInternalFeaturesEnabled: false), unreachable.localizedDescription)
+      message(timedOut, true),
+      "Could not reach Databricks. Please try again. (NSURLErrorDomain -1001)")
     // Cancellation stays silent regardless of the managed flag.
     XCTAssertNil(
       OmnigentWebView.Coordinator.workspaceErrorMessage(
-        DatabricksSessionError.cancelled, databricksInternalFeaturesEnabled: true))
+        DatabricksSessionError.cancelled, managedDeviceGuidanceEnabled: true))
   }
 
   func testSilentRecoveryDoesNotPresentBrowserWhenGrantIsMissing() async throws {
@@ -767,7 +780,7 @@ final class DatabricksLifecycleTests: XCTestCase {
     let model = WebViewModel()
     let parent = OmnigentWebView(
       initialURL: context.pageURL, model: model, settings: SettingsStore(defaults: defaults),
-      databricksInternalFeaturesEnabled: false,
+      managedDeviceGuidanceEnabled: false,
       loadFailed: { _, message in failure(message) }, loadSucceeded: {}, pushServerPicker: {},
       requestSwitchServer: { _ in }, openServerSetup: {},
       recoverWorkspace: recover, signedOut: signedOut)

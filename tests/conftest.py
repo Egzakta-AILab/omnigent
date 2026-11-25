@@ -180,19 +180,86 @@ def _process_peak_rss_kb() -> int | None:
 
 _TEST_RSS_RECORDS: list[tuple[str, int]] = []
 
+# Keep diagnostics independent of process-wide clock and file mocks in tests.
+_PROGRESS_CLOCK = time.time
+_PROGRESS_OPEN = open
 
-def _write_progress_event(event: str, nodeid: str, rss_kb: int | None = None) -> None:
+
+def _progress_worker_id(worker: str) -> str:
+    """Keep worker metadata to xdist's bounded local-worker identifiers."""
+    if worker == "main":
+        return worker
+    if (
+        worker.startswith("gw")
+        and 2 < len(worker) <= 32
+        and worker[2:].isascii()
+        and worker[2:].isdigit()
+    ):
+        return worker
+    return "unknown"
+
+
+def _write_progress_event(
+    event: str,
+    nodeid: str,
+    rss_kb: int | None = None,
+    *,
+    phase: str | None = None,
+    error_present: bool | None = None,
+) -> None:
     """Append ``<timestamp>\\t<event>\\t<nodeid>[\\t<rss_kb>]\\n`` and fsync."""
     if _PROGRESS_LOG_PATH is None:
         return
-    line = f"{time.time():.3f}\t{event}\t{nodeid}"
+    line = f"{_PROGRESS_CLOCK():.3f}\t{event}\t{nodeid}"
     if rss_kb is not None:
         line += f"\t{rss_kb}"
+    if phase is not None:
+        worker = _progress_worker_id(os.environ.get("PYTEST_XDIST_WORKER", "main"))
+        line += f"\tphase={phase}\tworker={worker}\tpid={os.getpid()}"
+    if error_present is not None:
+        line += f"\terror_present={int(error_present)}"
     line += "\n"
-    with open(_PROGRESS_LOG_PATH, "a") as f:
+    with _PROGRESS_OPEN(_PROGRESS_LOG_PATH, "a") as f:
         f.write(line)
         f.flush()
         os.fsync(f.fileno())
+
+
+@contextlib.contextmanager
+def _record_test_phase(nodeid: str, phase: str) -> Generator[None, None, None]:
+    with contextlib.suppress(OSError):
+        _write_progress_event("PHASE_START", nodeid, phase=phase)
+    try:
+        yield
+    finally:
+        with contextlib.suppress(OSError):
+            _write_progress_event("PHASE_END", nodeid, phase=phase)
+
+
+@pytest.hookimpl(wrapper=True, tryfirst=True, specname="pytest_runtest_setup")
+def pytest_runtest_setup_progress(item) -> Generator[None, None, None]:
+    with _record_test_phase(item.nodeid, "setup"):
+        yield
+
+
+@pytest.hookimpl(wrapper=True, tryfirst=True)
+def pytest_runtest_call(item) -> Generator[None, None, None]:
+    with _record_test_phase(item.nodeid, "call"):
+        yield
+
+
+@pytest.hookimpl(wrapper=True, tryfirst=True)
+def pytest_runtest_teardown(item) -> Generator[None, None, None]:
+    with _record_test_phase(item.nodeid, "teardown"):
+        yield
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_testnodedown(node, error: object | None) -> None:
+    # This callback has no OS exit status; never render its error object.
+    worker = _progress_worker_id(node.gateway.id)
+    with contextlib.suppress(OSError):
+        _write_progress_event("WORKER_DOWN", worker, error_present=error is not None)
 
 
 def pytest_runtest_logstart(nodeid: str, location: tuple[str, int | None, str]) -> None:
@@ -507,6 +574,35 @@ def _isolate_claude_managed_settings(
 
 
 @pytest.fixture()
+def pi_host_mcp_servers() -> None:
+    """Opt back in to adding the host's MCP inventory to managed Pi agent dirs.
+
+    :returns: None.
+    """
+
+
+@pytest.fixture(autouse=True)
+def _isolate_pi_host_mcp_servers(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep the machine's Claude, Codex, and Cursor MCP servers out of managed Pi dirs.
+
+    Every managed Pi launch reads the host MCP inventory from the real ``$HOME``,
+    so without this a developer's configured servers would change which
+    ``mcp.json`` a test sees. Tests of that behavior request
+    :func:`pi_host_mcp_servers` and point the inventory at a temporary home.
+
+    :param request: Pytest request, inspected for the opt-in fixture.
+    :param monkeypatch: Pytest monkeypatch fixture; restores the reader at teardown.
+    :returns: None.
+    """
+    if "pi_host_mcp_servers" in request.fixturenames:
+        return
+    monkeypatch.setattr("omnigent.inner.pi_mcp._host_mcp_servers", list)
+
+
+@pytest.fixture()
 def untracked_cache_start() -> None:
     """Opt back in to the real :meth:`GitFilesystemRegistry.start`.
 
@@ -775,3 +871,15 @@ def lowered_idle_thresholds(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(terminal_module, "_IDLE_POLL_INTERVAL_SECONDS", 0.1)
     monkeypatch.setattr(terminal_module, "_IDLE_MARKER_SUBSTRINGS", [])
     monkeypatch.setattr(terminal_module, "_IDLE_MARKER_THRESHOLD_SECONDS", 0.4)
+
+
+@pytest.fixture
+def example_gateway_domain(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Trust the reserved workspace test domain for this test's gateway fixtures."""
+    from omnigent import databricks_ai_gateway as gateway
+
+    monkeypatch.setattr(
+        gateway,
+        "DATABRICKS_TRUSTED_HOST_SUFFIXES",
+        (*gateway.DATABRICKS_TRUSTED_HOST_SUFFIXES, ".workspaces.example.test"),
+    )

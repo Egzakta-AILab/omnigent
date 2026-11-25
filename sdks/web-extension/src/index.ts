@@ -18,6 +18,14 @@ import {
   validateSessionPageLimit,
   type ExtensionSessionSummary,
 } from "./sessions";
+import type { ReviewPanelApi, ReviewPanelPage } from "./reviewPanel";
+
+export type {
+  ReviewCapability,
+  ReviewPanelApi,
+  ReviewPanelPage,
+  ReviewProofTarget,
+} from "./reviewPanel";
 
 export interface Disposable {
   dispose(): void;
@@ -56,6 +64,7 @@ export interface ExtensionContext {
   view: string;
   apiVersion: number;
   capabilities: readonly string[];
+  review: ReviewPanelApi;
   navigation: {
     openPage(
       pageId: string,
@@ -63,7 +72,11 @@ export interface ExtensionContext {
     ): Promise<void>;
     openSession(sessionId: string): Promise<void>;
     /** Opens the composer; with `projectId`, the new session is filed under that project. */
-    openNewSession(options?: { projectId?: string }): Promise<void>;
+    openNewSession(options?: {
+      projectId?: string;
+      prompt?: string;
+      issue?: string;
+    }): Promise<void>;
     /** Opens an https URL the host handed out (e.g. a pull request) in a new tab. */
     openExternal(url: string): Promise<void>;
   };
@@ -95,7 +108,32 @@ export interface ExtensionContext {
   };
   projects: {
     list(): Promise<ExtensionProjectSummary[]>;
-    create(options: { name: string }): Promise<ExtensionProjectSummary>;
+    create(options: {
+      name: string;
+      templateProjectId?: string;
+      sourceKey?: string;
+      linearIssue?: {
+        identifier: string;
+        title: string;
+        description: string;
+        url: string;
+      };
+    }): Promise<ExtensionProjectSummary>;
+  };
+  linear: {
+    findTask(options: { sourceKey: string; issue: string }): Promise<{
+      projectId: string;
+      sessionId: string | null;
+      snapshotTemplateId?: string;
+    } | null>;
+    read<T>(options: {
+      token: string;
+      team?: string;
+      issue?: string;
+      after?: string;
+      search?: string;
+      assignee?: string;
+    }): Promise<T>;
   };
 }
 
@@ -208,6 +246,15 @@ export function defineExtension(lifecycle: ExtensionLifecycle): void {
     view: identity.view,
     apiVersion: identity.apiVersion,
     capabilities: [...grantedCapabilities].sort(),
+    review: {
+      read: (options = {}) => request<ReviewPanelPage>("review.read", options),
+      async openProof(target) {
+        await request("review.openProof", target);
+      },
+      async attachProof(target) {
+        await request("review.attachProof", target);
+      },
+    },
     navigation: {
       async openPage(pageId, params) {
         await request("navigation.openPage", { pageId, params });
@@ -216,10 +263,13 @@ export function defineExtension(lifecycle: ExtensionLifecycle): void {
         await request("navigation.openSession", { sessionId });
       },
       async openNewSession(options) {
-        await request(
-          "navigation.openNewSession",
-          options?.projectId ? { projectId: options.projectId } : {},
-        );
+        await request("navigation.openNewSession", {
+          ...(options?.projectId !== undefined
+            ? { projectId: options.projectId }
+            : {}),
+          ...(options?.prompt !== undefined ? { prompt: options.prompt } : {}),
+          ...(options?.issue !== undefined ? { issue: options.issue } : {}),
+        });
       },
       async openExternal(url) {
         await request("navigation.openExternal", { url });
@@ -292,9 +342,24 @@ export function defineExtension(lifecycle: ExtensionLifecycle): void {
     },
     projects: {
       list: () => request<ExtensionProjectSummary[]>("projects.list", {}),
-      create: (options) =>
+      create: ({ name, templateProjectId, sourceKey, linearIssue }) =>
         request<ExtensionProjectSummary>("projects.create", {
-          name: options.name,
+          name,
+          ...(templateProjectId !== undefined ? { templateProjectId } : {}),
+          ...(sourceKey !== undefined ? { sourceKey } : {}),
+          ...(linearIssue !== undefined ? { linearIssue } : {}),
+        }),
+    },
+    linear: {
+      findTask: (options) => request("linear.findTask", options),
+      read: ({ token, team, issue, after, search, assignee }) =>
+        request("linear.read", {
+          token,
+          ...(team !== undefined ? { team } : {}),
+          ...(issue !== undefined ? { issue } : {}),
+          ...(after !== undefined ? { after } : {}),
+          ...(search !== undefined ? { search } : {}),
+          ...(assignee !== undefined ? { assignee } : {}),
         }),
     },
   });

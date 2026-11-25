@@ -13,7 +13,7 @@ import os
 import sys
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import pytest
@@ -129,6 +129,12 @@ def enter(driver: SessionDriver, phase: str, *, outage_s: float) -> Phase:
         return Phase(phase, driver.start_unanswered_turn())
     if phase != IDLE:
         raise ValueError(f"unknown phase {phase!r}")
+    # The final reply can be committed before the native turn's idle edge.
+    wait_for(
+        lambda: driver.lab.snapshot(driver.session_id).get("status") == "idle" or None,
+        timeout=SETTLE_S,
+        what="idle before injecting the fault",
+    )
     return Phase(phase)
 
 
@@ -284,6 +290,13 @@ def observe(lab: Lab, driver: SessionDriver, report: ScenarioReport) -> Iterator
         try:
             watcher.stop()
             report.attach(watcher, lab.root)
+            with contextlib.suppress(OSError):
+                lab.events.emit(
+                    "observer",
+                    "timeline",
+                    session_id=driver.session_id,
+                    observations=[asdict(obs) for obs in watcher.between(0.0, float("inf"))],
+                )
         finally:
             if recorder is not None:
                 verdict = report.verdict_lines()

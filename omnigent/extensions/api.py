@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from omnigent.extensions.review_panel import ReviewPanelContribution
+
 EXTENSION_API_VERSION = 1
 
 
@@ -17,6 +19,7 @@ class ExtensionPermission(StrEnum):
     """Host capabilities an extension may request."""
 
     NAVIGATION = "navigation"
+    LINEAR_READ = "linear.read"
     PROJECTS_READ = "projects.read"
     PROJECTS_WRITE = "projects.write"
     SESSIONS_READ = "sessions.read"
@@ -77,6 +80,7 @@ class ExtensionManifest:
     pages: tuple[PageContribution, ...] = ()
     primary_navigation: tuple[PrimaryNavigationContribution, ...] = ()
     commands: tuple[CommandContribution, ...] = ()
+    review_panel: ReviewPanelContribution | None = None
 
 
 @dataclass(frozen=True)

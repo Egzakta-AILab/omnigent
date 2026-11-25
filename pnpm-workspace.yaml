@@ -67,8 +67,15 @@ overrides:
   '@xmldom/xmldom': 0.8.15
   qs: 6.16.1
   query-string: 9.5.0
-  '@hono/node-server': 1.19.15
-  hono: 4.13.13
+  '@hono/node-server': 2.1.6
+  hono: 4.13.16
+  # This identity release uses the fixed MSAL major through its own dependency range.
+  '@azure/identity@4': 4.14.1
+  'body-parser@2': 2.4.0
+  'decode-uri-component@0.5': 0.5.1
+  'systeminformation@5': 5.33.16
+  'glob@13': 14.0.2
+  'minimatch@>=9 <11': 11.0.1
   linkify-it: 5.0.2
   shiki: "catalog:"
   react: "catalog:"
@@ -133,6 +140,7 @@ overrides:
 
 allowBuilds:
   '@anthropic-ai/claude-code': true
+  '@bufbuild/buf': false
   '@google/genai': true
   '@vscode/vsce-sign': true
   canvas: true

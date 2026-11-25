@@ -1,21 +1,37 @@
 """Runner dispatch through authenticated routes and real ownership/sharing stores."""
 
+import hashlib
 import json
+from contextvars import ContextVar
+from unittest.mock import Mock
 from uuid import uuid4
 
 import pytest
 
+from omnigent.native.permission_modes import PERMISSION_LAUNCH_ARGS
 from omnigent.runner.identity import ORCHESTRATION_SOURCE_HEADER, RUNNER_TUNNEL_TOKEN_HEADER
 from omnigent.runner.tool_dispatch import execute_tool
-from omnigent.server.auth import LEVEL_EDIT, LEVEL_READ
-from omnigent.server.feature_flags import FeatureFlags
+from omnigent.server.auth import LEVEL_EDIT, LEVEL_OWNER, LEVEL_READ
+from omnigent.server.feature_flags import (
+    FEATURES_ENV_VAR,
+    Feature,
+    FeatureFlags,
+    resolve_feature_flags,
+)
+from omnigent.server.sharing_settings import write_peer_session_messaging_override
 from omnigent.stores.conversation_store import (
+    CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY,
     CREATED_BY_SESSION_LABEL_KEY,
+    PROJECT_LABEL_KEY,
+    SCHEDULED_TASK_INITIAL_RUN_LABEL_KEY,
+    SCHEDULED_TASK_LAUNCH_LABEL_KEY,
     SCHEDULED_TASK_ORIGIN_LABEL_KEY,
     SIDE_CHAT_SOURCE_LABEL_KEY,
 )
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
 from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
+from omnigent.tools.builtins.session_message import SESSION_MESSAGE_MAX_CHARS
+from tests.debug_log_helpers import capture_debug_rows
 from tests.server.integration.test_managed_startup_inputs import auth_app as auth_app
 from tests.server.integration.test_managed_startup_inputs import (
     startup_permissions as startup_permissions,
@@ -31,12 +47,10 @@ pytestmark = pytest.mark.asyncio
 
 
 @pytest.fixture(autouse=True)
-def orchestration_environment(monkeypatch, request):
+def orchestration_environment(monkeypatch, request, tmp_path):
+    monkeypatch.setenv("OMNIGENT_ADMIN_CREDENTIALS_PATH", str(tmp_path / "admin-credentials"))
     features = getattr(request, "param", None)
-    if features is None:
-        monkeypatch.delenv("OMNIGENT_FEATURES", raising=False)
-    else:
-        monkeypatch.setenv("OMNIGENT_FEATURES", features)
+    monkeypatch.setenv("OMNIGENT_FEATURES", features or "")
     return features
 
 
@@ -64,7 +78,7 @@ async def _send(client, source, target, message="Please inspect the PR"):
 @pytest.mark.parametrize("policy_denied", [False, True])
 @pytest.mark.parametrize(
     "orchestration_environment",
-    [None, "", "usage_page", "-session_orchestration"],
+    [None, "", "usage_page", "peer_session_messaging", "-session_orchestration"],
     indirect=True,
 )
 async def test_private_sender_can_message_shared_receiver(
@@ -73,6 +87,8 @@ async def test_private_sender_can_message_shared_receiver(
     from omnigent.server.routes.sessions import routes_events
 
     source, target, captured = peers
+    # The server snapshot is already built; leave the runner at its default.
+    monkeypatch.delenv(FEATURES_ENV_VAR, raising=False)
     permissions = SqlAlchemyPermissionStore(db_uri)
     permissions.ensure_user("bob")
     permissions.grant("bob", target["id"], LEVEL_READ)
@@ -100,6 +116,52 @@ async def test_private_sender_can_message_shared_receiver(
     store = SqlAlchemyConversationStore(db_uri)
     assert store.get_conversation(target["id"]).parent_conversation_id is None
     assert store.get_conversation(source["id"]).parent_conversation_id is None
+
+
+async def test_message_long_enough_for_automation_instructions_is_delivered(auth_client, peers):
+    source, target, _ = peers
+    # A message at the limit, as an automation sends with long instructions and a large item.
+    message = "Long task " + "a" * (SESSION_MESSAGE_MAX_CHARS - len("Long task "))
+    result = await _send(auth_client, source, target, message)
+    assert result.get("queued") is True, result
+    items = await auth_client.get(f"/v1/sessions/{target['id']}/items")
+    assert f"[Message from session {source['id']}]\\n{message}" in items.text
+
+
+@pytest.mark.parametrize("runner_features", [None, "peer_session_messaging"])
+async def test_server_can_disable_peer_messaging(
+    auth_client, auth_app, peers, monkeypatch, runner_features
+):
+    source, target, captured = peers
+    auth_app.state.feature_flags = resolve_feature_flags(
+        {FEATURES_ENV_VAR: "-peer_session_messaging"}
+    )
+    if runner_features is not None:
+        monkeypatch.setenv(FEATURES_ENV_VAR, runner_features)
+    result = await _send(auth_client, source, target)
+    assert "Messaging other sessions is disabled" in result["detail"], result
+    assert not captured.get("posts")
+
+
+async def test_admin_can_disable_and_restore_peer_messaging(auth_client, peers, db_uri):
+    source, target, captured = peers
+    permissions = SqlAlchemyPermissionStore(db_uri)
+    permissions.ensure_user("admin", is_admin=True)
+    admin_headers = {"X-Forwarded-Email": "admin"}
+    for enabled in (False, True):
+        response = await auth_client.put(
+            "/v1/sharing",
+            headers=admin_headers,
+            json={"peer_session_messaging": enabled},
+        )
+        assert response.status_code == 200, response.text
+        captured.clear()
+        result = await _send(auth_client, source, target)
+        if enabled:
+            assert result.get("queued") is True, result
+        else:
+            assert "Messaging other sessions is disabled" in result["detail"]
+            assert not captured.get("posts")
 
 
 async def test_runner_is_trusted_for_other_owned_sessions_it_hosts(auth_client, peers, db_uri):
@@ -187,7 +249,7 @@ async def test_refusal_before_delivery(condition, auth_client, auth_app, peers, 
             "data": {
                 "message": {
                     "blank": " ",
-                    "oversize": "a" * 8001,
+                    "oversize": "a" * (SESSION_MESSAGE_MAX_CHARS + 1),
                 }.get(condition, "DO_NOT_DELIVER")
             },
         },
@@ -236,6 +298,8 @@ async def test_editor_beyond_first_grant_page_blocks_controls(auth_client, peers
         permissions.ensure_user(f"viewer-{index:03d}")
         permissions.grant(f"viewer-{index:03d}", source["id"], LEVEL_READ)
     assert (await _send(auth_client, source, target)).get("queued") is True
+    metadata = {"agent_id": source["agent_id"], "sibling_source_id": source["id"]}
+    assert (await auth_client.post("/v1/sessions", json=metadata)).status_code == 201
     permissions.ensure_user("zed")
     permissions.grant("zed", source["id"], LEVEL_EDIT)
     _, cursor = permissions.list_for_session(source["id"])
@@ -243,10 +307,12 @@ async def test_editor_beyond_first_grant_page_blocks_controls(auth_client, peers
     captured.clear()
     assert "shared with edit access cannot" in (await _send(auth_client, source, target))["detail"]
     assert not captured.get("posts")
+    assert (await auth_client.post("/v1/sessions", json=metadata)).status_code == 403
 
 
+@pytest.mark.parametrize("restriction", ["sharing", "admin_messaging"])
 async def test_sharing_during_receiver_startup_blocks_delivery(
-    auth_client, peers, db_uri, monkeypatch
+    auth_client, peers, db_uri, monkeypatch, restriction
 ):
     from omnigent.server.routes import sessions
 
@@ -255,7 +321,10 @@ async def test_sharing_during_receiver_startup_blocks_delivery(
     permissions.ensure_user("bob")
 
     async def share_while_starting(*args, **kwargs):
-        permissions.grant("bob", source["id"], LEVEL_EDIT)
+        if restriction == "sharing":
+            permissions.grant("bob", source["id"], LEVEL_EDIT)
+        else:
+            write_peer_session_messaging_override(False)
 
     monkeypatch.setattr(sessions, "_ensure_runner_relay_ready", share_while_starting)
     result = await _send(auth_client, source, target)
@@ -345,7 +414,7 @@ async def test_side_chat_inherits_sharing_for_new_controls(
     assert (await _send(auth_client, manager, target)).get("queued") is True
 
 
-@pytest.mark.parametrize("source_link", ["missing", "cycle"])
+@pytest.mark.parametrize("source_link", ["missing", "cycle", "absent"])
 async def test_side_chat_requires_resolvable_source(auth_client, peers, db_uri, source_link):
     source, target, captured = peers
     response = await auth_client.post(
@@ -355,15 +424,24 @@ async def test_side_chat_requires_resolvable_source(auth_client, peers, db_uri, 
     side = response.json()
     _bind_runner(db_uri, side["id"])
     store = SqlAlchemyConversationStore(db_uri)
-    store.set_labels(
-        side["id"],
-        {SIDE_CHAT_SOURCE_LABEL_KEY: side["id"] if source_link == "cycle" else uuid4().hex},
-    )
+    if source_link == "absent":
+        store.delete_label(side["id"], SIDE_CHAT_SOURCE_LABEL_KEY)
+    else:
+        store.set_labels(
+            side["id"],
+            {SIDE_CHAT_SOURCE_LABEL_KEY: side["id"] if source_link == "cycle" else uuid4().hex},
+        )
     captured.clear()
     assert (
         "Session is not owned or available" in (await _send(auth_client, side, target))["detail"]
     )
     assert not captured.get("posts")
+
+    nested = await auth_client.post(
+        "/v1/sessions", json={"agent_id": source["agent_id"], "sibling_source_id": side["id"]}
+    )
+    assert nested.status_code == 403, nested.text
+    assert store.get_conversation(side["id"]).family_id is None
 
 
 @pytest.mark.parametrize("execution_target", ["connected_host", "managed_sandbox"])
@@ -493,18 +571,587 @@ async def test_scheduled_origin_allows_new_controls_children_and_reads(
     )
 
 
+@pytest.mark.parametrize(
+    (
+        "permission_mode",
+        "scheduled_origin",
+        "run_status",
+        "worker_config",
+        "launch_args",
+        "labels",
+    ),
+    [
+        pytest.param(
+            "approve-for-me",
+            True,
+            "running",
+            None,
+            PERMISSION_LAUNCH_ARGS["codex-native"]["approve-for-me"],
+            {},
+            id="running-run",
+        ),
+        # A claimed run records its session while starting, before the prompt is sent.
+        pytest.param(
+            "approve-for-me",
+            True,
+            "starting",
+            None,
+            PERMISSION_LAUNCH_ARGS["codex-native"]["approve-for-me"],
+            {},
+            id="starting-run",
+        ),
+        # A fork keeps the origin label but isn't the run.
+        pytest.param("approve-for-me", True, None, None, None, {}, id="fork"),
+        pytest.param("approve-for-me", True, "succeeded", None, None, {}, id="finished-run"),
+        pytest.param("approve-for-me", False, "running", None, None, {}, id="no-origin"),
+        pytest.param(None, True, "running", None, None, {}, id="no-mode"),
+        # The automation's own mode wins over a permissive worker spec...
+        pytest.param("default", True, "running", {"yolo": True}, None, {}, id="default-over-spec"),
+        # ...which still applies when the automation sets no mode.
+        pytest.param(
+            None,
+            True,
+            "running",
+            {"yolo": True},
+            ["--dangerously-bypass-approvals-and-sandbox"],
+            {},
+            id="spec-without-mode",
+        ),
+        pytest.param(
+            "bypass",
+            True,
+            "running",
+            None,
+            None,
+            {CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY: "1"},
+            id="bypass-label",
+        ),
+    ],
+)
+async def test_scheduled_origin_workers_use_the_automation_permission_mode(
+    auth_client,
+    auth_app,
+    peers,
+    db_uri,
+    monkeypatch,
+    permission_mode,
+    scheduled_origin,
+    run_status,
+    worker_config,
+    launch_args,
+    labels,
+):
+    from omnigent.server.routes.sessions import routes_core
+    from omnigent.stores.scheduled_task_store.sqlalchemy_store import SqlAlchemyScheduledTaskStore
+
+    source, _target, _captured = peers
+    worker_agent_id = await _upload_codex_worker(auth_client, **(worker_config or {}))
+    schedules = SqlAlchemyScheduledTaskStore(db_uri)
+    task = schedules.create(
+        scheduled_task_id=uuid4().hex,
+        name="Trigger watcher",
+        prompt="Start a worker for each new item",
+        rrule="FREQ=HOURLY",
+        user_id="alice",
+        agent_id=worker_agent_id,
+        timezone="UTC",
+        execution_target="managed_sandbox",
+        permission_mode=permission_mode,
+    )
+    monkeypatch.setattr(auth_app.state, "scheduled_task_store", schedules)
+    conversations = SqlAlchemyConversationStore(db_uri)
+    if scheduled_origin:
+        conversations.set_labels(source["id"], {SCHEDULED_TASK_ORIGIN_LABEL_KEY: task.id})
+    if run_status is not None:
+        schedules.create_run(
+            uuid4().hex,
+            task.id,
+            run_status,
+            scheduled_at=1,
+            conversation_id=source["id"],
+            fired_at=1,
+        )
+
+    async def launch(**kwargs):
+        pass
+
+    monkeypatch.setattr(routes_core, "_run_managed_launch", launch)
+    result = json.loads(
+        await execute_tool(
+            tool_name="sys_session_create",
+            arguments=json.dumps({"agent_id": worker_agent_id, "placement": "managed"}),
+            server_client=auth_client,
+            conversation_id=source["id"],
+        )
+    )
+    assert result.get("conversation_id"), result
+    worker = conversations.get_conversation(result["conversation_id"])
+    assert worker.terminal_launch_args == launch_args
+    for key, value in labels.items():
+        assert worker.labels.get(key) == value
+    assert worker.labels.get(CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY) == labels.get(
+        CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY
+    )
+
+
+@pytest.mark.parametrize(
+    ("automation_mode", "requested_mode", "launch_args"),
+    [
+        # Even the harness default, when the call names it, wins over the automation's mode.
+        pytest.param("approve-for-me", "default", None, id="requested-default"),
+        # A call can't name a bypass, but its gated mode still replaces the automation's.
+        pytest.param(
+            "bypass",
+            "approve-for-me",
+            PERMISSION_LAUNCH_ARGS["codex-native"]["approve-for-me"],
+            id="requested-over-bypass",
+        ),
+    ],
+)
+async def test_requested_permission_mode_wins_over_the_automation_mode(
+    auth_client,
+    auth_app,
+    peers,
+    db_uri,
+    monkeypatch,
+    automation_mode,
+    requested_mode,
+    launch_args,
+):
+    from omnigent.server.routes.sessions import routes_core
+    from omnigent.stores.scheduled_task_store.sqlalchemy_store import SqlAlchemyScheduledTaskStore
+
+    source, _target, _captured = peers
+    worker_agent_id = await _upload_codex_worker(auth_client)
+    schedules = SqlAlchemyScheduledTaskStore(db_uri)
+    task = schedules.create(
+        scheduled_task_id=uuid4().hex,
+        name="Trigger watcher",
+        prompt="Start a worker for each new item",
+        rrule="FREQ=HOURLY",
+        user_id="alice",
+        agent_id=worker_agent_id,
+        timezone="UTC",
+        execution_target="managed_sandbox",
+        permission_mode=automation_mode,
+    )
+    monkeypatch.setattr(auth_app.state, "scheduled_task_store", schedules)
+    conversations = SqlAlchemyConversationStore(db_uri)
+    conversations.set_labels(source["id"], {SCHEDULED_TASK_ORIGIN_LABEL_KEY: task.id})
+    schedules.create_run(
+        uuid4().hex, task.id, "running", scheduled_at=1, conversation_id=source["id"], fired_at=1
+    )
+
+    async def launch(**kwargs):
+        pass
+
+    monkeypatch.setattr(routes_core, "_run_managed_launch", launch)
+    result = json.loads(
+        await execute_tool(
+            tool_name="sys_session_create",
+            arguments=json.dumps(
+                {
+                    "agent_id": worker_agent_id,
+                    "placement": "managed",
+                    "permission_mode": requested_mode,
+                }
+            ),
+            server_client=auth_client,
+            conversation_id=source["id"],
+        )
+    )
+    assert result.get("conversation_id"), result
+    worker = conversations.get_conversation(result["conversation_id"])
+    assert worker.terminal_launch_args == launch_args
+    assert CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY not in worker.labels
+
+
+async def test_worker_started_before_a_legacy_run_is_recorded_uses_the_automation_mode(
+    auth_client, auth_app, peers, db_uri, monkeypatch, tmp_path
+):
+    """A legacy fire sends the prompt before writing its run row; workers the turn
+    starts first still get the automation's mode."""
+    from omnigent.runtime.agent_cache import AgentCache
+    from omnigent.server.routes.sessions import routes_core
+    from omnigent.server.scheduled.fire import FireDeps, build_on_fire
+    from omnigent.stores.artifact_store.local import LocalArtifactStore
+    from omnigent.stores.scheduled_task_store.sqlalchemy_store import SqlAlchemyScheduledTaskStore
+    from tests._helpers.polling import poll_until_async
+
+    worker_agent_id = await _upload_codex_worker(auth_client)
+    schedules = SqlAlchemyScheduledTaskStore(db_uri)
+    task = schedules.create(
+        scheduled_task_id=uuid4().hex,
+        name="Trigger watcher",
+        prompt="Start a worker for each new item",
+        rrule="FREQ=HOURLY",
+        user_id="alice",
+        agent_id=worker_agent_id,
+        timezone="UTC",
+        execution_target="connected_host",
+        host_id=uuid4().hex,
+        workspace="/tmp",
+        permission_mode="approve-for-me",
+    )
+    monkeypatch.setattr(auth_app.state, "scheduled_task_store", schedules)
+    conversations = SqlAlchemyConversationStore(db_uri)
+
+    async def managed_launch(**kwargs):
+        pass
+
+    monkeypatch.setattr(routes_core, "_run_managed_launch", managed_launch)
+    workers = []
+
+    async def dispatch(session, task):
+        # The run's turn is already going, and no run row exists yet.
+        assert schedules.list_runs(task.id)[0] == []
+        auth_client.headers.update(_bind_runner(db_uri, session.id))
+        workers.append(
+            json.loads(
+                await execute_tool(
+                    tool_name="sys_session_create",
+                    arguments=json.dumps({"agent_id": worker_agent_id, "placement": "managed"}),
+                    server_client=auth_client,
+                    conversation_id=session.id,
+                )
+            )
+        )
+
+    on_fire = build_on_fire(
+        FireDeps(
+            scheduled_task_store=schedules,
+            agent_store=auth_app.state.agent_store,
+            conversation_store=conversations,
+            permission_store=SqlAlchemyPermissionStore(db_uri),
+            host_store=auth_app.state.host_store,
+            host_registry=auth_app.state.host_registry,
+            sandbox_config=auth_app.state.sandbox_config,
+            agent_cache=AgentCache(
+                artifact_store=LocalArtifactStore(str(tmp_path / "artifacts")),
+                cache_dir=tmp_path / "fire-cache",
+            ),
+        ),
+        launch_dispatch=dispatch,
+    )
+    assert await on_fire(0, task.id)
+    await poll_until_async(lambda: schedules.list_runs(task.id)[0], timeout_s=5)
+    assert len(workers) == 1 and workers[0].get("conversation_id"), workers
+    worker = conversations.get_conversation(workers[0]["conversation_id"])
+    assert worker.terminal_launch_args == PERMISSION_LAUNCH_ARGS["codex-native"]["approve-for-me"]
+
+
+def _shared_automation(auth_app, db_uri, monkeypatch, agent_id, grantees, **fields):
+    """Alice's automation, shared at Read with *grantees*, with managed launches stubbed."""
+    from omnigent.server.routes.sessions import routes_core
+    from omnigent.stores.scheduled_task_store.sqlalchemy_store import SqlAlchemyScheduledTaskStore
+
+    schedules = SqlAlchemyScheduledTaskStore(db_uri)
+    task = schedules.create(
+        scheduled_task_id=uuid4().hex,
+        name="Shared watcher",
+        prompt="Start a worker for each new item",
+        rrule="FREQ=HOURLY",
+        user_id="alice",
+        agent_id=agent_id,
+        timezone="UTC",
+        execution_target="managed_sandbox",
+        **fields,
+    )
+    monkeypatch.setattr(auth_app.state, "scheduled_task_store", schedules)
+    permissions = SqlAlchemyPermissionStore(db_uri)
+    for grantee in grantees:
+        permissions.ensure_user(grantee)
+        permissions.grant_for_scheduled_task(grantee, task.id, LEVEL_READ)
+
+    async def launch(**kwargs):
+        pass
+
+    monkeypatch.setattr(routes_core, "_run_managed_launch", launch)
+    return task
+
+
+def _as_run_session(db_uri, session_id, task, grantees):
+    """Label *session_id* as *task*'s run session and share it with *grantees*, as runs do."""
+    SqlAlchemyConversationStore(db_uri).set_labels(
+        session_id,
+        {SCHEDULED_TASK_ORIGIN_LABEL_KEY: task.id, SCHEDULED_TASK_INITIAL_RUN_LABEL_KEY: "run"},
+    )
+    permissions = SqlAlchemyPermissionStore(db_uri)
+    for grantee in grantees:
+        permissions.grant(grantee, session_id, LEVEL_READ)
+
+
+async def _launch_worker(auth_client, agent_id, launcher_id, placement="managed", **arguments):
+    return json.loads(
+        await execute_tool(
+            tool_name="sys_session_create",
+            arguments=json.dumps({"agent_id": agent_id, "placement": placement, **arguments}),
+            server_client=auth_client,
+            conversation_id=launcher_id,
+        )
+    )
+
+
+def _session_levels(db_uri, session_id):
+    grants, _ = SqlAlchemyPermissionStore(db_uri).list_for_session(session_id)
+    return {grant.user_id: grant.level for grant in grants}
+
+
+@pytest.mark.parametrize("siblings_enabled", [True, False], ids=["sibling", "independent"])
+async def test_launches_from_a_run_tree_are_shared_with_the_automation_grantees(
+    auth_client, auth_app, peers, db_uri, monkeypatch, siblings_enabled
+):
+    source, _target, _captured = peers
+    if not siblings_enabled:
+        auth_app.state.feature_flags = FeatureFlags(
+            auth_app.state.feature_flags.enabled_features - {Feature.SIBLING_SESSIONS}
+        )
+    task = _shared_automation(auth_app, db_uri, monkeypatch, source["agent_id"], ["bob", "carol"])
+    _as_run_session(db_uri, source["id"], task, ["bob", "carol"])
+    conversations = SqlAlchemyConversationStore(db_uri)
+
+    launcher = source["id"]
+    # From the run's session, then a session it launched, then a child of the next one.
+    for depth in range(3):
+        result = await _launch_worker(auth_client, source["agent_id"], launcher)
+        assert result.get("conversation_id"), result
+        worker = conversations.get_conversation(result["conversation_id"])
+        assert worker.labels[SCHEDULED_TASK_LAUNCH_LABEL_KEY] == task.id
+        assert _session_levels(db_uri, worker.id) == {
+            "alice": LEVEL_OWNER,
+            "bob": LEVEL_READ,
+            "carol": LEVEL_READ,
+        }
+        assert worker.parent_conversation_id is None
+        if siblings_enabled:
+            assert worker.family_id == source["id"]
+        else:
+            assert worker.labels[CREATED_BY_SESSION_LABEL_KEY] == launcher
+        auth_client.headers.update(_bind_runner(db_uri, worker.id))
+        launcher = worker.id
+        if depth == 1:
+            response = await auth_client.post(
+                "/v1/sessions",
+                json={"agent_id": source["agent_id"], "parent_session_id": worker.id},
+            )
+            assert response.status_code == 201, response.text
+            launcher = response.json()["id"]
+
+    for value in (task.id, ""):
+        labels = {SCHEDULED_TASK_LAUNCH_LABEL_KEY: value}
+        response = await auth_client.post(
+            "/v1/sessions", json={"agent_id": source["agent_id"], "labels": labels}
+        )
+        assert response.status_code == 400, response.text
+        response = await auth_client.patch(f"/v1/sessions/{worker.id}", json={"labels": labels})
+        assert response.status_code == 400, response.text
+    assert conversations.get_conversation(worker.id).labels[SCHEDULED_TASK_LAUNCH_LABEL_KEY] == (
+        task.id
+    )
+
+
+@pytest.mark.parametrize("case", ["continued_by_another_automation", "revoked_by_hand"])
+async def test_a_launch_skips_grantees_who_can_no_longer_see_its_source(
+    auth_client, auth_app, peers, db_uri, monkeypatch, case
+):
+    from omnigent.server.scheduled.run_sharing import sync_task_session
+
+    source, _target, _captured = peers
+    first = _shared_automation(auth_app, db_uri, monkeypatch, source["agent_id"], ["bob", "dana"])
+    _as_run_session(db_uri, source["id"], first, ["bob", "dana"])
+    permissions = SqlAlchemyPermissionStore(db_uri)
+    if case == "continued_by_another_automation":
+        second = _shared_automation(
+            auth_app,
+            db_uri,
+            monkeypatch,
+            source["agent_id"],
+            ["carol"],
+            session_mode="continue",
+            session_id=source["id"],
+        )
+        # The second automation's sync leaves the session shared with only its grantees.
+        await sync_task_session(
+            second,
+            conversation_store=SqlAlchemyConversationStore(db_uri),
+            permission_store=permissions,
+            app_state=auth_app.state,
+            host_registry=None,
+        )
+        assert _session_levels(db_uri, source["id"]) == {"alice": LEVEL_OWNER, "carol": LEVEL_READ}
+        # The labels still name the first automation, whose grantees can't see the session.
+        expected = {"alice": LEVEL_OWNER}
+    else:
+        permissions.revoke("bob", source["id"])
+        expected = {"alice": LEVEL_OWNER, "dana": LEVEL_READ}
+
+    result = await _launch_worker(auth_client, source["agent_id"], source["id"])
+
+    assert result.get("conversation_id"), result
+    worker = SqlAlchemyConversationStore(db_uri).get_conversation(result["conversation_id"])
+    assert worker.labels[SCHEDULED_TASK_LAUNCH_LABEL_KEY] == first.id
+    assert _session_levels(db_uri, worker.id) == expected
+
+
+@pytest.mark.parametrize("placement,shared", [("managed", True), ("same_host", False)])
+async def test_restricted_sharing_shares_a_launch_without_a_workspace_only_as_a_new_sandbox(
+    auth_client, auth_app, peers, db_uri, monkeypatch, placement, shared
+):
+    """A new sandbox has no workspace yet; a same-host launch in a home directory is refused."""
+    from omnigent.host.frames import HostLaunchRunnerFrame, HostStatFrame, decode_host_frame
+    from omnigent.server.auth import SharingMode
+    from tests.server.integration.test_sessions_permissions import _register_online_host
+
+    source, _target, _captured = peers
+    task = _shared_automation(auth_app, db_uri, monkeypatch, source["agent_id"], ["bob"])
+    _as_run_session(db_uri, source["id"], task, ["bob"])
+    host_id = uuid4().hex
+    _register_online_host(auth_app, host_id, "alice")
+    SqlAlchemyConversationStore(db_uri).set_host_id(source["id"], host_id, workspace="/home/alice")
+
+    def answer_host(connection, payload):
+        frame = decode_host_frame(payload)
+        if isinstance(frame, HostStatFrame):
+            connection.pending_stats[frame.request_id].set_result(
+                {"status": "ok", "exists": True, "type": "directory", "canonical_path": frame.path}
+            )
+        elif isinstance(frame, HostLaunchRunnerFrame):
+            connection.pending_launches[frame.request_id].set_result({"status": "launched"})
+        else:
+            pytest.fail(f"Unexpected host frame: {frame}")
+
+    monkeypatch.setattr(auth_app.state.host_registry, "send_text", answer_host)
+    monkeypatch.setattr(auth_app.state, "sharing_mode", lambda: SharingMode.RESTRICTED_READ_ONLY)
+
+    result = await _launch_worker(auth_client, source["agent_id"], source["id"], placement)
+
+    assert result.get("conversation_id"), result
+    worker = SqlAlchemyConversationStore(db_uri).get_conversation(result["conversation_id"])
+    assert worker.workspace == (None if placement == "managed" else "/home/alice")
+    assert _session_levels(db_uri, worker.id) == {
+        "alice": LEVEL_OWNER,
+        **({"bob": LEVEL_READ} if shared else {}),
+    }
+
+
+@pytest.mark.parametrize("sharing_fails", [False, True], ids=["shared", "sharing_failed"])
+async def test_a_launch_is_shared_before_its_first_task_can_dispatch(
+    auth_client, auth_app, peers, db_uri, monkeypatch, sharing_fails
+):
+    """A sandbox host's startup recovery delivers a saved first task at once, and the
+    worker's own launches need its grants, so its task is saved only once sharing settles."""
+    from unittest.mock import AsyncMock
+
+    from omnigent.host.frames import HostHelloFrame
+    from omnigent.server.scheduled import run_sharing
+    from tests._helpers.polling import poll_until_async
+
+    source, _target, _captured = peers
+    task = _shared_automation(auth_app, db_uri, monkeypatch, source["agent_id"], ["bob"])
+    _as_run_session(db_uri, source["id"], task, ["bob"])
+    host_id = uuid4().hex
+    connection = auth_app.state.host_registry.register(
+        host_id,
+        AsyncMock(),
+        HostHelloFrame(version="test", frame_protocol_version=1, name="sandbox", runners=[]),
+        owner="alice",
+        registered_with_managed_token=True,
+    )
+    startup = auth_app.state.startup_inputs
+    dispatched = []
+
+    async def dispatch(context, session_id, event):
+        dispatched.append(session_id)
+        return {}
+
+    monkeypatch.setattr(startup, "dispatch", dispatch)
+    if sharing_fails:
+        monkeypatch.setattr(
+            SqlAlchemyPermissionStore,
+            "list_for_scheduled_task",
+            Mock(side_effect=RuntimeError("automation grants unavailable")),
+        )
+    share = run_sharing.share_launched_session
+    during_sharing = []
+
+    async def recover_while_sharing(task, session, **kwargs):
+        # The worker is on the connected sandbox host before its share settles.
+        SqlAlchemyConversationStore(db_uri).set_host_id(session.id, host_id, "/work")
+        during_sharing.append(await startup._recover_session(auth_app, session.id, connection))
+        await share(task, session, **kwargs)
+        during_sharing.append(list(dispatched))
+
+    monkeypatch.setattr(run_sharing, "share_launched_session", recover_while_sharing)
+
+    result = await _launch_worker(
+        auth_client, source["agent_id"], source["id"], "managed", message="Start"
+    )
+
+    worker_id = result.get("conversation_id")
+    assert worker_id, result
+    # Recovery found nothing to deliver, and nothing was dispatched, until sharing settled.
+    assert during_sharing == [False, []]
+    assert _session_levels(db_uri, worker_id) == {
+        "alice": LEVEL_OWNER,
+        **({} if sharing_fails else {"bob": LEVEL_READ}),
+    }
+    # The task was saved after sharing, failed or not, and recovery now delivers it.
+    assert await startup._recover_session(auth_app, worker_id, connection) is True
+    await poll_until_async(lambda: worker_id in dispatched, timeout_s=5)
+
+
+@pytest.mark.parametrize("case", ["no_automation", "unshared", "grant_read_fails"])
+async def test_a_launch_the_automation_shares_with_no_one_stays_private(
+    auth_client, auth_app, peers, db_uri, monkeypatch, case
+):
+    source, _target, _captured = peers
+    task = _shared_automation(
+        auth_app,
+        db_uri,
+        monkeypatch,
+        source["agent_id"],
+        [] if case == "unshared" else ["bob"],
+    )
+    if case == "no_automation":
+        # Bob can read the session, but it isn't a run's.
+        SqlAlchemyPermissionStore(db_uri).grant("bob", source["id"], LEVEL_READ)
+    else:
+        _as_run_session(db_uri, source["id"], task, [] if case == "unshared" else ["bob"])
+    if case == "grant_read_fails":
+        monkeypatch.setattr(
+            SqlAlchemyPermissionStore,
+            "list_for_scheduled_task",
+            Mock(side_effect=RuntimeError("automation grants unavailable")),
+        )
+
+    result = await _launch_worker(auth_client, source["agent_id"], source["id"])
+
+    assert result.get("conversation_id"), result
+    worker = SqlAlchemyConversationStore(db_uri).get_conversation(result["conversation_id"])
+    assert _session_levels(db_uri, worker.id) == {"alice": LEVEL_OWNER}
+    # The launch still joins the automation it came from.
+    assert worker.labels.get(SCHEDULED_TASK_LAUNCH_LABEL_KEY) == (
+        None if case == "no_automation" else task.id
+    )
+
+
 @pytest.mark.parametrize("placement", ["same_host", "managed"])
+@pytest.mark.parametrize("siblings_enabled", [False, True])
 @pytest.mark.parametrize(
     "condition,orchestration_environment",
     [("flag_off", "-session_orchestration"), ("shared", None), ("binding", None)],
     indirect=["orchestration_environment"],
 )
 async def test_creation_refuses_before_launch(
-    auth_client, auth_app, peers, db_uri, placement, condition
+    auth_client, auth_app, peers, db_uri, placement, condition, siblings_enabled
 ):
     from tests.server.integration.test_sessions_permissions import _register_online_host
 
     source, _, captured = peers
+    if not siblings_enabled:
+        auth_app.state.feature_flags = FeatureFlags(
+            auth_app.state.feature_flags.enabled_features - {Feature.SIBLING_SESSIONS}
+        )
     host_id = uuid4().hex
     _register_online_host(auth_app, host_id, "alice")
     SqlAlchemyConversationStore(db_uri).set_host_id(source["id"], host_id, workspace="/tmp")
@@ -573,6 +1220,51 @@ async def test_same_host_still_requires_host_ownership(auth_client, auth_app, pe
     assert auth_app.state.host_registry.get(host_id).outbound_queue.empty()
     assert {s.id for s in store.list_conversations().data} == before_sessions
     assert permissions.list_for_user("alice") == before_grants
+
+
+async def test_same_host_creation_from_runner_keeps_source_surface(
+    auth_client, auth_app, peers, db_uri, monkeypatch
+) -> None:
+    """A web session's runner creates a same_host session, which is labeled web."""
+    from omnigent.host.frames import HostLaunchRunnerFrame, HostStatFrame, decode_host_frame
+    from omnigent.telemetry.request_headers import client_user_agent
+    from omnigent.telemetry.surface import CLIENT_SURFACE_LABEL_KEY
+    from tests.server.integration.test_sessions_permissions import _register_online_host
+
+    source, _, _ = peers
+    host_id = "b" * 32
+    _register_online_host(auth_app, host_id, "alice")
+    store = SqlAlchemyConversationStore(db_uri)
+    store.set_host_id(source["id"], host_id, workspace="/tmp")
+    store.set_labels(source["id"], {CLIENT_SURFACE_LABEL_KEY: "web"})
+
+    def answer_host(connection, payload):
+        frame = decode_host_frame(payload)
+        if isinstance(frame, HostStatFrame):
+            connection.pending_stats[frame.request_id].set_result(
+                {"status": "ok", "exists": True, "type": "directory", "canonical_path": frame.path}
+            )
+        elif isinstance(frame, HostLaunchRunnerFrame):
+            connection.pending_launches[frame.request_id].set_result({"status": "launched"})
+        else:
+            pytest.fail(f"Unexpected host frame: {frame}")
+
+    monkeypatch.setattr(auth_app.state.host_registry, "send_text", answer_host)
+    # The runner's own tool call carries the component User-Agent.
+    auth_client.headers["User-Agent"] = client_user_agent().replace(
+        "omnigent-cli/", "omnigent-runner/"
+    )
+    result = json.loads(
+        await execute_tool(
+            tool_name="sys_session_create",
+            arguments=json.dumps({"agent_id": source["agent_id"], "placement": "same_host"}),
+            server_client=auth_client,
+            conversation_id=source["id"],
+        )
+    )
+    created = store.get_conversation(result["conversation_id"])
+    assert created is not None, result
+    assert created.labels[CLIENT_SURFACE_LABEL_KEY] == "web"
 
 
 @pytest.mark.parametrize(
@@ -679,13 +1371,26 @@ async def test_same_host_creation_uses_current_source_and_stays_private(
         created_id = result["conversation_id"]
         assert {s.id for s in store.list_conversations().data} - before == {created_id}
     else:
-        response = await auth_client.post(
-            "/v1/sessions/orchestrated",
-            headers={ORCHESTRATION_SOURCE_HEADER: manager["id"]},
-            json={"agent_id": source["agent_id"], "host_id": hosts[2], "workspace": "/requested"},
-        )
+        with capture_debug_rows("server") as rows:
+            response = await auth_client.post(
+                "/v1/sessions/orchestrated",
+                headers={ORCHESTRATION_SOURCE_HEADER: manager["id"]},
+                json={
+                    "agent_id": source["agent_id"],
+                    "host_id": hosts[2],
+                    "workspace": "/requested",
+                },
+            )
         assert response.status_code == 201, response.text
         created_id = response.json()["id"]
+        [created_row] = [
+            row
+            for row in rows
+            if row["event_name"] == "session_created" and row["session_id"] == created_id
+        ]
+        assert created_row["attributes"]["created_by_session_id"] == manager["id"]
+        assert "parent_session_id" not in created_row["attributes"]
+        assert created_row["user_id"] == "alice"
     created = store.get_conversation(created_id)
     expected_host = hosts[1] if move_before_recheck else hosts[0]
     expected_workspace = "/moved" if move_before_recheck else "/original"
@@ -740,6 +1445,174 @@ async def test_same_host_creation_uses_current_source_and_stays_private(
         .labels[CREATED_BY_SESSION_LABEL_KEY]
         == manager["id"]
     )
+
+
+async def _upload_codex_worker(auth_client, sub_agents=None, **config) -> str:
+    from tests._helpers.session import post_session_bundle
+    from tests.server.helpers import build_agent_bundle
+
+    bundle = build_agent_bundle(
+        "codex-worker",
+        executor={"config": {"harness": "codex-native", **config}},
+        sub_agents=sub_agents,
+    )
+    uploaded = await post_session_bundle(auth_client.post, "/v1/sessions", bundle)
+    assert uploaded.status_code == 201, uploaded.text
+    return uploaded.json()["agent_id"]
+
+
+@pytest.mark.parametrize(
+    ("placement", "permission_mode", "spec_config", "expected"),
+    [
+        pytest.param(
+            "managed",
+            "approve-for-me",
+            {},
+            PERMISSION_LAUNCH_ARGS["codex-native"]["approve-for-me"],
+            id="worker",
+        ),
+        pytest.param(
+            "child",
+            "approve-for-me",
+            {},
+            PERMISSION_LAUNCH_ARGS["codex-native"]["approve-for-me"],
+            id="child",
+        ),
+        # The request replaces the spec's own bypass opt-in, even with the harness default.
+        pytest.param("child", "default", {"yolo": True}, None, id="request-over-spec"),
+        pytest.param(
+            "child",
+            None,
+            {"yolo": True},
+            ["--dangerously-bypass-approvals-and-sandbox"],
+            id="spec-without-request",
+        ),
+        pytest.param(
+            "child",
+            None,
+            {"permission_mode": "approve-for-me"},
+            PERMISSION_LAUNCH_ARGS["codex-native"]["approve-for-me"],
+            id="spec-permission-mode",
+        ),
+    ],
+)
+async def test_created_session_launches_in_the_requested_permission_mode(
+    auth_client,
+    auth_app,
+    peers,
+    db_uri,
+    monkeypatch,
+    placement,
+    permission_mode,
+    spec_config,
+    expected,
+):
+    from omnigent.server.routes.sessions import routes_core
+
+    source, _, _ = peers
+    worker_agent_id = await _upload_codex_worker(auth_client, **spec_config)
+
+    async def launch(**kwargs):
+        pass
+
+    monkeypatch.setattr(routes_core, "_run_managed_launch", launch)
+    arguments = {"agent_id": worker_agent_id, "placement": placement}
+    if permission_mode is not None:
+        arguments["permission_mode"] = permission_mode
+    result = json.loads(
+        await execute_tool(
+            tool_name="sys_session_create",
+            arguments=json.dumps(arguments),
+            server_client=auth_client,
+            conversation_id=source["id"],
+        )
+    )
+    assert result.get("conversation_id"), result
+    worker = SqlAlchemyConversationStore(db_uri).get_conversation(result["conversation_id"])
+    assert worker.terminal_launch_args == expected
+
+
+@pytest.mark.parametrize(
+    ("fields", "error"),
+    [
+        # An agent reading a ticket could be steered into asking for one.
+        ({"permission_mode": "full-access"}, "skips approval"),
+        ({"permission_mode": "auto"}, "is not a mode of 'codex-native'"),
+        (
+            {"permission_mode": "approve-for-me", "terminal_launch_args": []},
+            "can't be combined with terminal_launch_args",
+        ),
+        # A named sub-agent takes its launch settings from the trusted sub-spec only.
+        (
+            {"permission_mode": "approve-for-me", "sub_agent_name": "helper"},
+            "can't be combined with terminal_launch_args or sub_agent_name",
+        ),
+    ],
+)
+async def test_created_session_refuses_an_unusable_permission_mode(
+    auth_client, peers, db_uri, fields, error
+):
+    source, _, _ = peers
+    worker_agent_id = await _upload_codex_worker(auth_client, sub_agents=[{"name": "helper"}])
+    store = SqlAlchemyConversationStore(db_uri)
+    before = {conversation.id for conversation in store.list_conversations().data}
+    response = await auth_client.post(
+        "/v1/sessions",
+        json={"agent_id": worker_agent_id, "parent_session_id": source["id"], **fields},
+    )
+    assert response.status_code == 400, response.text
+    assert error in response.text
+    assert {conversation.id for conversation in store.list_conversations().data} == before
+
+
+@pytest.mark.parametrize("orchestration_environment", ["workflows"], indirect=True)
+@pytest.mark.parametrize("placement", ["child", "managed"])
+async def test_created_session_starts_as_a_run_of_a_saved_workflow(
+    auth_client, peers, monkeypatch, placement
+):
+    from omnigent.server.routes.sessions import routes_core
+
+    source, _, _ = peers
+    worker_agent_id = await _upload_codex_worker(auth_client)
+
+    async def launch(**kwargs):
+        pass
+
+    monkeypatch.setattr(routes_core, "_run_managed_launch", launch)
+    saved = await auth_client.post(
+        "/v1/workflows",
+        json={
+            "name": "Review changes",
+            "description": "Review the local changes.",
+            "steps": [{"id": "review", "name": "Review the diff", "goal": "Find regressions."}],
+        },
+    )
+    assert saved.status_code == 200, saved.text
+    workflow = saved.json()
+    result = json.loads(
+        await execute_tool(
+            tool_name="sys_session_create",
+            arguments=json.dumps(
+                {
+                    "agent_id": worker_agent_id,
+                    "placement": placement,
+                    "workflow_id": workflow["id"],
+                }
+            ),
+            server_client=auth_client,
+            conversation_id=source["id"],
+        )
+    )
+    session_id = result.get("conversation_id")
+    assert session_id and "error" not in result, result
+    plans = await auth_client.get(f"/v1/sessions/{session_id}/journal", params={"kind": "plan"})
+    assert plans.status_code == 200, plans.text
+    (plan,) = plans.json()["data"]
+    assert plan["workflow_id"] == workflow["id"]
+    assert plan["content"]["steps"] == workflow["steps"]
+    runs = await auth_client.get(f"/v1/workflows/{workflow['id']}/runs")
+    assert runs.status_code == 200, runs.text
+    assert [run["session_id"] for run in runs.json()["data"]] == [session_id]
 
 
 @pytest.mark.parametrize("shape", ["parent", "multipart", "initial_items", "skill"])
@@ -804,7 +1677,6 @@ async def test_managed_creation_uses_default_provider_and_saves_private_first_ta
         {
             "server_url": "https://managed-test.example.com",
             "providers": [
-                {"provider": "lakebox"},
                 {"provider": "modal" if provider == "embedding" else provider},
             ],
         }
@@ -812,6 +1684,9 @@ async def test_managed_creation_uses_default_provider_and_saves_private_first_ta
     assert deployment is not None
     if provider == "embedding":
         deployment = replace(deployment, configs=(replace(deployment.default, provider=provider),))
+    # A configured provider can be staged before its launcher is available.
+    staged = replace(deployment.default, provider="staged", managed_launch_supported=False)
+    deployment = replace(deployment, configs=(staged, *deployment.configs))
     auth_app.state.sandbox_config = deployment
     auth_app.state.default_public_sessions = lambda: DefaultPublicSessions.ALL
     launched = asyncio.Event()
@@ -824,24 +1699,31 @@ async def test_managed_creation_uses_default_provider_and_saves_private_first_ta
         await release.wait()
 
     monkeypatch.setattr(routes_core, "_run_managed_launch", launch)
+    # A full-size first task, as an automation sends with long instructions.
+    first_task = "First task\n" + "x" * (SESSION_MESSAGE_MAX_CHARS - len("First task\n"))
     try:
-        result = json.loads(
-            await execute_tool(
-                tool_name="sys_session_create",
-                arguments=json.dumps(
-                    {
-                        "agent_id": source["agent_id"],
-                        "placement": "managed",
-                        "message": "First task",
-                    }
-                ),
-                server_client=auth_client,
-                conversation_id=source["id"],
+        with capture_debug_rows("server") as rows:
+            result = json.loads(
+                await execute_tool(
+                    tool_name="sys_session_create",
+                    arguments=json.dumps(
+                        {
+                            "agent_id": source["agent_id"],
+                            "placement": "managed",
+                            "message": first_task,
+                        }
+                    ),
+                    server_client=auth_client,
+                    conversation_id=source["id"],
+                )
             )
-        )
         assert "error" not in result, result
         await asyncio.wait_for(launched.wait(), timeout=2)
         session_id = result["conversation_id"]
+        created = next(row for row in rows if row["event_name"] == "session_created")
+        assert created["session_id"] == session_id
+        assert created["attributes"]["created_by_session_id"] == source["id"]
+        assert "parent_session_id" not in created["attributes"]
         assert captured["provider"] is None
         assert captured["sandbox_config"].for_provider(None).provider == provider
         assert captured["owner"] == "alice"
@@ -850,12 +1732,82 @@ async def test_managed_creation_uses_default_provider_and_saves_private_first_ta
         assert (
             store.get_conversation(session_id).labels[CREATED_BY_SESSION_LABEL_KEY] == source["id"]
         )
-        assert "First task" in str(store.list_pending_inputs(session_id))
-        assert f"[Message from session {source['id']}]" in str(
-            store.list_pending_inputs(session_id)
-        )
+        pending = store.list_pending_inputs(session_id)
+        assert [item.data.content[0]["text"] for item in pending] == [
+            f"[Message from session {source['id']}]\n{first_task}"
+        ]
         grants, _ = SqlAlchemyPermissionStore(db_uri).list_for_session(session_id)
         assert [g.user_id for g in grants] == ["alice"]
+    finally:
+        release.set()
+        await auth_app.state.startup_inputs.shutdown()
+
+
+class _ListLabelSelection:
+    """A deployment that records the whole selection in one JSON label."""
+
+    def validate(self, request, services, *, spec, user_id):
+        if "revoked" in services:
+            from omnigent.errors import ErrorCode, OmnigentError
+
+            raise OmnigentError("revoked", code=ErrorCode.FORBIDDEN)
+        return tuple(services)
+
+    def session_labels(self, services):
+        return {"deployment.mcp_services": json.dumps(list(services))}
+
+    def selected_services(self, labels):
+        return tuple(json.loads(labels.get("deployment.mcp_services", "[]")))
+
+
+@pytest.mark.parametrize(
+    ("source_services", "inherited"),
+    [(["github", "slack"], '["github", "slack"]'), (["github", "revoked"], None), ([], None)],
+    ids=["inherits", "unusable-service", "no-selection"],
+)
+async def test_managed_worker_starts_with_the_source_mcp_services(
+    auth_client, auth_app, peers, db_uri, monkeypatch, source_services, inherited
+):
+    import asyncio
+    from dataclasses import replace
+
+    from omnigent.server.managed_hosts import parse_sandbox_config
+    from omnigent.server.routes.sessions import routes_core
+
+    source, _, _ = peers
+    store = SqlAlchemyConversationStore(db_uri)
+    if source_services:
+        store.set_labels(source["id"], {"deployment.mcp_services": json.dumps(source_services)})
+    # The worker runs in a new sandbox of a provider that records MCP services its own way.
+    deployment = parse_sandbox_config(
+        {"server_url": "https://managed-test.example.com", "providers": [{"provider": "modal"}]}
+    )
+    auth_app.state.sandbox_config = replace(
+        deployment, configs=(replace(deployment.default, mcp_selection=_ListLabelSelection()),)
+    )
+    launched = asyncio.Event()
+    release = asyncio.Event()
+
+    async def launch(**kwargs):
+        launched.set()
+        await release.wait()
+
+    monkeypatch.setattr(routes_core, "_run_managed_launch", launch)
+    try:
+        result = json.loads(
+            await execute_tool(
+                tool_name="sys_session_create",
+                arguments=json.dumps(
+                    {"agent_id": source["agent_id"], "placement": "managed", "message": "Go"}
+                ),
+                server_client=auth_client,
+                conversation_id=source["id"],
+            )
+        )
+        assert "error" not in result, result
+        await asyncio.wait_for(launched.wait(), timeout=2)
+        labels = store.get_conversation(result["conversation_id"]).labels
+        assert labels.get("deployment.mcp_services") == inherited
     finally:
         release.set()
         await auth_app.state.startup_inputs.shutdown()
@@ -907,9 +1859,12 @@ async def test_orchestrated_endpoint_requires_source(auth_client, peers, monkeyp
     assert response.status_code == 403, response.text
 
 
-@pytest.mark.parametrize("share_before_admission", [False, True])
+@pytest.mark.parametrize(
+    "restriction,before_admission",
+    [("sharing", False), ("sharing", True), ("admin_messaging", False)],
+)
 async def test_startup_queue_admission_and_replay(
-    auth_client, auth_app, peers, db_uri, monkeypatch, share_before_admission
+    auth_client, auth_app, peers, db_uri, monkeypatch, restriction, before_admission
 ):
     from omnigent.server.startup_inputs import STARTUP_LABEL
 
@@ -920,35 +1875,43 @@ async def test_startup_queue_admission_and_replay(
     permissions.ensure_user("bob")
     startup = auth_app.state.startup_inputs
     accepts = startup.accepts
+    refusal = (
+        "shared with edit access cannot"
+        if restriction == "sharing"
+        else "Messaging other sessions is disabled"
+    )
+
+    def restrict_source():
+        if restriction == "sharing":
+            permissions.grant("bob", source["id"], LEVEL_EDIT)
+        else:
+            write_peer_session_messaging_override(False)
 
     async def check_startup(*args):
         result = await accepts(*args)
         assert result is True
-        if share_before_admission:
-            permissions.grant("bob", source["id"], LEVEL_EDIT)
+        if before_admission:
+            restrict_source()
         return result
 
     monkeypatch.setattr(startup, "accepts", check_startup)
     result = await _send(auth_client, source, target)
     pending = store.list_pending_inputs(target["id"])
     assert not captured.get("posts")
-    if share_before_admission:
-        assert "shared with edit access cannot" in result["detail"]
+    if before_admission:
+        assert refusal in result["detail"]
         assert pending == []
     else:
         assert result["queued"] is True
         assert len(pending) == 1
-        permissions.grant("bob", source["id"], LEVEL_EDIT)
+        restrict_source()
         await startup._deliver(auth_app, target["id"], pending[0])
         await startup._deliver(auth_app, target["id"], pending[0])
         delivered = [body for path, body in captured.get("posts", []) if path.endswith("/events")]
         assert len(delivered) == 1
         assert f"[Message from session {source['id']}]" in json.dumps(delivered)
         assert store.list_pending_inputs(target["id"]) == []
-        assert (
-            "shared with edit access cannot"
-            in (await _send(auth_client, source, target))["detail"]
-        )
+        assert refusal in (await _send(auth_client, source, target))["detail"]
 
 
 @pytest.mark.parametrize("two_replica_stack", ["authenticated"], indirect=True)
@@ -961,7 +1924,7 @@ async def test_peer_message_readdresses_across_replicas(
 
     from omnigent.cli_auth import OMNIGENT_SLICE_KEY_HEADER, open_server_client
     from omnigent.runner._entry import _RunnerDatabricksAuth
-    from omnigent.server.routes import sessions
+    from omnigent.server.routes import _host_launch, sessions
     from omnigent.server.routes._sessions.helpers import _get_runner_client_impl
     from tests.server.integration.test_sessions_permissions import _register_online_host
 
@@ -973,6 +1936,7 @@ async def test_peer_message_readdresses_across_replicas(
     host_id = uuid4().hex
     _register_online_host(stack.tunnel_replica, host_id, "alice")
     stack.conv_store.set_host_id(target["id"], host_id, workspace="/worker")
+    monkeypatch.setattr(_host_launch, "_host_sharded", True)
     captured = _stub_late_runner_bind(monkeypatch)
     capture_client = sessions._get_runner_client
 
@@ -1023,6 +1987,7 @@ async def test_peer_message_readdresses_across_replicas(
         assert client.headers[OMNIGENT_SLICE_KEY_HEADER] == "sender-host"
     assert result.get("queued") is True, result
     posts = [(key, status) for method, path, key, status in received if method == "POST"]
+    # The first attempt uses the sender's key; a refusal re-resolves the target's host.
     assert posts == (
         [("sender-host", 400), (host_id, 400), (None, 202)]
         if legacy_host
@@ -1031,6 +1996,113 @@ async def test_peer_message_readdresses_across_replicas(
     delivered = [body for path, body in captured.get("posts", []) if path.endswith("/events")]
     assert len(delivered) == 1
     assert f"[Message from session {source['id']}]" in json.dumps(delivered)
+
+
+@pytest.mark.parametrize("two_replica_stack", ["managed"], indirect=True)
+@pytest.mark.parametrize("primed", [True, False], ids=["create_response_cached", "other_host"])
+@pytest.mark.parametrize("keyed", [True, False], ids=["keyed_create", "unkeyed_create"])
+async def test_sub_agent_requests_are_keyed_by_its_host_across_replicas(
+    two_replica_stack, db_uri, monkeypatch, primed, keyed
+):
+    import httpx
+
+    from omnigent import session_host
+    from omnigent.cli_auth import OMNIGENT_SLICE_KEY_HEADER, open_server_client
+    from omnigent.runner._entry import _RunnerDatabricksAuth
+    from omnigent.server.managed_hosts import REQUESTED_HOST_ID_LABEL_KEY
+    from omnigent.server.routes import _host_launch, sessions
+    from omnigent.server.routes._sessions import orchestration
+    from omnigent.server.routes._sessions.helpers import _get_runner_client_impl
+    from omnigent.stores.host_store import HostStore
+    from tests.server.integration.test_sessions_permissions import _register_online_host
+
+    stack = two_replica_stack
+    parent = await _create_session_as(stack.keyless_client, "", "alice")
+    sub_agent = await _create_session_as(stack.tunnel_client, "", "alice")
+    headers = {"X-Forwarded-Email": "alice", **_bind_runner(db_uri, parent["id"])}
+    _bind_runner(db_uri, sub_agent["id"])
+    host_id = uuid4().hex
+    _register_online_host(stack.tunnel_replica, host_id, "alice")
+    HostStore(db_uri).bind_sandbox(host_id, provider="modal", sandbox_id="sandbox-b")
+    stack.conv_store.set_host_id(sub_agent["id"], host_id, workspace="/worker")
+    if keyed:
+        # A create that requested this host id keys it: the refusal then names the host.
+        stack.conv_store.set_labels(sub_agent["id"], {REQUESTED_HOST_ID_LABEL_KEY: host_id})
+    monkeypatch.setattr(_host_launch, "_host_sharded", True)
+    if primed:
+        # The managed create response names the sub-agent's host; the runner caches it.
+        session_host.set_session_host(sub_agent["id"], host_id)
+    captured = _stub_late_runner_bind(monkeypatch)
+    capture_client = sessions._get_runner_client
+
+    async def resolve_runner(session_id, router, **kwargs):
+        if router is stack.tunnel_replica.state.runner_router:
+            return await capture_client(session_id, router, **kwargs)
+        return await _get_runner_client_impl(session_id, router, **kwargs)
+
+    monkeypatch.setattr(sessions, "_get_runner_client", resolve_runner)
+    # A resumable sandbox provider: a host with no tunnel on the replica is woken, not refused.
+    monkeypatch.setattr(orchestration, "host_resume_supported", lambda host, config: True)
+    forced_wakes: list[str] = []
+
+    async def count_wake(woken_host_id, *args, force=False, **kwargs):
+        if force:
+            forced_wakes.append(woken_host_id)
+
+    monkeypatch.setattr("omnigent.server.managed_hosts.resume_managed_host", count_wake)
+    captured.clear()
+    monkeypatch.setenv("OMNIGENT_HOST_SLICE_KEY_ENABLED", "1")
+    monkeypatch.setenv("OMNIGENT_RUNNER_SLICE_KEY", "parent-host")
+    transports = [
+        httpx.ASGITransport(app=app) for app in (stack.keyless_replica, stack.tunnel_replica)
+    ]
+    # Every request about the sub-agent: (round, method, key, status, wrong_replica, is_lookup).
+    seen: list[tuple[int, str, str | None, int, bool, bool]] = []
+    current_round = 0
+
+    async def ingress(request):
+        key = request.headers.get(OMNIGENT_SLICE_KEY_HEADER)
+        on_target = key == host_id
+        response = await transports[int(on_target)].handle_async_request(request)
+        await response.aread()
+        if f"/v1/sessions/{sub_agent['id']}" in request.url.path:
+            wrong = response.status_code == 400 and "wrong_replica" in response.text
+            is_lookup = "include_items" in request.url.params
+            seen.append(
+                (current_round, request.method, key, response.status_code, wrong, is_lookup)
+            )
+        return response
+
+    async with open_server_client(
+        "http://sharded",
+        headers=headers,
+        auth=_RunnerDatabricksAuth(lambda: "test-bearer", "http://sharded"),
+        transport=httpx.MockTransport(ingress),
+    ) as client:
+        for current_round in (1, 2, 3):
+            result = await _send(client, parent, sub_agent, message=f"Round {current_round}")
+            assert result.get("queued") is True, result
+            items = await client.get(f"/v1/sessions/{sub_agent['id']}/items")
+            assert items.status_code == 200, items.text
+            status = await client.get(f"/v1/sessions/{sub_agent['id']}")
+            assert status.status_code == 200, status.text
+
+    wrong = [entry for entry in seen if entry[4]]
+    if primed:
+        # The cached host keys round 1 from its first request: no refusal, no lookup.
+        assert wrong == [] and not any(entry[5] for entry in seen), seen
+    else:
+        # The runner's key is refused first, fast and without a wake, then the host serves.
+        assert len(wrong) == 1 and wrong[0][0] == 1, seen
+        assert seen[0][4] and seen[0][2] == "parent-host", seen
+        # A refusal that names the host is retried on it directly; an unnamed one costs a lookup.
+        assert sum(entry[5] for entry in seen) == (0 if keyed else 1), seen
+    settled = [entry for entry in seen if not entry[4] and not entry[5]]
+    assert settled and all(key == host_id for _, _, key, *_ in settled), seen
+    # The keyless replica refuses the runner's key before any wake is kicked, primed or not.
+    assert forced_wakes == [], forced_wakes
+    delivered = [body for path, body in captured.get("posts", []) if path.endswith("/events")]
+    assert len(delivered) == 3
 
 
 @pytest.mark.parametrize("two_replica_stack", ["managed"], indirect=True)
@@ -1231,3 +2303,2454 @@ async def test_same_host_creation_across_replicas(
         assert worker.parent_conversation_id is None
         assert worker.host_id == host_id and worker.workspace == "/worker"
         assert len(launches) == 1 and launches[0].session_id == worker.id
+
+
+@pytest.mark.parametrize(
+    "entry", ["json", "multipart", "same_host", "managed", "mcp_same_host", "mcp_managed"]
+)
+async def test_nested_agent_gate_tracks_request_context_before_creation(
+    auth_client, auth_app, peers, db_uri, monkeypatch, entry
+):
+    from omnigent.host.frames import HostLaunchRunnerFrame, HostStatFrame, decode_host_frame
+    from omnigent.server.routes.sessions import routes_core
+    from omnigent.server.sharing_settings import DefaultPublicSessions
+    from tests.server.integration.test_sessions_permissions import (
+        _register_online_host,
+        build_agent_bundle,
+    )
+
+    source, _, _ = peers
+    store = SqlAlchemyConversationStore(db_uri)
+    permissions = SqlAlchemyPermissionStore(db_uri)
+    auth_app.state.default_public_sessions = lambda: DefaultPublicSessions.ALL
+    host_id = uuid4().hex
+    _register_online_host(auth_app, host_id, "alice")
+    store.set_host_id(source["id"], host_id, workspace="/tmp")
+    launched = []
+
+    def answer_host(connection, payload):
+        frame = decode_host_frame(payload)
+        if isinstance(frame, HostStatFrame):
+            connection.pending_stats[frame.request_id].set_result(
+                {"status": "ok", "exists": True, "type": "directory", "canonical_path": frame.path}
+            )
+        else:
+            assert isinstance(frame, HostLaunchRunnerFrame)
+            launched.append(frame)
+            connection.pending_launches[frame.request_id].set_result({"status": "launched"})
+
+    monkeypatch.setattr(auth_app.state.host_registry, "send_text", answer_host)
+
+    async def launch(**kwargs):
+        launched.append(kwargs)
+
+    monkeypatch.setattr(routes_core, "_run_managed_launch", launch)
+    # Embedded deployments read their rollout service from the request context.
+    enabled = ContextVar("nested_agents_enabled", default=False)
+
+    class RequestFeatureFlags(FeatureFlags):
+        def enabled(self, feature):
+            return (
+                enabled.get() if feature == Feature.SIBLING_SESSIONS else super().enabled(feature)
+            )
+
+    auth_app.state.feature_flags = resolve_feature_flags({})
+    info = (await auth_client.get("/v1/info")).json()
+    assert info["sibling_sessions"] is info["features"]["sibling_sessions"] is True
+    auth_app.state.feature_flags = RequestFeatureFlags(resolve_feature_flags({}).enabled_features)
+    sibling_id = None
+    for active in (False, True, False):
+        token = enabled.set(active)
+        try:
+            info = (await auth_client.get("/v1/info")).json()
+            assert info["sibling_sessions"] is info["features"]["sibling_sessions"] is active
+            before = {row.id for row in store.list_conversations().data}
+            launches_before = len(launched)
+            metadata = {"sibling_source_id": source["id"]}
+            if entry == "multipart":
+                response = await auth_client.post(
+                    "/v1/sessions",
+                    data={"metadata": json.dumps(metadata)},
+                    files={
+                        "bundle": (
+                            "agent.tar.gz",
+                            build_agent_bundle(name="nested-agent"),
+                            "application/gzip",
+                        )
+                    },
+                )
+            elif entry == "json":
+                response = await auth_client.post(
+                    "/v1/sessions", json={"agent_id": source["agent_id"], **metadata}
+                )
+            elif entry.startswith("mcp_"):
+                result = json.loads(
+                    await execute_tool(
+                        tool_name="sys_session_create",
+                        arguments=json.dumps(
+                            {
+                                "agent_id": source["agent_id"],
+                                "placement": entry.removeprefix("mcp_"),
+                            }
+                        ),
+                        server_client=auth_client,
+                        conversation_id=source["id"],
+                    )
+                )
+                assert "error" not in result, result
+                created_id = result["conversation_id"]
+            else:
+                response = await auth_client.post(
+                    "/v1/sessions/orchestrated",
+                    headers={ORCHESTRATION_SOURCE_HEADER: source["id"]},
+                    json={
+                        "agent_id": source["agent_id"],
+                        "host_type": "managed" if entry == "managed" else "external",
+                    },
+                )
+            if not active and entry in ("json", "multipart"):
+                assert response.status_code == 403, response.text
+                assert "Nested agents are disabled" in response.text
+                assert {row.id for row in store.list_conversations().data} == before
+                assert len(launched) == launches_before
+                continue
+            if not entry.startswith("mcp_"):
+                assert response.status_code == 201, response.text
+                created_id = response.json().get("id") or response.json()["session_id"]
+            created = store.get_conversation(created_id)
+            assert created.parent_conversation_id is None
+            assert created.family_id == (source["id"] if active else None)
+            assert {row.id for row in store.list_conversations().data} == before | {created_id}
+            assert all(
+                grant.user_id == "alice" for grant in permissions.list_for_session(created_id)[0]
+            )
+            if entry not in ("json", "multipart"):
+                assert len(launched) == launches_before + 1
+            if active:
+                sibling_id = created_id
+        finally:
+            enabled.reset(token)
+    assert sibling_id is not None
+    assert (await auth_client.get(f"/v1/sessions/{sibling_id}")).status_code == 200
+    assert (await _send(auth_client, source, {"id": sibling_id})).get("queued") is True
+    for parent in ({}, {"parent_session_id": source["id"]}):
+        ordinary = await auth_client.post(
+            "/v1/sessions", json={"agent_id": source["agent_id"], **parent}
+        )
+        assert ordinary.status_code == 201, ordinary.text
+
+
+@pytest.mark.parametrize("bundled", [False, True])
+async def test_siblings_are_private_roots_and_owner_only_in_lists(
+    auth_client, auth_app, peers, db_uri, bundled, monkeypatch
+):
+    from omnigent.server.sharing_settings import DefaultPublicSessions
+    from tests.server.integration.test_sessions_permissions import build_agent_bundle
+
+    source, target, _ = peers
+    store = SqlAlchemyConversationStore(db_uri)
+    invalid = await auth_client.patch(
+        f"/v1/sessions/{source['id']}", json={"project_id": "", "family_pinned": True}
+    )
+    assert invalid.status_code == 400
+    assert store.get_conversation(source["id"]).family_id is None
+    permissions = SqlAlchemyPermissionStore(db_uri)
+    permissions.ensure_user("reader")
+    permissions.grant("reader", source["id"], LEVEL_READ)
+    auth_app.state.default_public_sessions = lambda: DefaultPublicSessions.ALL
+    metadata = {"sibling_source_id": source["id"], "title": "Private sibling"}
+    monkeypatch.setattr(
+        "omnigent.stores.conversation_store.sqlalchemy_store.now_epoch",
+        lambda: max(source["created_at"], target["created_at"]) + 1,
+    )
+    if bundled:
+        response = await auth_client.post(
+            "/v1/sessions",
+            data={"metadata": json.dumps(metadata)},
+            files={
+                "bundle": (
+                    "agent.tar.gz",
+                    build_agent_bundle(name="sibling-agent"),
+                    "application/gzip",
+                )
+            },
+        )
+        sibling_id = response.json().get("session_id")
+    else:
+        response = await auth_client.post(
+            "/v1/sessions", json={"agent_id": source["agent_id"], **metadata}
+        )
+        sibling_id = response.json().get("id")
+    assert response.status_code == 201, response.text
+    store = SqlAlchemyConversationStore(db_uri)
+    sibling = store.get_conversation(sibling_id)
+    assert sibling.parent_conversation_id is None and sibling.root_conversation_id == sibling.id
+    assert sibling.family_id == source["id"]
+    assert "omnigent.session_family_id" not in sibling.labels
+    assert [grant.user_id for grant in permissions.list_for_session(sibling_id)[0]] == ["alice"]
+    assert store.list_child_conversation_ids_by_parent([source["id"]])[source["id"]] == []
+    renamed = await auth_client.patch(
+        f"/v1/sessions/{source['id']}", json={"title": "Parent planning"}
+    )
+    assert renamed.status_code == 200, renamed.text
+    snapshot = await auth_client.get(f"/v1/sessions/{sibling_id}")
+    assert snapshot.json()["family"]["id"] == source["id"]
+    assert snapshot.json()["family"]["representative_title"] == "Parent planning"
+    listing = await auth_client.get(
+        "/v1/sessions", params={"limit": 1, "search_query": "Private sibling"}
+    )
+    assert [row["id"] for row in listing.json()["data"]] == [sibling_id]
+    assert listing.json()["data"][0]["family"]["representative_title"] == "Parent planning"
+    expanded = await auth_client.get(
+        "/v1/sessions",
+        params={"limit": 1, "search_query": "Private sibling", "expand_families": True},
+    )
+    assert [row["id"] for row in expanded.json()["data"]] == [sibling_id]
+    expanded = await auth_client.get(
+        "/v1/sessions",
+        params={"limit": 1, "agent_id": sibling.agent_id, "expand_families": True},
+    )
+    assert {row["id"] for row in expanded.json()["data"]} == {source["id"], sibling_id}
+    assert expanded.json()["page_boundary"]["id"] == sibling_id
+    # Filtering a cursor side chat must not move the boundary into appended family context.
+    from omnigent.server.auth import LEVEL_OWNER
+    from omnigent.stores.conversation_store import SIDE_CHAT_LABEL_KEY
+
+    with monkeypatch.context() as clock:
+        clock.setattr(
+            "omnigent.stores.conversation_store.sqlalchemy_store.now_epoch",
+            lambda: sibling.created_at - 1,
+        )
+        hidden = store.create_conversation(
+            conversation_id="f" * 32,
+            agent_id=sibling.agent_id,
+            labels={SIDE_CHAT_LABEL_KEY: "true"},
+        )
+    permissions.grant("alice", hidden.id, LEVEL_OWNER)
+    filtered = (
+        await auth_client.get(
+            "/v1/sessions",
+            params={"limit": 2, "agent_id": sibling.agent_id, "expand_families": True},
+        )
+    ).json()
+    assert filtered["last_id"] == hidden.id
+    assert filtered["page_boundary"] == {
+        "id": sibling_id,
+        "created_at": sibling.created_at,
+        "updated_at": sibling.updated_at,
+    }
+    assert {row["id"] for row in filtered["data"]} == {source["id"], sibling_id}
+    pinned = await auth_client.patch(
+        f"/v1/sessions/{sibling_id}", json={"labels": {"omnigent.pinned": "1"}}
+    )
+    assert pinned.status_code == 200, pinned.text
+    for expand in (False, True):
+        pinned_page = await auth_client.get(
+            "/v1/sessions", params={"pinned": True, "expand_families": expand}
+        )
+        assert {row["id"] for row in pinned_page.json()["data"]} == (
+            {source["id"], sibling_id} if expand else {sibling_id}
+        )
+    ids = []
+    after = None
+    while True:
+        page = (
+            await auth_client.get(
+                "/v1/sessions", params={"limit": 1, **({"after": after} if after else {})}
+            )
+        ).json()
+        assert len(page["data"]) <= 1
+        ids.extend(row["id"] for row in page["data"])
+        if not page["has_more"]:
+            break
+        after = page["last_id"]
+    assert len(ids) == len(set(ids))
+    assert {source["id"], sibling_id} <= set(ids)
+    for pin_request in ({"family_pinned": True}, {"labels": {"omnigent.pinned": "1"}}):
+        refused_pin = await auth_client.patch(
+            f"/v1/sessions/{source['id']}", json={**pin_request, "reasoning_effort": "bogus"}
+        )
+        assert refused_pin.status_code == 400
+        assert not (await auth_client.get(f"/v1/sessions/{source['id']}")).json()["family"][
+            "pinned"
+        ]
+    reader = {"X-Forwarded-Email": "reader"}
+    snapshot = await auth_client.get(f"/v1/sessions/{source['id']}", headers=reader)
+    assert snapshot.status_code == 200
+    assert not snapshot.json().get("family")
+    assert "family_id" not in snapshot.json()
+    assert "omnigent.session_family_id" not in snapshot.json()["labels"]
+    response = await auth_client.patch(
+        f"/v1/sessions/{source['id']}", json={"family_id": sibling_id}
+    )
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"][0]["loc"] == ["body", "family_id"]
+    assert store.get_conversation(source["id"]).family_id == source["id"]
+
+    host_id = uuid4().hex
+    auth_app.state.host_store.register_managed_host(
+        host_id=host_id,
+        name="Other sandbox",
+        user_id="alice",
+        token="test-token",
+        provider="modal",
+        sandbox_id="other-sandbox",
+        token_expires_at=2_000_000_000,
+    )
+    refused = await auth_client.post(
+        "/v1/sessions",
+        json={
+            "agent_id": source["agent_id"],
+            **metadata,
+            "host_id": host_id,
+            "workspace": "/work",
+        },
+    )
+    assert refused.status_code == 403, refused.text
+    assert "Only the source session's sandbox" in refused.text
+    side = await auth_client.post(f"/v1/sessions/{source['id']}/fork", json={"side_chat": True})
+    assert side.status_code == 201, side.text
+    from_side = await auth_client.post(
+        "/v1/sessions",
+        json={"agent_id": source["agent_id"], "sibling_source_id": side.json()["id"]},
+    )
+    assert from_side.status_code == 201, from_side.text
+    assert store.get_conversation(from_side.json()["id"]).family_id == source["id"]
+
+    monkeypatch.setattr("omnigent.server.routes.sessions.routes_core._SESSION_LIST_BATCH_SIZE", 2)
+    monkeypatch.setattr("omnigent.server.session_families._FAMILY_GRANT_BATCH_SIZE", 2)
+    list_grants = SqlAlchemyPermissionStore.list_for_sessions
+    grant_sizes = []
+    is_admin = SqlAlchemyPermissionStore.is_admin
+    admin_checks = []
+
+    def counted_is_admin(self, user_id):
+        admin_checks.append(user_id)
+        return is_admin(self, user_id)
+
+    def bounded_grants(self, ids, *, user_id=None):
+        grant_sizes.append(len(ids))
+        assert len(ids) <= 2
+        return list_grants(self, ids, user_id=user_id)
+
+    monkeypatch.setattr(SqlAlchemyPermissionStore, "list_for_sessions", bounded_grants)
+    monkeypatch.setattr(SqlAlchemyPermissionStore, "is_admin", counted_is_admin)
+    expanded = await auth_client.get("/v1/sessions", params={"expand_families": True})
+    assert expanded.status_code == 200, expanded.text
+    assert {row["id"] for row in expanded.json()["data"]} == {
+        source["id"],
+        peers[1]["id"],
+        sibling_id,
+        from_side.json()["id"],
+    }
+    assert grant_sizes.count(2) >= 3
+    assert admin_checks == ["alice"]
+    permissions.grant("reader", source["id"], LEVEL_EDIT)
+    response = await auth_client.post(
+        "/v1/sessions", json={"agent_id": source["agent_id"], **metadata}
+    )
+    assert response.status_code == 403, response.text
+
+
+@pytest.mark.parametrize(
+    "policy,target,allowed,transport",
+    [
+        (policy, target, allowed, transport)
+        for policy, target, allowed in [
+            ("current_host", "current", True),
+            ("current_host", "other", False),
+            ("current_host", "managed", False),
+            ("current_host", "unbound", False),
+            ("current_host_or_new_sandbox", "current", True),
+            ("current_host_or_new_sandbox", "other", False),
+            ("current_host_or_new_sandbox", "managed", True),
+            ("current_host_or_new_sandbox", "unbound", False),
+            ("any_host", "current", True),
+            ("any_host", "other", True),
+            ("any_host", "managed", True),
+            ("any_host", "unbound", True),
+        ]
+        for transport in ("json", "bundled", "orchestrated")
+        if transport != "orchestrated" or target in {"current", "managed"}
+    ],
+)
+async def test_sibling_destination_policy_is_enforced_before_creation(
+    auth_client, auth_app, peers, db_uri, monkeypatch, policy, target, allowed, transport
+):
+    from omnigent.host.frames import HostLaunchRunnerFrame, HostStatFrame, decode_host_frame
+    from omnigent.server.routes.sessions import routes_core
+    from omnigent.server.sharing_settings import SiblingSessionDestinations
+    from tests.server.integration.test_sessions_permissions import _register_online_host
+
+    source, _, _ = peers
+    source_host, other_host = uuid4().hex, uuid4().hex
+    for host_id in (source_host, other_host):
+        _register_online_host(auth_app, host_id, "alice")
+        auth_app.state.host_store.upsert_on_connect(host_id, host_id, "alice")
+    store = SqlAlchemyConversationStore(db_uri)
+    store.set_host_id(source["id"], source_host, workspace="/source")
+    auth_app.state.sibling_session_destinations = lambda: SiblingSessionDestinations(policy)
+
+    traffic = []
+
+    def answer_host(connection, payload):
+        traffic.append(payload)
+        frame = decode_host_frame(payload)
+        if isinstance(frame, HostStatFrame):
+            connection.pending_stats[frame.request_id].set_result(
+                {"status": "ok", "exists": True, "type": "directory", "canonical_path": frame.path}
+            )
+        elif isinstance(frame, HostLaunchRunnerFrame):
+            connection.pending_launches[frame.request_id].set_result({"status": "launched"})
+        else:
+            pytest.fail(f"Unexpected host frame: {frame}")
+
+    monkeypatch.setattr(auth_app.state.host_registry, "send_text", answer_host)
+
+    async def finish_managed_launch(**kwargs):
+        traffic.append(kwargs)
+
+    monkeypatch.setattr(routes_core, "_run_managed_launch", finish_managed_launch)
+    body = {"agent_id": source["agent_id"], "sibling_source_id": source["id"]}
+    if target in {"current", "other"}:
+        body.update(
+            {
+                "host_id": source_host if target == "current" else other_host,
+                "workspace": f"/{target}",
+            }
+        )
+    elif target == "managed":
+        body["host_type"] = "managed"
+
+    before = {session.id for session in store.list_conversations().data}
+    if transport == "bundled":
+        from tests.server.integration.test_sessions_permissions import build_agent_bundle
+
+        body.pop("agent_id")
+        response = await auth_client.post(
+            "/v1/sessions",
+            data={"metadata": json.dumps(body)},
+            files={
+                "bundle": (
+                    "agent.tar.gz",
+                    build_agent_bundle(name="policy-worker"),
+                    "application/gzip",
+                )
+            },
+        )
+    elif transport == "orchestrated":
+        from omnigent.runner.identity import ORCHESTRATION_SOURCE_HEADER
+
+        # Runners identify the source through the header; the server derives placement.
+        for key in ("sibling_source_id", "host_id", "workspace"):
+            body.pop(key, None)
+        response = await auth_client.post(
+            "/v1/sessions/orchestrated",
+            json=body,
+            headers={
+                ORCHESTRATION_SOURCE_HEADER: source["id"],
+            },
+        )
+    else:
+        response = await auth_client.post("/v1/sessions", json=body)
+    assert response.status_code == (201 if allowed else 403), response.text
+    created = {session.id for session in store.list_conversations().data} - before
+    assert len(created) == int(allowed)
+    if not allowed:
+        assert "server policy" in response.text
+        assert traffic == []
+
+
+@pytest.mark.parametrize(
+    "policy,binding,enabled,allowed",
+    [
+        (policy, binding, True, binding == "same")
+        for policy in ("current_host", "current_host_or_new_sandbox")
+        for binding in ("same", "other", "unbound", "unknown", "ambiguous")
+    ]
+    + [
+        ("any_host", "unbound", True, True),
+        ("current_host", "unbound", False, True),
+    ],
+)
+async def test_sibling_destination_policy_checks_runner_reassignment(
+    auth_client, auth_app, peers, db_uri, policy, binding, enabled, allowed
+):
+    from omnigent.server.sharing_settings import SiblingSessionDestinations
+
+    source, target, captured = peers
+    store = SqlAlchemyConversationStore(db_uri)
+    host_id = uuid4().hex
+    if binding != "unknown":
+        store.set_host_id(source["id"], host_id, workspace="/source")
+    if binding != "unbound":
+        target_host = uuid4().hex if binding == "other" else host_id
+        store.set_host_id(target["id"], target_host, workspace="/target")
+    runner_id = store.get_conversation(source["id"]).runner_id
+    if binding == "ambiguous":
+        store.create_conversation(
+            agent_id=None, host_id=uuid4().hex, workspace="/other", runner_id=runner_id
+        )
+    store.add_new_sibling(source["id"], target["id"], user_id="alice")
+    auth_app.state.sibling_session_destinations = lambda: SiblingSessionDestinations(policy)
+    if not enabled:
+        auth_app.state.feature_flags = resolve_feature_flags(
+            {FEATURES_ENV_VAR: "-sibling_sessions"}
+        )
+    previous = store.get_conversation(target["id"])
+    captured.clear()
+
+    response = await auth_client.patch(
+        f"/v1/sessions/{target['id']}", json={"runner_id": runner_id}
+    )
+
+    assert response.status_code == (200 if allowed else 403), response.text
+    saved = store.get_conversation(target["id"])
+    assert saved.host_id == previous.host_id
+    assert saved.workspace == previous.workspace
+    if allowed:
+        assert saved.runner_id == runner_id
+        assert captured.get("posts")
+    else:
+        assert saved.runner_id == previous.runner_id
+        assert "server policy" in response.text
+        assert not captured.get("posts")
+
+
+async def test_family_project_removal_precedes_archive(auth_client, peers, db_uri):
+    source, _, _ = peers
+    response = await auth_client.post(
+        "/v1/sessions",
+        json={
+            "agent_id": source["agent_id"],
+            "sibling_source_id": source["id"],
+        },
+    )
+    assert response.status_code == 201, response.text
+    sibling_id = response.json()["id"]
+    store = SqlAlchemyConversationStore(db_uri)
+    pinned = await auth_client.patch(
+        f"/v1/sessions/{source['id']}",
+        json={"labels": {"omnigent.pinned": "1" * 300}, "title": "Pinned family"},
+    )
+    assert pinned.status_code == 200, pinned.text
+    assert pinned.json()["title"] == "Pinned family"
+    for session_id in (source["id"], sibling_id):
+        snapshot = (await auth_client.get(f"/v1/sessions/{session_id}")).json()
+        assert snapshot["family"]["pinned_at"] == "1" * 256
+    # A legacy personal pin must not divert the representative's family action.
+    from omnigent.stores.conversation_store import pinned_label_key
+
+    cleared = await auth_client.patch(
+        f"/v1/sessions/{source['id']}", json={"labels": {"omnigent.pinned": ""}}
+    )
+    assert cleared.status_code == 200, cleared.text
+    store.set_labels(source["id"], {pinned_label_key("alice"): "old-pin"})
+    repinned = await auth_client.patch(
+        f"/v1/sessions/{source['id']}", json={"labels": {"omnigent.pinned": "42"}}
+    )
+    assert repinned.status_code == 200, repinned.text
+    assert repinned.json()["family"]["pinned_at"] == "42"
+    unpinned = await auth_client.patch(
+        f"/v1/sessions/{source['id']}", json={"labels": {"omnigent.pinned": ""}}
+    )
+    assert unpinned.status_code == 200, unpinned.text
+    assert not unpinned.json()["family"]["pinned"]
+    assert "omnigent.pinned" not in unpinned.json()["labels"]
+    assert pinned_label_key("alice") not in store.get_conversation(source["id"]).labels
+    pins = (await auth_client.get("/v1/sessions", params={"pinned": True})).json()["data"]
+    assert source["id"] not in {row["id"] for row in pins}
+    repinned = await auth_client.patch(
+        f"/v1/sessions/{source['id']}", json={"labels": {"omnigent.pinned": "42"}}
+    )
+    assert repinned.status_code == 200, repinned.text
+    store.set_conversation_project(source["id"], "a" * 32)
+    refused = await auth_client.patch(
+        f"/v1/sessions/{source['id']}",
+        json={"project_id": "", "labels": {"omni_project": "Stray"}, "title": "Rejected"},
+    )
+    assert refused.status_code == 400, refused.text
+    for member in store.get_session_family(source["id"]):
+        assert member.project_id == "a" * 32
+        assert member.labels.get("omni_project") != "Stray"
+    assert store.get_conversation(source["id"]).title == "Pinned family"
+    refused = await auth_client.patch(f"/v1/sessions/{sibling_id}", json={"project_id": ""})
+    assert refused.status_code == 409, refused.text
+    removed = await auth_client.patch(
+        f"/v1/sessions/{source['id']}",
+        json={
+            "archived": True,
+            "project_id": "",
+            "labels": {"omni_project": ""},
+        },
+    )
+    assert removed.status_code == 200, removed.text
+    assert store.get_conversation(source["id"]).archived
+    assert not store.get_conversation(sibling_id).archived
+    assert store.get_conversation(sibling_id).project_id is None
+    store.update_conversation(sibling_id, archived=True)
+    snapshot = (await auth_client.get(f"/v1/sessions/{source['id']}")).json()
+    assert snapshot["family"]["representative_id"] == source["id"]
+
+    unpinned = await auth_client.patch(
+        f"/v1/sessions/{source['id']}", json={"labels": {"omnigent.pinned": ""}}
+    )
+    assert unpinned.status_code == 200, unpinned.text
+    for session_id in (source["id"], sibling_id):
+        snapshot = (await auth_client.get(f"/v1/sessions/{session_id}")).json()
+        assert not snapshot["family"]["pinned"]
+        store.update_conversation(session_id, archived=False)
+    snapshot = (await auth_client.get(f"/v1/sessions/{source['id']}")).json()
+    assert not snapshot["family"]["pinned"]
+
+
+@pytest.mark.parametrize("scenario", ["allowed", "foreign_host", "restricted", "shared_source"])
+@pytest.mark.parametrize("nested", [False, True])
+async def test_scripted_host_worktree_respects_ownership_and_policy(
+    auth_client, auth_app, peers, db_uri, monkeypatch, scenario, nested
+):
+    from omnigent.host.frames import (
+        HostCreateWorktreeFrame,
+        HostLaunchRunnerFrame,
+        HostStatFrame,
+        decode_host_frame,
+    )
+    from omnigent.server.sharing_settings import SiblingSessionDestinations
+    from tests.server.integration.test_sessions_permissions import _register_online_host
+
+    source, _, _ = peers
+    auth_app.state.feature_flags = resolve_feature_flags(
+        {
+            FEATURES_ENV_VAR: "scripted_sessions,"
+            + ("sibling_sessions" if nested else "-sibling_sessions")
+        }
+    )
+    host = uuid4().hex
+    owner = "bob" if scenario == "foreign_host" else "alice"
+    _register_online_host(auth_app, host, owner)
+    auth_app.state.host_store.upsert_on_connect(host, "review-host", owner)
+    store = SqlAlchemyConversationStore(db_uri)
+    # A hostless caller can choose an owned host when destination policy allows it.
+    if scenario == "restricted":
+        auth_app.state.sibling_session_destinations = lambda: (
+            SiblingSessionDestinations.CURRENT_HOST
+        )
+    if scenario == "shared_source":
+        permissions = SqlAlchemyPermissionStore(db_uri)
+        permissions.ensure_user("bob")
+        permissions.grant("bob", source["id"], LEVEL_EDIT)
+    frames = []
+
+    def answer_host(connection, payload):
+        frame = decode_host_frame(payload)
+        frames.append(frame)
+        assert connection.host_id == host
+        if isinstance(frame, HostStatFrame):
+            connection.pending_stats[frame.request_id].set_result(
+                {"status": "ok", "exists": True, "type": "directory", "canonical_path": frame.path}
+            )
+        elif isinstance(frame, HostCreateWorktreeFrame):
+            connection.pending_create_worktrees[frame.request_id].set_result(
+                {"status": "ok", "worktree_path": "/repos/review", "branch": frame.branch_name}
+            )
+        elif isinstance(frame, HostLaunchRunnerFrame):
+            connection.pending_launches[frame.request_id].set_result({"status": "launched"})
+        else:
+            pytest.fail(f"Unexpected host frame: {frame}")
+
+    monkeypatch.setattr(auth_app.state.host_registry, "send_text", answer_host)
+    before = {s.id for s in store.list_conversations().data}
+    result = json.loads(
+        await execute_tool(
+            tool_name="sys_session_create",
+            arguments=json.dumps(
+                {
+                    "agent_id": source["agent_id"],
+                    "placement": "host",
+                    "host_id": host,
+                    "workspace": "/repos/example",
+                    "git": {"branch_name": "review", "base_branch": "main"},
+                }
+            ),
+            server_client=auth_client,
+            conversation_id=source["id"],
+        )
+    )
+    if scenario != "allowed":
+        assert "error" in result, result
+        assert {s.id for s in store.list_conversations().data} == before
+        assert not frames
+        return
+    assert "error" not in result, result
+    created = store.get_conversation(result["conversation_id"])
+    assert created.host_id == host
+    assert created.workspace == "/repos/review"
+    assert created.parent_conversation_id is None
+    worktree = next(f for f in frames if isinstance(f, HostCreateWorktreeFrame))
+    assert worktree.branch_name == "review" and worktree.base_branch == "main"
+    launch = next(f for f in frames if isinstance(f, HostLaunchRunnerFrame))
+    assert launch.workspace == "/repos/review"
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "allowed",
+        "disabled",
+        "shared_source",
+        "read_only_target",
+        "missing_source",
+        "legacy_disabled",
+    ],
+)
+async def test_scripted_pr_link_checks_source_and_target(
+    auth_client, auth_app, peers, db_uri, monkeypatch, scenario
+):
+    from omnigent.errors import ErrorCode, OmnigentError
+    from omnigent.server.routes import _host_filesystem
+    from omnigent.server.routes.sessions import routes_resources
+    from tests.server.integration.test_sessions_permissions import _register_online_host
+
+    source, target, _ = peers
+    auth_app.state.feature_flags = resolve_feature_flags(
+        {
+            FEATURES_ENV_VAR: ""
+            if scenario in ("disabled", "legacy_disabled")
+            else "scripted_sessions"
+        }
+    )
+    permissions = SqlAlchemyPermissionStore(db_uri)
+    permissions.ensure_user("bob")
+    if scenario == "shared_source":
+        permissions.grant("bob", source["id"], LEVEL_EDIT)
+    if scenario == "read_only_target":
+        target = await _create_session_as(auth_client, "", "bob")
+        permissions.grant("alice", target["id"], LEVEL_READ)
+    host = uuid4().hex
+    _register_online_host(auth_app, host, "alice")
+    SqlAlchemyConversationStore(db_uri).set_host_id(target["id"], host, workspace="/repo")
+
+    # Exercise the host fallback after the remote runner reports it is offline.
+    async def offline_runner(*args, **kwargs):
+        raise OmnigentError("Runner offline", code=ErrorCode.RUNNER_UNAVAILABLE)
+
+    monkeypatch.setattr(routes_resources, "_get_runner_client_for_resource_access", offline_runner)
+    captured = []
+
+    async def write(**kwargs):
+        captured.append(kwargs)
+        return {"object": "session.github.info", "prs": []}
+
+    monkeypatch.setattr(_host_filesystem, "write_workspace_from_host", write)
+    path = f"/v1/sessions/{target['id']}/resources/github/prs"
+    if scenario != "legacy_disabled":
+        path += "/orchestrated"
+    headers = {"X-Forwarded-Email": "alice"}
+    if scenario != "missing_source":
+        headers[ORCHESTRATION_SOURCE_HEADER] = source["id"]
+    response = await auth_client.post(
+        path,
+        headers=headers,
+        json={"url": "https://github.com/example/repo/pull/1", "action": "attach"},
+    )
+    if scenario != "allowed":
+        assert response.status_code == 403, response.text
+        assert not captured
+        return
+    assert response.status_code == 200, response.text
+    assert len(captured) == 1
+    assert captured[0]["op"] == "github_prs_update"
+    assert captured[0]["params"]["session_id"] == target["id"]
+
+
+@pytest.mark.parametrize("enabled,source_header", [(False, True), (True, False)])
+async def test_explicit_host_endpoint_refuses_without_capability_or_source(
+    auth_client, auth_app, peers, db_uri, enabled, source_header
+):
+    source, _, _ = peers
+    auth_app.state.feature_flags = resolve_feature_flags(
+        {FEATURES_ENV_VAR: "scripted_sessions" if enabled else ""}
+    )
+    store = SqlAlchemyConversationStore(db_uri)
+    before = {session.id for session in store.list_conversations().data}
+    response = await auth_client.post(
+        "/v1/sessions/orchestrated/host",
+        headers={ORCHESTRATION_SOURCE_HEADER: source["id"]} if source_header else {},
+        json={"agent_id": source["agent_id"], "host_id": uuid4().hex, "workspace": "/repo"},
+    )
+    assert response.status_code == 403, response.text
+    assert {session.id for session in store.list_conversations().data} == before
+
+
+@pytest.mark.parametrize(
+    "scenario", ["unfiled", "moved", "foreign", "legacy", "stale-agent", "project"]
+)
+async def test_studio_reviewer_uses_private_session_and_original_runner(
+    auth_client, auth_app, peers, db_uri, monkeypatch, scenario, tmp_path
+):
+    import asyncio
+    from base64 import b64decode, b64encode
+    from unittest.mock import AsyncMock
+
+    from fastapi import APIRouter, Request
+
+    from omnigent.db.utils import builtin_agent_id
+    from omnigent.entities.conversation import MessageData, NewConversationItem
+    from omnigent.errors import ErrorCode, OmnigentError
+    from omnigent.harness_plugins import native_provider_for_key
+    from omnigent.host.frames import (
+        HostFsRequestFrame,
+        HostFsWriteFrame,
+        HostLaunchRunnerFrame,
+        HostStatFrame,
+        decode_host_frame,
+    )
+    from omnigent.native.native_coding_agents import CODEX_NATIVE_AGENT_NAME
+    from omnigent.runtime import _globals
+    from omnigent.server.app import _build_native_bundle, _ensure_builtin_agent
+    from omnigent.server.auth import LEVEL_OWNER, RESERVED_USER_PUBLIC, UnifiedAuthProvider
+    from omnigent.server.routes.sessions import routes_core, routes_events
+    from omnigent.server.routes.studio_reviews import create_studio_reviews_router
+    from omnigent.server.schemas import SessionEventInput
+    from omnigent.server.sharing_settings import DefaultPublicSessions
+    from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
+    from omnigent.stores.artifact_store.local import LocalArtifactStore
+    from omnigent.stores.project_store.sqlalchemy_store import SqlAlchemyProjectStore
+    from omnigent.stores.studio_review_store import StudioReviewStore
+    from omnigent.studio.reviews.models import ReviewPass, ReviewProfile, ReviewTarget
+    from tests.server.integration.test_sessions_permissions import _register_online_host
+
+    source, _, _ = peers
+    agents = SqlAlchemyAgentStore(db_uri)
+    provider = native_provider_for_key("codex")
+    assert provider is not None and _globals._artifact_store is not None
+    _ensure_builtin_agent(
+        agents,
+        _globals._artifact_store,
+        _globals._agent_cache,
+        name=CODEX_NATIVE_AGENT_NAME,
+        bundle_bytes=_build_native_bundle(provider),
+    )
+    reviewer = agents.get(builtin_agent_id(CODEX_NATIVE_AGENT_NAME))
+    assert reviewer is not None
+    conversations = SqlAlchemyConversationStore(db_uri)
+    permissions = SqlAlchemyPermissionStore(db_uri)
+    projects = SqlAlchemyProjectStore(db_uri)
+    permissions.grant(RESERVED_USER_PUBLIC, source["id"], LEVEL_READ)
+    expected_project_id = None
+    expected_project_name = None
+    if scenario in {"moved", "foreign", "stale-agent"}:
+        project = projects.create(
+            uuid4().hex, "Original", "bob" if scenario == "foreign" else "alice"
+        )
+        assert conversations.set_conversation_project(source["id"], project.id)
+    if scenario == "legacy":
+        expected_project_name = "Legacy"
+        conversations.set_labels(source["id"], {PROJECT_LABEL_KEY: expected_project_name})
+    if scenario == "project":
+        project = projects.create(uuid4().hex, "Direct review", "alice")
+        expected_project_id = project.id
+        expected_project_name = project.name
+    host_id = uuid4().hex
+    _register_online_host(auth_app, host_id, "alice")
+    auth_app.state.host_store.upsert_on_connect(
+        host_id, "Review host", "alice", configured_harnesses={"codex-native": True}
+    )
+    workspace = "/review-workspace"
+    conversations.set_host_id(source["id"], host_id, workspace=workspace)
+    auth_app.state.default_public_sessions = lambda: DefaultPublicSessions.ALL
+    launches = []
+    inline_writes = []
+    hosted_frames = []
+    hosted_receipt = {}
+    hosted_content = b""
+    lose_check_ack = False
+    pr_url = "https://github.com/example/project/pull/42"
+    role_digest = "1" * 64
+    current_head = "b" * 40
+    base_sha = "a" * 40
+
+    patch = "diff --git a/hello b/hello\n--- a/hello\n+++ b/hello\n@@ -1 +1 @@\n-before\n+after\n"
+    captured_patch = patch
+
+    def answer_host(connection, payload):
+        frame = decode_host_frame(payload)
+        if isinstance(frame, HostStatFrame):
+            connection.pending_stats[frame.request_id].set_result(
+                {"status": "ok", "exists": True, "type": "directory", "canonical_path": frame.path}
+            )
+        elif isinstance(frame, HostLaunchRunnerFrame):
+            launches.append(frame)
+            connection.pending_launches[frame.request_id].set_result({"status": "launched"})
+        elif isinstance(frame, HostFsWriteFrame) and scenario == "project":
+            assert frame.session_id == expected_project_id
+            assert frame.workspace == workspace
+            if frame.op.startswith("studio_project_pull_request_check_"):
+                hosted_frames.append(frame)
+                if frame.op.endswith("_start"):
+                    if lose_check_ack:
+                        connection.pending_fs_requests[frame.request_id].set_result(
+                            {
+                                "status": "error",
+                                "error_status": 503,
+                                "error": "Acknowledgment lost",
+                            }
+                        )
+                        return
+                    result = {"state": "accepted"}
+                elif frame.op.endswith("_release"):
+                    result = {"state": "released"}
+                elif frame.op.endswith("_status"):
+                    result = {"state": "finished", "receipt": hosted_receipt}
+                else:
+                    assert frame.op.endswith("_file")
+                    offset = frame.params["offset"]
+                    chunk = hosted_content[offset : offset + 512 * 1024]
+                    result = {"data": b64encode(chunk).decode()}
+                connection.pending_fs_requests[frame.request_id].set_result(
+                    {"status": "ok", "payload": result}
+                )
+                return
+            assert frame.op == "studio_project_pull_request_publish_inline"
+            inline_writes.append(frame.params)
+            if len(inline_writes) == 1:
+                result = {
+                    "status": "ok",
+                    "payload": {
+                        "thread": {"comments": {"data": [{"url": f"{pr_url}#discussion_r1"}]}}
+                    },
+                }
+            else:
+                result = {
+                    "status": "error",
+                    "error_status": 503,
+                    "error": "Provider delivery could not be confirmed",
+                }
+            connection.pending_fs_requests[frame.request_id].set_result(result)
+        elif isinstance(frame, HostFsRequestFrame) and scenario == "project":
+            assert frame.session_id == expected_project_id
+            assert frame.workspace == workspace
+            if frame.op == "studio_project_pull_request":
+                assert frame.params["repository"] == "nested/project"
+                assert frame.params["pr_url"] == pr_url
+                assert frame.params["require_active"] is True
+                result = {
+                    "pr": {
+                        "url": pr_url,
+                        "number": 42,
+                        "base_sha": base_sha,
+                        "head_sha": current_head,
+                    }
+                }
+            elif frame.op == "studio_project_pull_request_patch":
+                assert frame.params["base_sha"] == base_sha
+                assert frame.params["head_sha"] == current_head
+                assert frame.params["capture"] is True
+                result = {
+                    "object": "session.github.pr_diff",
+                    "patch": patch,
+                    "base_sha": base_sha,
+                    "head_sha": current_head,
+                }
+            else:
+                assert frame.op == "studio_review_profiles"
+                assert frame.params == {"profile_id": "backend"}
+                result = {
+                    "id": "backend",
+                    "label": "Backend",
+                    "digest": role_digest,
+                    "instructions": "Check service boundaries.",
+                }
+            connection.pending_fs_requests[frame.request_id].set_result(
+                {"status": "ok", "payload": result}
+            )
+        else:
+            pytest.fail(f"Unexpected host frame: {frame}")
+
+    monkeypatch.setattr(auth_app.state.host_registry, "send_text", answer_host)
+    review = ReviewPass(
+        id=uuid4().hex,
+        owner_user_id="alice",
+        target=ReviewTarget(
+            source_session_id=source["id"] if scenario != "project" else None,
+            source_project_id=expected_project_id if scenario == "project" else None,
+            repository_path="nested/project" if scenario == "project" else None,
+            host_id=host_id,
+            workspace=workspace,
+            pr_url=pr_url,
+            repository="example/project",
+            pr_number=42,
+            base_sha=base_sha,
+            head_sha=current_head,
+        ),
+        profile=ReviewProfile(
+            agent_id=reviewer.id,
+            agent_version=str(reviewer.version + int(scenario == "stale-agent")),
+            harness="codex-native",
+            skill="review",
+            model="review-model",
+            reasoning_effort="high",
+        ),
+        state="prepared",
+        dispatch_status="not_requested",
+        reviewer_session_id=None,
+        created_at=1,
+        updated_at=1,
+        version=1,
+    )
+    if scenario == "moved":
+        project = projects.create(
+            uuid4().hex,
+            "Current",
+            "alice",
+            config={
+                "agent_id": source["agent_id"],
+                "workspace": "/project-default",
+                "git": {"base": "main"},
+            },
+        )
+        assert conversations.set_conversation_project(source["id"], project.id)
+        expected_project_id = project.id
+        expected_project_name = project.name
+    request = Request(
+        {"type": "http", "app": auth_app, "headers": [(b"x-forwarded-email", b"alice")]}
+    )
+    auth_provider = UnifiedAuthProvider(source="header", local_single_user=False)
+    create_callbacks: list[routes_core.ReviewCreate] = []
+    routes_core.register_core_routes(
+        APIRouter(),
+        conversation_store=conversations,
+        agent_store=agents,
+        agent_cache=_globals._agent_cache,
+        auth_provider=auth_provider,
+        permission_store=permissions,
+        project_store=projects,
+        register_review_create=create_callbacks.append,
+    )
+    create_reviewer = create_callbacks[0]
+    if scenario == "stale-agent":
+        with pytest.raises(OmnigentError) as stale:
+            await create_reviewer(request, "alice", review, review.id)
+        assert stale.value.code == ErrorCode.CONFLICT
+        assert conversations.get_conversation(review.id) is None
+        assert not launches
+        return
+
+    announcements = []
+    announce_session = routes_core._announce_session_added
+
+    def observe_announcement(user_id, session_id):
+        announced = conversations.get_conversation(session_id)
+        assert announced is not None
+        announcements.append((user_id, session_id, announced.project_id))
+        announce_session(user_id, session_id)
+
+    monkeypatch.setattr(routes_core, "_announce_session_added", observe_announcement)
+    if scenario == "project":
+        artifact_store = LocalArtifactStore(str(tmp_path / "review-evidence"))
+        send_review = AsyncMock(return_value={"queued": True, "pending_id": "review-input"})
+        legacy_capture, legacy_patch = AsyncMock(), AsyncMock()
+        # Keep the optional SPA catch-all after the injected API routes.
+        mounts = [route for route in auth_app.router.routes if route.name == "web-ui"]
+        for mount in mounts:
+            auth_app.router.routes.remove(mount)
+        auth_app.include_router(
+            create_studio_reviews_router(
+                StudioReviewStore(db_uri),
+                conversations,
+                agents,
+                capture_context=legacy_capture,
+                read_patch=legacy_patch,
+                create_reviewer=create_reviewer,
+                send_review=send_review,
+                auth_provider=auth_provider,
+                permission_store=permissions,
+                project_store=projects,
+                artifact_store=artifact_store,
+            ),
+            prefix="/v1",
+        )
+        auth_app.router.routes.extend(mounts)
+        path = f"/v1/projects/{expected_project_id}/studio/reviews"
+        before = {conv.id for conv in conversations.list_conversations().data}
+        history = await auth_client.get(path)
+        assert history.status_code == 200, history.text
+        assert history.json()["data"] == []
+        reviewer_input = {
+            "host_id": host_id,
+            "workspace": workspace,
+            "repository": "nested/project",
+            "pr_url": pr_url,
+            "expected_base_sha": base_sha,
+            "expected_head_sha": current_head,
+            "agent_id": reviewer.id,
+            "harness": "codex-native",
+            "profile_id": "backend",
+            "profile_digest": role_digest,
+            "model": "review-model",
+            "reasoning_effort": "high",
+        }
+        capture = await auth_client.post(
+            path, headers={"Idempotency-Key": "project-capture"}, json=reviewer_input
+        )
+        assert capture.status_code == 201, capture.text
+        captured = capture.json()["review"]
+        assert captured["target"] == review.target.model_dump()
+        assert {conv.id for conv in conversations.list_conversations().data} == before
+        assert not launches
+        assert (await auth_client.get(path)).json()["data"] == [captured]
+        start_path = f"/v1/studio/reviews/{captured['id']}/start"
+        current_head = "c" * 40
+        stale = await auth_client.post(
+            start_path, headers={"Idempotency-Key": "project-start"}, json={}
+        )
+        assert stale.status_code == 409, stale.text
+        assert {conv.id for conv in conversations.list_conversations().data} == before
+        current_head = "b" * 40
+        started = await auth_client.post(
+            start_path, headers={"Idempotency-Key": "project-start"}, json={}
+        )
+        assert started.status_code == 200, started.text
+        started_review = started.json()
+        assert started_review["dispatch_status"] == "running", started.text
+        review_id = captured["id"]
+        assert started_review["reviewer_session_id"] == review_id
+        replay = await auth_client.post(
+            start_path, headers={"Idempotency-Key": "project-start"}, json={}
+        )
+        assert replay.json() == started_review
+        assert {conv.id for conv in conversations.list_conversations().data} == before | {
+            review_id
+        }
+        assert [frame.session_id for frame in launches] == [review_id]
+        assert announcements == [("alice", review_id, expected_project_id)]
+        send_review.assert_awaited_once()
+        legacy_capture.assert_not_awaited()
+        legacy_patch.assert_not_awaited()
+        conv = conversations.get_conversation(review_id)
+        assert conv is not None
+        assert (conv.host_id, conv.workspace, conv.project_id, conv.parent_conversation_id) == (
+            host_id,
+            workspace,
+            expected_project_id,
+            None,
+        )
+        assert conv.model_override == "review-model" and conv.reasoning_effort == "high"
+        assert permissions.get(RESERVED_USER_PUBLIC, review_id) is None
+        reviewer_path = f"/v1/sessions/{review_id}/studio/review"
+        assert (await auth_client.get(reviewer_path)).json() == started_review
+        for private_path in (path, reviewer_path):
+            private = await auth_client.get(private_path, headers={"X-Forwarded-Email": "bob"})
+            assert private.status_code == 404, private.text
+        runs_path = path.replace("/reviews", "/review-runs")
+        headers = {"Idempotency-Key": "project-review-run"}
+        roster = {
+            "reviewers": [
+                reviewer_input,
+                {**reviewer_input, "model": "second-review-model"},
+            ],
+            "collaborators": ["bob"],
+        }
+        unknown_collaborator = await auth_client.post(runs_path, headers=headers, json=roster)
+        assert unknown_collaborator.status_code == 404, unknown_collaborator.text
+        empty_history = await auth_client.get(runs_path, params={"pr_url": pr_url})
+        assert empty_history.json()["entries"] == []
+        permissions.ensure_user("bob")
+        run_capture = await auth_client.post(runs_path, headers=headers, json=roster)
+        assert run_capture.status_code == 200, run_capture.text
+        run = run_capture.json()
+        members = {member["id"] for member in run["reviewers"]}
+        assert len(members) == 2
+        assert run["target"] == captured["target"]
+        assert all(member["run_id"] == run["id"] for member in run["reviewers"])
+        assert {conv.id for conv in conversations.list_conversations().data} == before | {
+            review_id
+        }
+        assert (await auth_client.post(runs_path, headers=headers, json=roster)).json() == run
+        mismatched = {**reviewer_input, "expected_head_sha": "c" * 40}
+        invalid = await auth_client.post(
+            runs_path, headers=headers, json={"reviewers": [reviewer_input, mismatched]}
+        )
+        assert invalid.status_code == 422, invalid.text
+        assert (await auth_client.get(runs_path, params={"pr_url": pr_url})).json() == {
+            "entries": [run],
+            "next_cursor": None,
+        }
+
+        run_path = f"/v1/studio/review-runs/{run['id']}"
+        shared_path = "/v1/studio/shared-reviews"
+        bob_headers = {"X-Forwarded-Email": "bob"}
+        shared = await auth_client.get(shared_path, headers=bob_headers)
+        assert shared.status_code == 200, shared.text
+        assert shared.headers["Cache-Control"] == "no-store"
+        assert shared.json() == {
+            "entries": [
+                {
+                    "id": run["id"],
+                    "project_name": expected_project_name,
+                    "repository": run["target"]["repository"],
+                    "pr_number": run["target"]["pr_number"],
+                    "head_sha": current_head,
+                    "created_at": run["created_at"],
+                }
+            ],
+            "next_cursor": None,
+        }
+        outsider = {"X-Forwarded-Email": "eve"}
+        assert (await auth_client.get(shared_path, headers=outsider)).json()["entries"] == []
+        discussion = f"{run_path}/discussion"
+        assert (await auth_client.get(discussion, headers=outsider)).status_code == 404
+        shared_view = await auth_client.get(discussion, headers=bob_headers)
+        assert shared_view.status_code == 200, shared_view.text
+        assert shared_view.json()["can_ask"]
+        assert not shared_view.json()["can_publish_inline"]
+        assert not shared_view.json()["can_use_review_workspace"]
+        revoked = await auth_client.delete(
+            f"{discussion}/collaborators", params={"user_id": "bob"}
+        )
+        assert revoked.status_code == 204
+        assert (await auth_client.post(runs_path, headers=headers, json=roster)).json() == run
+        assert (await auth_client.get(shared_path, headers=bob_headers)).json()["entries"] == []
+        assert (await auth_client.get(discussion, headers=bob_headers)).status_code == 404
+        frozen = await auth_client.get(f"{run_path}/patch")
+        assert frozen.status_code == 200, frozen.text
+        assert frozen.json()["patch"] == captured_patch
+        assert frozen.json()["sha256"] == run["patch_sha256"]
+        cited = await auth_client.get(
+            f"{run_path}/patch", params={"path": "hello", "side": "head", "line": 1}
+        )
+        assert cited.json()["source_line"] == "after"
+        invalid_citation = await auth_client.get(
+            f"{run_path}/patch", params={"path": "hello", "side": "base", "line": 200}
+        )
+        assert invalid_citation.json()["source_line"] is None
+        forbidden_patch = await auth_client.get(
+            f"{run_path}/patch", headers={"X-Forwarded-Email": "bob"}
+        )
+        assert forbidden_patch.status_code == 404
+        current_head = "c" * 40
+        stale_run = await auth_client.post(f"{run_path}/start", json={})
+        assert stale_run.status_code == 200, stale_run.text
+        assert set(stale_run.json()["errors"]) == members
+        assert all(
+            member["launch_error"]
+            for member in (await auth_client.get(run_path)).json()["reviewers"]
+        )
+        assert len(launches) == 1
+        current_head = "b" * 40
+        patch = captured_patch.replace("+after", "+different")
+        drift = await auth_client.post(f"{run_path}/start", json={})
+        assert drift.status_code == 200, drift.text
+        assert len(drift.json()["errors"]) == len(members)
+        assert len(launches) == 1
+        patch = captured_patch
+        started_run = await auth_client.post(f"{run_path}/start", json={})
+        assert started_run.status_code == 200, started_run.text
+        assert started_run.json()["errors"] == {}
+        assert all(
+            member["launch_error"] is None for member in started_run.json()["run"]["reviewers"]
+        )
+        assert {
+            member["reviewer_session_id"] for member in started_run.json()["run"]["reviewers"]
+        } == members
+        assert {conv.id for conv in conversations.list_conversations().data} == before | {
+            review_id
+        } | members
+        assert send_review.await_count == 3
+        await auth_client.post(f"{run_path}/start", json={})
+        assert send_review.await_count == 3
+        consolidation = await auth_client.get(f"{run_path}/report")
+        assert consolidation.status_code == 200, consolidation.text
+        assert {entry["review_id"] for entry in consolidation.json()["reviewers"]} == members
+        assert consolidation.json()["findings"] == []
+        auto_drafts = f"{run_path}/discussion/inline-drafts/from-report"
+        assert (await auth_client.post(auto_drafts, json={})).json()["state"] == "waiting"
+        finding = {
+            "title": "Validate the input",
+            "detail": "The new branch accepts invalid values.",
+            "severity": "high",
+            "path": "hello",
+            "side": "head",
+            "line": 1,
+        }
+
+        def save_assistant_message(member_id: str, text: str) -> None:
+            conversations.append(
+                member_id,
+                [
+                    NewConversationItem(
+                        type="message",
+                        response_id=uuid4().hex,
+                        data=MessageData(
+                            role="assistant",
+                            content=[{"type": "output_text", "text": text}],
+                            agent=reviewer.id,
+                        ),
+                    )
+                ],
+            )
+            conversations.set_session_live_status(member_id, "idle")
+
+        for member_id in members:
+            envelope = json.dumps(
+                {
+                    "review_id": member_id,
+                    "base_sha": base_sha,
+                    "head_sha": current_head,
+                    "summary": "Independent reviewer report",
+                    "findings": [finding, {**finding, "line": 200}],
+                }
+            )
+            save_assistant_message(member_id, "```studio-review-v1\n" + envelope + "\n```")
+        ready = await auth_client.get(f"{run_path}/report")
+        assert ready.status_code == 200, ready.text
+        assert len(ready.json()["findings"]) == 1
+        assert set(ready.json()["findings"][0]["review_ids"]) == members
+        assert all(
+            entry["report"]["citation_validation"] == "checked"
+            and entry["report"]["unverified_findings"][0]["line"] == 200
+            for entry in ready.json()["reviewers"]
+        )
+        assert "finding_key" not in ready.json()["findings"][0]
+        keyed_report = await auth_client.get(
+            f"{run_path}/report", params={"include_finding_keys": True}
+        )
+        finding_key = keyed_report.json()["findings"][0]["finding_key"]
+        assert (
+            await auth_client.post(auto_drafts, json={}, headers={"X-Forwarded-Email": "bob"})
+        ).status_code == 404
+        captured_head = current_head
+        current_head = "c" * 40
+        assert (await auth_client.post(auto_drafts, json={})).status_code == 409
+        current_head = captured_head
+        prepared = await auth_client.post(auto_drafts, json={})
+        assert prepared.json() == {"state": "prepared", "eligible": 1, "created": 1}
+        assert (await auth_client.post(auto_drafts, json={})).json()["created"] == 0
+        [auto_draft] = (await auth_client.get(f"{run_path}/discussion")).json()["inline_drafts"]
+        assert auto_draft["thread"] == {"kind": "finding", "finding_key": finding_key}
+        assert auto_draft["anchor"]["start"] == 1
+        assert auto_draft["body"] == finding["detail"]
+        assert auto_draft["publication_state"] == "draft" and inline_writes == []
+        auto_draft_path = f"{run_path}/discussion/inline-drafts/{auto_draft['id']}"
+        assert (
+            await auth_client.post(f"{auto_draft_path}/discard", json={"version": 1})
+        ).status_code == 204
+        assert (await auth_client.post(auto_drafts, json={})).json()["created"] == 0
+        assert (await auth_client.get(f"{run_path}/discussion")).json()["inline_drafts"] == []
+        reproduction_path = f"{run_path}/findings/{finding_key}/reproductions"
+        assert (await auth_client.get(reproduction_path)).json() == []
+        side = {
+            "archive_sha256": "e" * 64,
+            "archive_bytes": 10_240,
+            "state": "exited",
+            "exit_code": 0,
+            "oom_killed": False,
+            "elapsed_ms": 250,
+            "output": "x" * 8192,
+            "output_sha256": "f" * 64,
+            "output_bytes": 8192,
+            "output_truncated": False,
+        }
+        receipt = {
+            "schema_version": "omnigent.studio.reproduction.v1",
+            "observed_at": "2026-11-05T00:00:00Z",
+            "runtime": "docker-no-network",
+            "image_id": "sha256:" + "1" * 64,
+            "command": ["python", "check.py"],
+            "timeout_seconds": 60,
+            "source": {
+                "run_id": run["id"],
+                "pr_url": pr_url,
+                "patch_sha256": run["patch_sha256"],
+                "base_sha": base_sha,
+                "head_sha": current_head,
+            },
+            "base": {**side, "commit": base_sha},
+            "head": {**side, "commit": current_head, "exit_code": 1},
+        }
+        artifacts_path = f"{run_path}/findings/{finding_key}/evidence"
+        artifact_params = {"patch_sha256": run["patch_sha256"]}
+        png = b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/lX8AAAAASUVORK5CYII="
+        )
+        upload_png = {"content": png, "headers": {"Content-Type": "image/png"}}
+        assert (await auth_client.get(artifacts_path)).json() == []
+        assert (
+            await auth_client.post(artifacts_path, params={"patch_sha256": "0" * 64}, **upload_png)
+        ).status_code == 409
+        assert (
+            await auth_client.post(
+                artifacts_path,
+                params=artifact_params,
+                content=b"<svg/>",
+                headers={"Content-Type": "image/png"},
+            )
+        ).status_code == 422
+        assert (
+            await auth_client.post(
+                artifacts_path,
+                params=artifact_params,
+                content=b" " * (64 * 1024 + 1),
+                headers={"Content-Type": "application/json"},
+            )
+        ).status_code == 413
+        png_upload = await auth_client.post(artifacts_path, params=artifact_params, **upload_png)
+        assert png_upload.status_code == 200, png_upload.text
+        screenshot = png_upload.json()
+        assert screenshot["source"] == receipt["source"]
+        assert screenshot["provenance"] == "uploaded"
+        assert screenshot["byte_size"] == len(png)
+        assert (
+            await auth_client.post(artifacts_path, params=artifact_params, **upload_png)
+        ).json() == screenshot
+        screenshot_url = f"{artifacts_path}/{screenshot['digest']}"
+        downloaded = await auth_client.get(screenshot_url)
+        assert downloaded.content == png
+        assert downloaded.headers["content-type"] == "image/png"
+        assert downloaded.headers["cache-control"] == "no-store"
+        assert downloaded.headers["x-content-type-options"] == "nosniff"
+        with monkeypatch.context() as corrupt:
+            corrupt.setattr(artifact_store, "get", lambda _key: png[:-1] + b"!")
+            assert (await auth_client.get(screenshot_url)).status_code == 409
+        metrics = {
+            "method": "Median of three runs",
+            "metrics": [{"label": "Latency", "unit": "ms", "baseline": 10, "observed": 20}],
+        }
+        repeated_metrics = {**metrics, "metrics": metrics["metrics"] * 2}
+        assert (
+            await auth_client.post(artifacts_path, params=artifact_params, json=repeated_metrics)
+        ).status_code == 422
+        measurement_upload = await auth_client.post(
+            artifacts_path, params=artifact_params, json=metrics
+        )
+        assert measurement_upload.status_code == 200, measurement_upload.text
+        measurement = measurement_upload.json()
+        assert measurement["measurements"] == metrics
+        assert {entry["digest"] for entry in (await auth_client.get(artifacts_path)).json()} == {
+            measurement["digest"],
+            screenshot["digest"],
+        }
+        manifest = {
+            "name": "finding.png",
+            "digest": screenshot["digest"],
+            "media_type": "image/png",
+            "byte_size": len(png),
+        }
+        receipt["base"]["evidence"] = [manifest]
+        receipt["head"]["evidence"] = [manifest]
+        stale_receipt = {
+            **receipt,
+            "source": {**receipt["source"], "patch_sha256": "0" * 64},
+        }
+        assert (await auth_client.post(reproduction_path, json=stale_receipt)).status_code == 409
+        unknown_finding = f"{run_path}/findings/{'0' * 64}/reproductions"
+        assert (await auth_client.post(unknown_finding, json=receipt)).status_code == 404
+        too_large = await auth_client.post(
+            reproduction_path,
+            content=b" " * (192 * 1024 + 1),
+            headers={"Content-Type": "application/json"},
+        )
+        assert too_large.status_code == 413
+        attached = await auth_client.post(reproduction_path, json=receipt)
+        assert attached.status_code == 200, attached.text
+        evidence = attached.json()
+        assert evidence["provenance"] == "uploaded" and evidence["receipt"] == receipt
+        assert (await auth_client.post(reproduction_path, json=receipt)).json() == evidence
+        assert (await auth_client.get(reproduction_path)).json() == [evidence]
+        check = {
+            **artifact_params,
+            "receipt_digest": evidence["digest"],
+            "filename": "finding.png",
+        }
+        assert (
+            await auth_client.post(artifacts_path, params=check, **upload_png)
+        ).status_code == 422
+        wrong_bytes = {**upload_png, "content": png[:-1] + b"!"}
+        assert (
+            await auth_client.post(artifacts_path, params={**check, "side": "head"}, **wrong_bytes)
+        ).status_code == 409
+        for side_name in ("base", "head"):
+            params = {**check, "side": side_name}
+            linked = await auth_client.post(artifacts_path, params=params, **upload_png)
+            assert linked.status_code == 200, linked.text
+            assert (
+                await auth_client.post(artifacts_path, params=params, **upload_png)
+            ).json() == linked.json()
+        assert linked.json()["checks"] == [
+            {
+                "receipt_digest": evidence["digest"],
+                "name": "finding.png",
+                "side": side_name,
+                "commit": commit,
+            }
+            for side_name, commit in (("base", base_sha), ("head", current_head))
+        ]
+        foreign_headers = {"X-Forwarded-Email": "bob"}
+        assert (
+            await auth_client.get(reproduction_path, headers=foreign_headers)
+        ).status_code == 404
+        assert (
+            await auth_client.post(reproduction_path, json=receipt, headers=foreign_headers)
+        ).status_code == 404
+        review_store = StudioReviewStore(db_uri)
+        for member_id in members:
+            member = review_store.get(member_id, owner_user_id="alice")
+            assert member is not None
+            snapshot = review_store.get_report_snapshot(member)
+            assert snapshot is not None
+            assert set(json.loads(snapshot)) == {"state", "summary", "findings", "message_id"}
+        save_assistant_message(next(iter(members)), "A later response from the reviewer.")
+        assert (await auth_client.get(f"{run_path}/report")).json() == ready.json()
+        assert (await auth_client.get(reproduction_path)).json() == [evidence]
+        discussion_path = f"{run_path}/discussion"
+        collaborators_path = f"{discussion_path}/collaborators"
+        assert (await auth_client.get(discussion_path, headers=foreign_headers)).status_code == 404
+        permissions.ensure_user("bob")
+        grant = await auth_client.post(collaborators_path, json={"user_id": "bob"})
+        assert grant.status_code == 204, grant.text
+        shared = await auth_client.get(discussion_path, headers=foreign_headers)
+        assert shared.status_code == 200, shared.text
+        view = shared.json()
+        assert view["collaborators"] is None and view["can_comment"] is True
+        assert view["can_attach_evidence"] is False
+        assert view["review_workspace_host_id"] is None
+        owner_view = (await auth_client.get(discussion_path)).json()
+        assert owner_view["can_attach_evidence"] is True
+        assert owner_view["review_workspace_host_id"] == host_id
+        creator_path = f"{run_path}/creator-preview"
+        creator_contract_path = "/v1/studio/creator/review-panel"
+        assert (await auth_client.get(creator_path)).status_code == 404
+        assert (await auth_client.get(creator_contract_path)).status_code == 404
+        with monkeypatch.context() as creator_env:
+            creator_env.setenv("OMNIGENT_STUDIO_CREATOR_PILOT", "1")
+            assert (await auth_client.get(discussion_path)).json()["creator_available"] is True
+            contract = await auth_client.get(creator_contract_path)
+            assert contract.status_code == 200
+            assert (await auth_client.get(creator_path)).json() == contract.json()
+            assert contract.headers["Cache-Control"] == "no-store"
+            definition = contract.json()["template"]
+            preview = await auth_client.post(creator_path, json=definition)
+            assert preview.status_code == 200, preview.text
+            assert preview.headers["Cache-Control"] == "no-store"
+            built = preview.json()
+            assert built["panel"] == definition
+            assert (built["run_id"], built["base_sha"], built["head_sha"]) == (
+                run["id"],
+                base_sha,
+                current_head,
+            )
+            assert (
+                await auth_client.post(creator_path, json={**definition, "script": "x"})
+            ).status_code == 422
+            assert (
+                await auth_client.post(
+                    creator_path, json=definition, headers={"X-Forwarded-Email": "eve"}
+                )
+            ).status_code == 404
+            installation = f"{run_path}/creator-installation"
+            grants = ["review.read", "review.openProof", "review.attachProof"]
+            install = {"expected_revision": 0, "panel": definition, "digest": built["digest"]}
+            assert (await auth_client.put(installation, json=install)).status_code == 409
+            first = await auth_client.put(
+                installation, json={**install, "approved_capabilities": grants}
+            )
+            assert first.status_code == 200, first.text
+            first_state = first.json()
+            assert (
+                first_state["selected_version"] == 1 and first_state["active_panel"] == definition
+            )
+            assert (await auth_client.get(installation, headers=foreign_headers)).json()[
+                "history"
+            ] == []
+            assert (
+                await auth_client.get(installation, headers={"X-Forwarded-Email": "eve"})
+            ).status_code == 404
+            updated = {**definition, "title": "Open receipts", "proof_action": "open"}
+            next_preview = (await auth_client.post(creator_path, json=updated)).json()
+            update_install = {
+                "expected_revision": first_state["revision"],
+                "panel": updated,
+                "digest": next_preview["digest"],
+            }
+            assert (await auth_client.put(installation, json=update_install)).status_code == 409
+            second = await auth_client.put(
+                installation, json={**update_install, "approved_capabilities": grants[:2]}
+            )
+            assert second.status_code == 200, second.text
+            second_state = second.json()
+            assert second_state["selected_version"] == 2
+            assert [entry["version"] for entry in second_state["history"]] == [2, 1]
+            assert (await auth_client.put(installation, json=update_install)).status_code == 409
+            rolled_back = await auth_client.patch(
+                installation,
+                json={
+                    "expected_revision": second_state["revision"],
+                    "version": 1,
+                    "approved_capabilities": grants,
+                },
+            )
+            assert rolled_back.status_code == 200, rolled_back.text
+            restored = rolled_back.json()
+            assert restored["selected_version"] == 1 and restored["active_panel"] == definition
+            disabled = await auth_client.patch(
+                installation, json={"expected_revision": restored["revision"], "version": None}
+            )
+            assert disabled.status_code == 200, disabled.text
+            assert disabled.json()["active_panel"] is None
+            assert (await auth_client.get(installation)).json() == disabled.json()
+            assert (await auth_client.get(discussion_path)).status_code == 200
+        assert (view["base_sha"], view["head_sha"], view["patch"]) == (
+            base_sha,
+            current_head,
+            captured_patch,
+        )
+        assert view["findings"][0]["key"] == finding_key
+        assert {"workspace", "host_id", "reviewer_session_id"}.isdisjoint(view)
+        assert (await auth_client.get(run_path, headers=foreign_headers)).status_code == 404
+        assert (await auth_client.get(screenshot_url, headers=foreign_headers)).content == png
+        assert (
+            await auth_client.post(
+                artifacts_path, params=artifact_params, json=metrics, headers=foreign_headers
+            )
+        ).status_code == 404
+        shared_evidence = (
+            await auth_client.get(reproduction_path, headers=foreign_headers)
+        ).json()
+        assert shared_evidence[0]["receipt"]["head"] == evidence["receipt"]["head"]
+        assert {"command", "source"}.isdisjoint(shared_evidence[0]["receipt"])
+        assert (
+            await auth_client.post(reproduction_path, json=receipt, headers=foreign_headers)
+        ).status_code == 404
+        checked_patch = "diff --git a/hello b/hello\n--- a/hello\n+++ b/hello\n"
+        checked_patch += "@@ -1 +1 @@\n-after\n+fixed\n"
+        fix = {
+            **{key: value for key, value in receipt.items() if key not in {"base", "head"}},
+            "schema_version": "omnigent.studio.fix-verification.v1",
+            "proposed_patch_sha256": hashlib.sha256(checked_patch.encode()).hexdigest(),
+            "included_paths": ["hello"],
+            "before": receipt["head"],
+            "after": {**side, "commit": "f" * 40},
+            "outcome": "fail_to_pass",
+            "patch": checked_patch,
+        }
+        for forged in (
+            {**fix, "patch": checked_patch.replace("fixed", "changed")},
+            {**fix, "outcome": "pass_to_pass"},
+        ):
+            assert (await auth_client.post(reproduction_path, json=forged)).status_code == 422
+        wrong_revision = {**fix, "source": {**fix["source"], "patch_sha256": "0" * 64}}
+        assert (await auth_client.post(reproduction_path, json=wrong_revision)).status_code == 409
+        fix_attachment = await auth_client.post(reproduction_path, json=fix)
+        assert fix_attachment.status_code == 200, fix_attachment.text
+        assert fix_attachment.json()["receipt"] == fix
+        assert (
+            await auth_client.post(reproduction_path, json=fix)
+        ).json() == fix_attachment.json()
+        shared_checks = (await auth_client.get(reproduction_path, headers=foreign_headers)).json()
+        shared_fix = next(item["receipt"] for item in shared_checks if "patch" in item["receipt"])
+        assert shared_fix["patch"] == checked_patch and shared_fix["outcome"] == "fail_to_pass"
+        assert {"command", "source"}.isdisjoint(shared_fix)
+        message = {
+            "id": uuid4().hex,
+            "anchor": {"kind": "finding", "finding_key": finding_key},
+            "body": "Can we reproduce this with an empty input?",
+        }
+        comment_path = f"{discussion_path}/comments"
+        oversized = await auth_client.post(
+            comment_path,
+            content=b" " * (20 * 1024 + 1),
+            headers={**foreign_headers, "Content-Type": "application/json"},
+        )
+        assert oversized.status_code == 413
+        comment = await auth_client.post(comment_path, headers=foreign_headers, json=message)
+        assert comment.status_code == 200, comment.text
+        assert comment.json()["author"] == "bob"
+        replay = await auth_client.post(comment_path, headers=foreign_headers, json=message)
+        assert replay.json() == comment.json()
+        conflict = await auth_client.post(
+            comment_path, headers=foreign_headers, json={**message, "body": "Another message"}
+        )
+        assert conflict.status_code == 409
+        line_message = {
+            **message,
+            "id": uuid4().hex,
+            "anchor": {"kind": "diff", "path": "hello", "side": "head", "start": 1, "end": 1},
+        }
+        assert (await auth_client.post(comment_path, json=line_message)).status_code == 200
+        invalid_anchor = {**line_message["anchor"], "end": 2}
+        invalid_range = await auth_client.post(
+            comment_path, json={**line_message, "id": uuid4().hex, "anchor": invalid_anchor}
+        )
+        assert invalid_range.status_code == 422
+        assert {
+            item["author"] for item in (await auth_client.get(discussion_path)).json()["comments"]
+        } == {
+            "alice",
+            "bob",
+        }
+        cannot_share = await auth_client.post(
+            collaborators_path, headers=foreign_headers, json={"user_id": "eve"}
+        )
+        assert cannot_share.status_code == 404
+        assert (
+            await auth_client.delete(collaborators_path, params={"user_id": "bob"})
+        ).status_code == 204
+        assert (await auth_client.get(screenshot_url, headers=foreign_headers)).status_code == 404
+        assert (await auth_client.get(artifacts_path, headers=foreign_headers)).status_code == 404
+        assert (await auth_client.get(discussion_path, headers=foreign_headers)).status_code == 404
+        assert (
+            await auth_client.get(reproduction_path, headers=foreign_headers)
+        ).status_code == 404
+        assert (
+            await auth_client.post(comment_path, headers=foreign_headers, json=message)
+        ).status_code == 404
+
+        private_run = await auth_client.get(run_path, headers={"X-Forwarded-Email": "bob"})
+        assert private_run.status_code == 404, private_run.text
+
+        planned = await auth_client.post(
+            runs_path,
+            headers={"Idempotency-Key": "project-review-plan"},
+            json={
+                **roster,
+                "coordinator": {**reviewer_input, "model": "planning-model"},
+                "required_reviewer_indices": [0],
+            },
+        )
+        assert planned.status_code == 200, planned.text
+        planned_run = planned.json()
+        planning_id = planned_run["coordinator"]["id"]
+        planned_members = {entry["run_role"]: entry for entry in planned_run["reviewers"]}
+        required, optional = planned_members["required"], planned_members["candidate"]
+        plan_path = f"/v1/studio/review-runs/{planned_run['id']}"
+
+        async def start_directly(member_id: str) -> int:
+            started = await auth_client.post(
+                f"/v1/studio/reviews/{member_id}/start",
+                headers={"Idempotency-Key": f"manual-start-{member_id}"},
+                json={},
+            )
+            return started.status_code
+
+        assert await start_directly(required["id"]) == 409
+        planning = await auth_client.post(f"{plan_path}/start", json={})
+        assert planning.status_code == 200, planning.text
+        assert planning.json()["errors"] == {}
+        assert [frame.session_id for frame in launches[-1:]] == [planning_id]
+        assert send_review.await_count == 4
+        assert (await auth_client.post(f"{plan_path}/start", json={})).status_code == 200
+        assert send_review.await_count == 4
+        coordinator = conversations.get_conversation(planning_id)
+        assert coordinator is not None and coordinator.project_id == expected_project_id
+        assert coordinator.title == "Orchestrator PR #42"
+        assert coordinator.labels["omnigent.studio.review"] == "true"
+        proposal = {
+            "coordinator_id": planning_id,
+            "base_sha": base_sha,
+            "head_sha": current_head,
+            "decisions": [
+                {
+                    "review_id": required["id"],
+                    "selected": False,
+                    "reason": "No coverage needed",
+                    "assignment": None,
+                },
+                {
+                    "review_id": optional["id"],
+                    "selected": True,
+                    "reason": "Covers the change",
+                    "assignment": None,
+                },
+            ],
+        }
+
+        def save_proposal() -> None:
+            save_assistant_message(
+                planning_id, "```studio-review-plan-v2\n" + json.dumps(proposal) + "\n```"
+            )
+
+        save_proposal()
+        rejected = (await auth_client.get(f"{plan_path}/report")).json()
+        assert rejected["proposal"]["state"] == "incomplete"
+        assert rejected["proposal"]["error"] == "The plan must select every required reviewer"
+        assert rejected["reviewers"] == []
+        proposal["decisions"][0]["selected"] = True
+        proposal["decisions"][1]["selected"] = False
+        save_proposal()
+        rejected = (await auth_client.get(f"{plan_path}/report")).json()
+        assert rejected["proposal"]["state"] == "incomplete"
+        assert "give each selected reviewer an assignment" in rejected["proposal"]["error"]
+        proposal["decisions"][0]["assignment"] = {
+            "objective": "Verify the changed behavior",
+            "acceptance_criterion": None,
+            "expected_evidence": "Cite the changed line and regression test",
+        }
+        save_proposal()
+        proposed = (await auth_client.get(f"{plan_path}/report")).json()["proposal"]
+        assert proposed["state"] == "ready" and proposed["plan"] == proposal
+        stale_approval = await auth_client.post(
+            f"{plan_path}/start", json={"proposal_digest": "0" * 64}
+        )
+        assert stale_approval.status_code == 409
+        current_head = "c" * 40
+        stale_revision = await auth_client.post(
+            f"{plan_path}/start", json={"proposal_digest": proposed["digest"]}
+        )
+        assert stale_revision.status_code == 409
+        assert (await auth_client.get(plan_path)).json()["plan"] is None
+        current_head = "b" * 40
+        assert send_review.await_count == 4
+        approval = await auth_client.post(
+            f"{plan_path}/start", json={"proposal_digest": proposed["digest"]}
+        )
+        assert approval.status_code == 200, approval.text
+        assert approval.json()["errors"] == {}
+        assert approval.json()["run"]["plan"] == proposal
+        assert [frame.session_id for frame in launches[-2:]] == [planning_id, required["id"]]
+        assert await start_directly(optional["id"]) == 409
+        assert conversations.get_conversation(optional["id"]) is None
+        assert (
+            await auth_client.post(
+                f"{plan_path}/start", json={"proposal_digest": proposed["digest"]}
+            )
+        ).status_code == 200
+        assert send_review.await_count == 5
+        save_assistant_message(planning_id, "A later coordinator message.")
+        assert (await auth_client.get(plan_path)).json()["plan"] == proposal
+        report = (await auth_client.get(f"{plan_path}/report")).json()
+        assert [entry["review_id"] for entry in report["reviewers"]] == [required["id"]]
+        assert report["proposal"] is None
+
+        # Bob may use the shared diff but his question runs under his own account.
+        assert (
+            await auth_client.post(collaborators_path, json={"user_id": "bob"})
+        ).status_code == 204
+        bob_host = uuid4().hex
+        _register_online_host(auth_app, bob_host, "bob")
+        auth_app.state.host_store.upsert_on_connect(
+            bob_host, "Bob host", "bob", configured_harnesses={"codex-native": True}
+        )
+        questions_path = f"{discussion_path}/questions"
+        question = {
+            "id": uuid4().hex,
+            "anchor": {"kind": "finding", "finding_key": finding_key},
+            "body": "Which path accepts the invalid input?",
+            "reviewer_key": view["reports"][0]["key"],
+        }
+        forbidden_host = await auth_client.post(
+            questions_path,
+            headers=foreign_headers,
+            json={**question, "host_id": host_id, "workspace": workspace},
+        )
+        assert forbidden_host.status_code in (403, 404), forbidden_host.text
+        assert send_review.await_count == 5
+        request_body = {**question, "host_id": bob_host, "workspace": "/bob-checkout"}
+        asked = await auth_client.post(questions_path, headers=foreign_headers, json=request_body)
+        assert asked.status_code == 200, asked.text
+        private_question = asked.json()
+        assert private_question["status"] == "accepted", asked.text
+        assert send_review.await_count == 6
+        private_session_id = private_question["session_id"]
+        private_session = conversations.get_conversation(private_session_id)
+        assert private_session is not None
+        assert (
+            private_session.host_id,
+            private_session.workspace,
+            private_session.project_id,
+        ) == (bob_host, "/bob-checkout", None)
+        assert permissions.get("bob", private_session_id).level == LEVEL_OWNER
+        assert permissions.get(RESERVED_USER_PUBLIC, private_session_id) is None
+        assert (
+            await auth_client.post(questions_path, headers=foreign_headers, json=request_body)
+        ).json() == private_question
+        assert send_review.await_count == 6
+        private_path = f"{questions_path}/{question['id']}"
+        assert (await auth_client.get(private_path)).status_code == 404
+        assert (await auth_client.get(discussion_path)).json()["questions"] == []
+        assert (
+            await auth_client.post(f"{private_path}/share", headers=foreign_headers, json={})
+        ).status_code == 409
+        prompt = send_review.await_args.args[2].data["content"][0]["text"]
+        assert base_sha in prompt and current_head in prompt and "Which path accepts" in prompt
+        assert '"line": 1, "text": "after"' in prompt
+        citations = [{"path": "hello", "side": "head", "line": 1, "quote": "after"}]
+        response_body = {
+            "question_id": question["id"],
+            "base_sha": base_sha,
+            "head_sha": current_head,
+            "answer": "The changed condition at hello:1 admits the invalid case.",
+            "citations": citations,
+        }
+        reply = "```studio-review-answer-v2\n" + json.dumps(response_body) + "\n```"
+
+        def question_echo(text: str, session_id: str = private_session_id) -> None:
+            conversations.append(
+                session_id,
+                [
+                    NewConversationItem(
+                        type="message",
+                        response_id=uuid4().hex,
+                        data=MessageData(
+                            role="user", content=[{"type": "input_text", "text": text}]
+                        ),
+                    )
+                ],
+            )
+
+        question_echo(prompt)
+        save_assistant_message(private_session_id, reply)
+        question_echo("Unrelated input after the captured question")
+        different_answer = {**response_body, "answer": "The latest reply should not be shared."}
+        save_assistant_message(
+            private_session_id,
+            "```studio-review-answer-v2\n" + json.dumps(different_answer) + "\n```",
+        )
+        observed = await auth_client.get(private_path, headers=foreign_headers)
+        assert observed.json()["answer"] == response_body["answer"], observed.text
+        assert observed.json()["citations"] == citations
+        assert (await auth_client.get(discussion_path)).json()["agent_answers"] == []
+        published = await auth_client.post(
+            f"{private_path}/share", headers=foreign_headers, json={}
+        )
+        assert published.status_code == 200, published.text
+        shared_answer = (await auth_client.get(discussion_path)).json()["agent_answers"][0]
+        assert shared_answer["answer"] == response_body["answer"]
+        assert shared_answer["citations"] == citations
+        assert shared_answer["requested_by"] == "bob"
+        assert "session_id" not in shared_answer
+        assert (
+            await auth_client.delete(collaborators_path, params={"user_id": "bob"})
+        ).status_code == 204
+        assert (await auth_client.get(private_path, headers=foreign_headers)).status_code == 404
+        send_review.side_effect = RuntimeError("The input acknowledgement was lost")
+        owner_question = {**question, "id": uuid4().hex}
+        uncertain = await auth_client.post(questions_path, json=owner_question)
+        assert uncertain.status_code == 200 and uncertain.json()["status"] == "unknown"
+        owner_session = conversations.get_conversation(uncertain.json()["session_id"])
+        assert owner_session is not None and owner_session.project_id == expected_project_id
+        assert (
+            await auth_client.post(questions_path, json=owner_question)
+        ).json() == uncertain.json()
+        assert send_review.await_count == 7
+        send_review.side_effect = None
+        proposal_request = {**owner_question, "id": uuid4().hex, "action": "propose_fix"}
+        invalid_anchor = {
+            **proposal_request,
+            "anchor": {"kind": "diff", "path": "hello", "side": "head", "start": 1, "end": 1},
+        }
+        assert (await auth_client.post(questions_path, json=invalid_anchor)).status_code == 422
+        proposed = await auth_client.post(questions_path, json=proposal_request)
+        assert proposed.status_code == 200 and proposed.json()["status"] == "accepted"
+        fix_session = proposed.json()["session_id"]
+        proposal_prompt = send_review.await_args.args[2].data["content"][0]["text"]
+        assert "studio-fix-proposal-v1" in proposal_prompt
+        assert proposed.json()["action"] == "propose_fix"
+        question_echo(proposal_prompt, fix_session)
+        proposal_response = {
+            **response_body,
+            "question_id": proposal_request["id"],
+            "answer": "Reject invalid input.",
+            "proposed_patch": checked_patch,
+        }
+        save_assistant_message(
+            fix_session, "```studio-fix-proposal-v1\n" + json.dumps(proposal_response) + "\n```"
+        )
+        fix_path = f"{questions_path}/{proposal_request['id']}"
+        saved_proposal = (await auth_client.get(fix_path)).json()
+        assert saved_proposal["proposed_patch"] == checked_patch
+        assert saved_proposal["answer_state"] == "ready"
+        assert (await auth_client.post(f"{fix_path}/share", json={})).status_code == 409
+        assert (await auth_client.get(fix_path, headers=foreign_headers)).status_code == 404
+        fix_digest = fix_attachment.json()["digest"]
+        rereview_path = f"{reproduction_path}/{fix_digest}/re-review"
+        assert (
+            await auth_client.post(rereview_path, json={}, headers=foreign_headers)
+        ).status_code == 404
+        current_head = "c" * 40
+        assert (await auth_client.post(rereview_path, json={})).status_code == 409
+        assert send_review.await_count == 8
+        current_head = "b" * 40
+        rereviewed = await auth_client.post(rereview_path, json={})
+        assert rereviewed.status_code == 200, rereviewed.text
+        candidate = rereviewed.json()["run"]
+        assert rereviewed.json()["errors"] == {}
+        assert candidate["target"]["base_sha"] == current_head
+        assert candidate["target"]["head_sha"] == fix["after"]["commit"]
+        assert candidate["target"]["candidate"]["run_id"] == run["id"]
+        assert candidate["target"]["candidate"]["attachment_digest"] == fix_digest
+        candidate_members = candidate["reviewers"]
+        assert len(candidate_members) == len(run["reviewers"])
+        for delivery in send_review.await_args_list[-len(candidate_members) :]:
+            candidate_prompt = delivery.args[2].data["content"][0]["text"]
+            assert "This is a candidate re-review" in candidate_prompt
+            assert "+fixed" in candidate_prompt and "-before" not in candidate_prompt
+        assert (await auth_client.post(rereview_path, json={})).json()["run"]["id"] == candidate[
+            "id"
+        ]
+        assert send_review.await_count == 8 + len(candidate_members)
+        evidence = (await auth_client.get(reproduction_path)).json()
+        assert (
+            next(item for item in evidence if item["digest"] == fix_digest)["candidate_run_id"]
+            == candidate["id"]
+        )
+        candidate_path = f"/v1/studio/review-runs/{candidate['id']}"
+        assert (await auth_client.get(f"{candidate_path}/patch")).json()["patch"] == checked_patch
+        candidate_view = (await auth_client.get(f"{candidate_path}/discussion")).json()
+        assert candidate_view["candidate"]["finding_key"] == finding_key
+        drafts_path = f"{discussion_path}/inline-drafts"
+        owner_draft = {"id": uuid4().hex, "anchor": owner_question["anchor"], "body": "Draft."}
+        assert (
+            await auth_client.post(f"{candidate_path}/discussion/inline-drafts", json=owner_draft)
+        ).status_code == 409
+        assert (
+            await auth_client.post(collaborators_path, json={"user_id": "bob"})
+        ).status_code == 204
+        created_draft = await auth_client.post(drafts_path, json=owner_draft)
+        assert created_draft.status_code == 200, created_draft.text
+        initial_draft = created_draft.json()
+        assert initial_draft["anchor"] == {
+            "kind": "diff",
+            "path": "hello",
+            "side": "head",
+            "start": 1,
+            "end": 1,
+        }
+        assert (await auth_client.post(drafts_path, json=owner_draft)).json() == initial_draft
+        assert (await auth_client.get(discussion_path, headers=foreign_headers)).json()[
+            "inline_drafts"
+        ] == []
+        bob_draft = {
+            **owner_draft,
+            "id": uuid4().hex,
+            "anchor": {
+                "kind": "diff",
+                "path": "hello",
+                "side": "base",
+                "start": 1,
+                "end": 1,
+            },
+        }
+        assert (
+            await auth_client.post(drafts_path, json=bob_draft, headers=foreign_headers)
+        ).status_code == 200
+        bad_anchor = {**bob_draft, "anchor": {**bob_draft["anchor"], "start": 2, "end": 2}}
+        assert (
+            await auth_client.post(drafts_path, json=bad_anchor, headers=foreign_headers)
+        ).status_code == 422
+        assert (await auth_client.get(discussion_path)).json()["inline_drafts"] == [initial_draft]
+        draft_path = f"{drafts_path}/{initial_draft['id']}"
+        update = {"version": 1, "body": "Suggest keeping the validation at this line."}
+        assert (
+            await auth_client.put(draft_path, json=update, headers=foreign_headers)
+        ).status_code == 404
+        edited = await auth_client.put(draft_path, json=update)
+        assert edited.status_code == 200 and edited.json()["version"] == 2
+        assert (await auth_client.put(draft_path, json=update)).json() == edited.json()
+        assert (
+            await auth_client.put(draft_path, json={**update, "body": "A stale overwrite."})
+        ).status_code == 409
+        for _ in range(2):
+            assert (
+                await auth_client.post(f"{draft_path}/discard", json={"version": 2})
+            ).status_code == 204
+        assert (await auth_client.get(discussion_path)).json()["inline_drafts"] == []
+        assert (await auth_client.post(drafts_path, json=owner_draft)).status_code == 409
+        left_draft = {**bob_draft, "id": uuid4().hex, "body": "Comment on the removed line."}
+        right_draft = {**owner_draft, "id": uuid4().hex, "body": "Comment on the added line."}
+        for draft in (left_draft, right_draft):
+            assert (await auth_client.post(drafts_path, json=draft)).status_code == 200
+        publication = f"{discussion_path}/inline-publication"
+        selection = {
+            "selected": [{"id": draft["id"], "version": 1} for draft in (left_draft, right_draft)]
+        }
+        assert (
+            await auth_client.post(
+                f"{publication}/preview", json=selection, headers=foreign_headers
+            )
+        ).status_code == 403
+        assert (
+            await auth_client.post(
+                collaborators_path,
+                json={"user_id": "bob", "can_publish": True},
+                headers=foreign_headers,
+            )
+        ).status_code == 404
+        publisher = {"user_id": "bob", "can_publish": True}
+        assert (await auth_client.post(collaborators_path, json=publisher)).status_code == 204
+        delegated_view = (await auth_client.get(discussion_path, headers=foreign_headers)).json()
+        assert (
+            delegated_view["can_publish_inline"] and not delegated_view["can_use_review_workspace"]
+        )
+        assert [draft["id"] for draft in delegated_view["inline_drafts"]] == [bob_draft["id"]]
+        assert {draft["id"] for draft in delegated_view["publication_drafts"]} == {
+            bob_draft["id"],
+            left_draft["id"],
+            right_draft["id"],
+        }
+        delegated = await auth_client.post(
+            f"{publication}/preview", json=selection, headers=foreign_headers
+        )
+        assert delegated.status_code == 200, delegated.text
+        delegated_confirm = {**selection, "confirm": True, "digest": delegated.json()["digest"]}
+        assert (
+            await auth_client.post(f"{publication}/confirm", json=delegated_confirm)
+        ).status_code == 409
+        assert (
+            await auth_client.post(
+                collaborators_path, json={"user_id": "bob", "can_publish": False}
+            )
+        ).status_code == 204
+        assert (
+            await auth_client.post(
+                f"{publication}/confirm", json=delegated_confirm, headers=foreign_headers
+            )
+        ).status_code == 403
+        assert inline_writes == []
+        assert (await auth_client.post(collaborators_path, json=publisher)).status_code == 204
+        preview = await auth_client.post(f"{publication}/preview", json=selection)
+        assert preview.status_code == 200, preview.text
+        preview = preview.json()
+        assert preview["head_sha"] == current_head
+        assert [draft["body"] for draft in preview["drafts"]] == [
+            left_draft["body"],
+            right_draft["body"],
+        ]
+        assert inline_writes == []
+        confirm = {**selection, "confirm": True, "digest": preview["digest"]}
+        assert (
+            await auth_client.post(f"{publication}/confirm", json={**confirm, "confirm": 1})
+        ).status_code == 422
+        assert (
+            await auth_client.post(f"{publication}/confirm", json={**confirm, "digest": "0" * 64})
+        ).status_code == 409
+        captured_head = current_head
+        current_head = "c" * 40
+        assert (await auth_client.post(f"{publication}/confirm", json=confirm)).status_code == 409
+        current_head = captured_head
+        assert inline_writes == []
+        posted = await auth_client.post(
+            f"{publication}/confirm", json=delegated_confirm, headers=foreign_headers
+        )
+        assert posted.status_code == 200, posted.text
+        posted_drafts = posted.json()["drafts"]
+        assert [draft["publication_state"] for draft in posted_drafts] == ["posted", "unknown"]
+        assert {draft["publication_confirmed_by"] for draft in posted_drafts} == {"bob"}
+        assert posted_drafts[0]["provider_url"] == f"{pr_url}#discussion_r1"
+        assert posted_drafts[1]["provider_url"] is None
+        assert len({draft["publication_reference"] for draft in posted_drafts}) == 2
+        assert inline_writes == [
+            {
+                "repository": "nested/project",
+                "pr_url": pr_url,
+                "anchor": draft["anchor"],
+                "body": (
+                    f"{draft['body']}\n\n"
+                    f"<!-- omnigent-delivery:{posted_draft['publication_reference']} -->"
+                ),
+                "base_sha": base_sha,
+                "head_sha": current_head,
+            }
+            for draft, posted_draft in zip(preview["drafts"], posted_drafts, strict=True)
+        ]
+        assert (
+            await auth_client.post(
+                f"{publication}/confirm", json=delegated_confirm, headers=foreign_headers
+            )
+        ).json() == posted.json()
+        assert len(inline_writes) == 2
+        assert (
+            await auth_client.put(f"{drafts_path}/{left_draft['id']}", json=update)
+        ).status_code == 409
+        check_request = {**owner_question, "id": uuid4().hex, "action": "propose_check"}
+        assert (
+            await auth_client.post(questions_path, json=check_request, headers=foreign_headers)
+        ).status_code == 403
+        check_response = await auth_client.post(questions_path, json=check_request)
+        assert check_response.status_code == 200, check_response.text
+        assert check_response.json()["status"] == "accepted"
+        check_session = check_response.json()["session_id"]
+        check_prompt = send_review.await_args.args[2].data["content"][0]["text"]
+        assert "studio-check-proposal-v1" in check_prompt
+        question_echo(check_prompt, check_session)
+        check = {
+            "command": ["python", "check.py"],
+            "paths": ["hello"],
+            "timeout_seconds": 60,
+            "evidence_files": ["finding.png"],
+        }
+        check_answer = {
+            **response_body,
+            "question_id": check_request["id"],
+            "answer": "Compare the check on both revisions.",
+            "proposed_check": check,
+        }
+        save_assistant_message(
+            check_session, "```studio-check-proposal-v1\n" + json.dumps(check_answer) + "\n```"
+        )
+        check_path = f"{questions_path}/{check_request['id']}"
+        private_check = await auth_client.get(check_path)
+        assert private_check.status_code == 200, private_check.text
+        assert private_check.json()["proposed_check"] == check
+        assert (await auth_client.post(f"{check_path}/share", json={})).status_code == 409
+        checked = {
+            **receipt,
+            "proposal_id": check_request["id"],
+            "included_paths": check["paths"],
+            "requested_evidence": check["evidence_files"],
+        }
+        assert (
+            await auth_client.post(
+                reproduction_path, json={**checked, "command": ["python", "other.py"]}
+            )
+        ).status_code == 409
+        assert (
+            await auth_client.post(reproduction_path, json={**checked, "proposal_id": uuid4().hex})
+        ).status_code == 409
+        attached_check = await auth_client.post(reproduction_path, json=checked)
+        assert attached_check.status_code == 200, attached_check.text
+        assert attached_check.json()["receipt"] == checked
+        assert (
+            await auth_client.post(reproduction_path, json=checked)
+        ).json() == attached_check.json()
+        hosted_content = png + b"x" * (512 * 1024)
+        hosted_file = {
+            **manifest,
+            "byte_size": len(hosted_content),
+            "digest": hashlib.sha256(hosted_content).hexdigest(),
+        }
+        hosted_receipt = {
+            **checked,
+            "base": {**checked["base"], "evidence": [hosted_file]},
+            "head": {**checked["head"], "evidence": [hosted_file]},
+        }
+        run_check = f"{check_path}/run-check"
+        approval = {
+            "proposal_digest": private_check.json()["proposed_check_digest"],
+            "image_id": hosted_receipt["image_id"],
+            "confirm": True,
+        }
+        assert (
+            await auth_client.post(run_check, json=approval, headers=foreign_headers)
+        ).status_code == 403
+        assert (
+            await auth_client.post(run_check, json={**approval, "confirm": 1})
+        ).status_code == 422
+        assert (
+            await auth_client.post(run_check, json={**approval, "proposal_digest": "0" * 64})
+        ).status_code == 409
+        assert hosted_frames == []
+        started_check = await auth_client.post(run_check, json=approval)
+        assert started_check.status_code == 202, started_check.text
+        job = started_check.json()
+        assert job["state"] == "running"
+
+        async def wait_for_check(path):
+            async with asyncio.timeout(5):
+                while True:
+                    current = (await auth_client.get(path)).json()["check_job"]
+                    if current["state"] != "running":
+                        return current
+                    await asyncio.sleep(0.05)
+
+        finished = await wait_for_check(check_path)
+        assert finished["id"] == job["id"]
+        assert finished["state"] == "attached" and finished["files_attached"] == 2
+        assert (await auth_client.post(run_check, json=approval)).json() == finished
+        assert [
+            frame.op.rsplit("_", 1)[1]
+            for frame in hosted_frames
+            if not frame.op.endswith("_release")
+        ] == [
+            "start",
+            "status",
+            "file",
+            "file",
+            "file",
+            "file",
+        ]
+        assert hosted_frames[0].params == {
+            "job_id": job["id"],
+            "proposal_id": check_request["id"],
+            "image_id": approval["image_id"],
+            "repository": "nested/project",
+            "proposal": check,
+            "source": receipt["source"],
+        }
+        assert [
+            (frame.params["side"], frame.params["offset"])
+            for frame in hosted_frames
+            if frame.op.endswith("_file")
+        ] == [
+            ("base", 0),
+            ("base", 512 * 1024),
+            ("head", 0),
+            ("head", 512 * 1024),
+        ]
+        downloaded_check = await auth_client.get(f"{artifacts_path}/{hosted_file['digest']}")
+        assert downloaded_check.content == hosted_content
+
+        lost_request = {**check_request, "id": uuid4().hex}
+        lost = await auth_client.post(questions_path, json=lost_request)
+        assert lost.status_code == 200, lost.text
+        lost_session = lost.json()["session_id"]
+        question_echo(send_review.await_args.args[2].data["content"][0]["text"], lost_session)
+        lost_answer = {**check_answer, "question_id": lost_request["id"]}
+        save_assistant_message(
+            lost_session, "```studio-check-proposal-v1\n" + json.dumps(lost_answer) + "\n```"
+        )
+        lost_path = f"{questions_path}/{lost_request['id']}"
+        assert (await auth_client.get(lost_path)).json()["proposed_check"] == check
+        lose_check_ack = True
+        lost_run = await auth_client.post(f"{lost_path}/run-check", json=approval)
+        assert lost_run.status_code == 202, lost_run.text
+        unconfirmed = await wait_for_check(lost_path)
+        assert unconfirmed["state"] == "unconfirmed" and unconfirmed["receipt_digest"] is None
+        assert (
+            await auth_client.post(f"{lost_path}/run-check", json=approval)
+        ).json() == unconfirmed
+        assert [
+            frame.params["job_id"] for frame in hosted_frames if frame.op.endswith("_start")
+        ] == [job["id"], unconfirmed["id"]]
+        synthesis_path = f"{plan_path}/synthesis"
+        assert (await auth_client.post(synthesis_path, json={})).status_code == 409
+        specialist_envelope = {
+            "review_id": required["id"],
+            "base_sha": base_sha,
+            "head_sha": current_head,
+            "summary": "Backend reviewer inspected the changed condition.",
+            "findings": [finding],
+        }
+        save_assistant_message(
+            required["id"], "```studio-review-v1\n" + json.dumps(specialist_envelope) + "\n```"
+        )
+        sends_before_synthesis = send_review.await_count
+        requested = await auth_client.post(synthesis_path, json={})
+        assert requested.status_code == 200, requested.text
+        operation = requested.json()
+        assert operation["state"] == "running"
+        assert send_review.await_args.args[1] == planning_id
+        assert send_review.await_args.args[3] is None
+        prompt = send_review.await_args.args[2].data["content"][0]["text"]
+        assert specialist_envelope["summary"] in prompt
+        assert current_head in prompt
+        assert (await auth_client.post(synthesis_path, json={})).json() == operation
+        assert send_review.await_count == sends_before_synthesis + 1
+        assert (await auth_client.get(f"{plan_path}/report")).json()["synthesis"][
+            "state"
+        ] == "pending"
+
+        question_echo(prompt, planning_id)
+        synthesis = {
+            "run_id": planned_run["id"],
+            "input_digest": operation["request_hash"],
+            "summary": "The backend reviewer flagged the input condition. No tests were run.",
+            "conflicts": [],
+            "follow_up": {
+                "review_id": required["id"],
+                "finding_key": None,
+                "question": "Which guard covers an absent input?",
+            },
+        }
+        save_assistant_message(
+            planning_id, "```studio-review-synthesis-v2\n" + json.dumps(synthesis) + "\n```"
+        )
+        question_echo("A later question", planning_id)
+        save_assistant_message(planning_id, "An unrelated later response.")
+        observed = (await auth_client.get(f"{plan_path}/report")).json()
+        assert observed["synthesis"]["state"] == "ready"
+        assert observed["synthesis"]["summary"] == synthesis["summary"]
+        assert len(observed["findings"]) == 1
+        assert "finding_key" not in observed["findings"][0]
+        assert observed["synthesis"]["follow_up"] == synthesis["follow_up"]
+        ask_path = f"{plan_path}/follow-up/ask"
+        return_path = f"{plan_path}/follow-up/return"
+        assert (await auth_client.post(return_path, json={})).status_code == 409
+        unchanged = current_head
+        current_head = "c" * 40 if unchanged != "c" * 40 else "d" * 40
+        assert (await auth_client.post(ask_path, json={})).status_code == 409
+        assert send_review.await_count == sends_before_synthesis + 1
+        current_head = unchanged
+
+        async def relay(path: str, destination: str, expected: str, answer: str) -> None:
+            sent_before = send_review.await_count
+            sent = await auth_client.post(path, json={})
+            assert sent.is_success, sent.text
+            turn = sent.json()
+            assert turn["state"] == "running"
+            assert send_review.await_args.args[1] == destination
+            sent_prompt = send_review.await_args.args[2].data["content"][0]["text"]
+            assert expected in sent_prompt and current_head in sent_prompt
+            assert (await auth_client.post(path, json={})).json() == turn
+            assert send_review.await_count == sent_before + 1
+            question_echo(sent_prompt, destination)
+            envelope = {
+                "run_id": planned_run["id"],
+                "input_digest": turn["request_hash"],
+                "result": "answered",
+                "detail": answer,
+            }
+            save_assistant_message(
+                destination,
+                "```studio-review-follow-up-v1\n" + json.dumps(envelope) + "\n```",
+            )
+
+        evidence = "The guard returns before processing absent inputs."
+        await relay(ask_path, required["id"], synthesis["follow_up"]["question"], evidence)
+        assessment = "The source resolves the gap. A test result is still unavailable."
+        await relay(return_path, planning_id, evidence, assessment)
+        finished = (await auth_client.get(f"{plan_path}/report")).json()
+        assert finished["follow_up"]["specialist"]["detail"] == evidence
+        assert finished["follow_up"]["coordinator"]["detail"] == assessment
+        assert finished["reviewers"] == observed["reviewers"]
+        return
+
+    created = await create_reviewer(request, "alice", review, review.id)
+    assert created.id == review.id
+    assert created.harness == review.profile.harness
+    assert created.runner_id is not None
+    assert created.project_id == expected_project_id
+    conv = conversations.get_conversation(review.id)
+    assert conv is not None
+    assert (conv.host_id, conv.workspace, conv.parent_conversation_id, conv.project_id) == (
+        host_id,
+        workspace,
+        None,
+        expected_project_id,
+    )
+    assert CREATED_BY_SESSION_LABEL_KEY not in conv.labels
+    assert conv.git_branch is None
+    assert conv.model_override == review.profile.model
+    assert conv.reasoning_effort == review.profile.reasoning_effort
+    owner = permissions.get("alice", conv.id)
+    assert owner is not None and owner.level == LEVEL_OWNER
+    assert permissions.get(RESERVED_USER_PUBLIC, conv.id) is None
+    assert [frame.session_id for frame in launches] == [conv.id]
+    assert announcements == [("alice", conv.id, expected_project_id)]
+    if expected_project_name is not None:
+        project_sessions = await auth_client.get(
+            "/v1/sessions", params={"project": expected_project_name, "visibility": "mine"}
+        )
+        assert project_sessions.status_code == 200, project_sessions.text
+        assert {row["id"] for row in project_sessions.json()["data"]} == {source["id"], conv.id}
+
+    send_callbacks: list[routes_events.ReviewSend] = []
+    routes_events.register_events_routes(
+        APIRouter(),
+        conversation_store=conversations,
+        agent_store=agents,
+        auth_provider=auth_provider,
+        permission_store=permissions,
+        register_review_send=send_callbacks.append,
+    )
+    wait_for_runner = AsyncMock(return_value=None)
+    monkeypatch.setattr(routes_events, "_get_runner_client", AsyncMock(return_value=None))
+    monkeypatch.setattr(routes_events, "_wait_for_runner_client", wait_for_runner)
+    event = SessionEventInput(
+        type="message",
+        data={"role": "user", "content": [{"type": "input_text", "text": "Review this diff."}]},
+    )
+    with pytest.raises(OmnigentError) as unavailable:
+        await send_callbacks[0](request, conv.id, event, created.runner_id)
+    assert unavailable.value.code == ErrorCode.RUNNER_UNAVAILABLE
+    assert wait_for_runner.await_args.kwargs["runner_id"] == created.runner_id
+    assert [frame.session_id for frame in launches] == [conv.id]

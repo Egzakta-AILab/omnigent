@@ -2,6 +2,7 @@
 
 import type { FileDiffMetadata } from "@pierre/diffs";
 import type { PullRequestChangedFile } from "@/hooks/usePullRequests";
+import type { ReviewSource } from "@/studio/reviews/api";
 
 /** Files whose path or previous path contains `query`, ignoring case and slash direction. */
 export function filterChangedPaths(
@@ -197,6 +198,75 @@ export function pullRequestRepoUrl(provider: string | null, prUrl: string): stri
   return match ? match[1] : null;
 }
 
+function patchFileStatus(
+  diff: FileDiffMetadata,
+  previousPath: string | null,
+): PullRequestChangedFile["status"] {
+  if (diff.type === "new") return "created";
+  if (diff.type === "deleted") return "deleted";
+  return previousPath ? "renamed" : "modified";
+}
+
+const GIT_QUOTE_ESCAPES: Record<string, number> = {
+  a: 7,
+  b: 8,
+  t: 9,
+  n: 10,
+  v: 11,
+  f: 12,
+  r: 13,
+  '"': 34,
+  "\\": 92,
+};
+
+/**
+ * A patch path as the repository names it. Git quotes paths with special or non-ASCII
+ * characters (`"caf\303\251.ts"`), escaping bytes in octal; anything else is returned as is.
+ */
+export function unquoteGitPath(path: string): string {
+  if (path.length < 2 || !path.startsWith('"') || !path.endsWith('"')) return path;
+  const bytes: number[] = [];
+  const body = path.slice(1, -1);
+  for (let index = 0; index < body.length; index++) {
+    const char = body[index];
+    if (char !== "\\") {
+      bytes.push(...new TextEncoder().encode(char));
+      continue;
+    }
+    const octal = /^[0-7]{3}/.exec(body.slice(index + 1));
+    if (octal) {
+      bytes.push(parseInt(octal[0], 8));
+      index += 3;
+      continue;
+    }
+    const escaped = GIT_QUOTE_ESCAPES[body[index + 1]];
+    if (escaped === undefined) return path;
+    bytes.push(escaped);
+    index += 1;
+  }
+  return new TextDecoder().decode(new Uint8Array(bytes));
+}
+
+/** The files one commit's patch changes, in patch order, keyed and named by repository path. */
+export function changedFilesFromPatch(
+  diffs: ReadonlyMap<string, FileDiffMetadata>,
+): PullRequestChangedFile[] {
+  return [...diffs].map(([path, diff]) => {
+    const prevName = diff.prevName ? unquoteGitPath(diff.prevName) : null;
+    const previousPath = prevName && prevName !== path ? prevName : null;
+    return {
+      path,
+      name: path.split("/").pop() ?? path,
+      status: patchFileStatus(diff, previousPath),
+      lines_added: diff.hunks.reduce((sum, hunk) => sum + hunk.additionLines, 0),
+      lines_removed: diff.hunks.reduce((sum, hunk) => sum + hunk.deletionLines, 0),
+      previous_path: previousPath,
+      bytes: null,
+      modified_at: null,
+    };
+  });
+}
+
 /**
  * The provider page for a changed file at the revision the list shows. Deleted files
  * link to the base repository at the base revision; others use the head (fork)
@@ -238,4 +308,57 @@ export function pullRequestFileUrl({
     default:
       return null;
   }
+}
+
+export function findingLine(
+  diff: FileDiffMetadata,
+  source: ReviewSource,
+  layout: "unified" | "split",
+): { side: "additions" | "deletions"; line: number; start: number; end: number } | null {
+  const base = source.side === "base";
+  for (const hunk of diff.hunks) {
+    for (const part of hunk.hunkContent) {
+      const count = part.type === "context" ? part.lines : base ? part.deletions : part.additions;
+      const first = base
+        ? hunk.deletionStart + part.deletionLineIndex - hunk.deletionLineIndex
+        : hunk.additionStart + part.additionLineIndex - hunk.additionLineIndex;
+      const offset = source.line - first;
+      if (offset < 0 || offset >= count) continue;
+      // Unified diffs number shared context using the head side.
+      const deletion = base && (part.type !== "context" || layout === "split");
+      const index = deletion ? part.deletionLineIndex : part.additionLineIndex;
+      const text = (deletion ? diff.deletionLines : diff.additionLines)[index + offset];
+      if (text === undefined) return null;
+      return {
+        side: deletion ? "deletions" : "additions",
+        line: deletion
+          ? source.line
+          : hunk.additionStart + part.additionLineIndex - hunk.additionLineIndex + offset,
+        start: 0,
+        end: text.replace(/\r?\n$/, "").length,
+      };
+    }
+  }
+  return null;
+}
+
+function diffRoot(section: HTMLElement): ParentNode {
+  const main = section.querySelector<HTMLElement>("[data-main-diff]") ?? section;
+  return main.querySelector(":scope > diffs-container")?.shadowRoot ?? main;
+}
+
+export function findDiffRow(
+  { side, line }: { side: "additions" | "deletions"; line: number },
+  section: HTMLElement,
+): HTMLElement | null {
+  const root = diffRoot(section);
+  // Split views give each side its own column; unified rows use one number per line.
+  const unified =
+    side === "deletions"
+      ? '[data-line-type="change-deletion"]'
+      : ':not([data-line-type="change-deletion"])';
+  return (
+    root.querySelector<HTMLElement>(`[data-${side}] [data-line="${line}"]`) ??
+    root.querySelector<HTMLElement>(`[data-line="${line}"]${unified}`)
+  );
 }

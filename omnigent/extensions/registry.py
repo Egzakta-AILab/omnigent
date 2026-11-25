@@ -25,6 +25,7 @@ from omnigent.extensions.api import (
     PageContribution,
     PrimaryNavigationContribution,
 )
+from omnigent.extensions.review_panel import ReviewPanelContribution
 from omnigent.version import VERSION
 
 ENTRY_POINT_GROUP = "omnigent.extensions"
@@ -303,6 +304,14 @@ def validate_manifest(manifest: ExtensionManifest) -> None:
         raise ExtensionValidationError(
             f"extension {manifest.id!r} requests unsupported permissions: "
             + ", ".join(invalid_permissions)
+        )
+
+    if manifest.review_panel is not None and (
+        not isinstance(manifest.review_panel, ReviewPanelContribution)
+        or manifest.entrypoints.browser is None
+    ):
+        raise ExtensionValidationError(
+            "review.panel requires a valid contribution and browser bundle"
         )
 
     for page in manifest.pages:

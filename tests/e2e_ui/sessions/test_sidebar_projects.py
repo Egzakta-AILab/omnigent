@@ -369,7 +369,7 @@ def test_project_menu_is_visible_without_hover(
     viewport: dict[str, int],
     has_touch: bool,
 ) -> None:
-    """Touch folders expose a menu containing New session without a long press."""
+    """Touch folders expose project session creation without a long press."""
     base_url, session_id = seeded_session
     project = f"Project with a long name to check action overlap {uuid.uuid4().hex[:6]}"
     page.goto(f"{base_url}/c/{session_id}")
@@ -386,10 +386,7 @@ def test_project_menu_is_visible_without_hover(
         shortcut = touch.get_by_role(
             "link", name=f"New session in {project}", exact=True, include_hidden=True
         )
-        if has_touch:
-            expect(shortcut).to_be_hidden()
-        else:
-            expect(shortcut).to_be_visible()
+        expect(shortcut).to_be_visible()
         kebab = touch.get_by_role("button", name=f"Project actions for {project}")
 
         for expanded in [True, False]:
@@ -407,7 +404,7 @@ def test_project_menu_is_visible_without_hover(
                 );
             }""")
             title_box = header.locator("span.truncate").bounding_box()
-            action_box = (kebab if has_touch else shortcut).bounding_box()
+            action_box = shortcut.bounding_box()
             assert title_box is not None and action_box is not None
             assert title_box["x"] + title_box["width"] <= action_box["x"]
 
@@ -425,11 +422,14 @@ def test_project_menu_is_visible_without_hover(
             touch.get_by_role("button", name=project, exact=True, include_hidden=True)
         ).to_have_attribute("aria-expanded", before)
         if has_touch:
-            menu_item.tap()
+            expect(menu_item).to_contain_text(f"New session in {project}")
+            touch.keyboard.press("Escape")
+            shortcut.tap()
         else:
             touch.keyboard.press("Escape")
             shortcut.click()
         expect(touch).to_have_url(f"{base_url}/?project={project.replace(' ', '%20')}")
+        expect(touch.get_by_test_id("new-chat-landing-input")).to_be_visible()
         if viewport["width"] < 768:
             expect(touch.get_by_role("button", name="Open sidebar", exact=True)).to_be_visible()
     finally:

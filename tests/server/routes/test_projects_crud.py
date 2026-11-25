@@ -89,6 +89,65 @@ async def test_create_project(project_client: httpx.AsyncClient) -> None:
     assert body["updated_at"] is None
 
 
+async def test_template_project_inherits_only_session_defaults_and_reopens(multi_user_client):
+    path = "/v1/projects"
+    alice = _as_user(ALICE)
+    defaults = {"workspace": "/src/repo", "host_id": "host", "base_branch": "main"}
+    parent = await multi_user_client.post(
+        path, headers=alice, json={"name": "Parent", "config": {**defaults, "secret": "dummy"}}
+    )
+    template_id = parent.json()["id"]
+    issue = {
+        "identifier": "KVAD-1576",
+        "title": "Work and Task",
+        "description": "Show acceptance criteria",
+        "url": "https://linear.app/kvark/issue/KVAD-1576",
+    }
+    body = {
+        "name": "Work item",
+        "template_project_id": template_id,
+        "source_key": "linear:w:i",
+        "linear_issue": issue,
+    }
+    rejected = await multi_user_client.post(path, headers=_as_user(BOB), json=body)
+    assert rejected.status_code == 404
+    legacy = await multi_user_client.post(
+        path,
+        headers=alice,
+        json={key: value for key, value in body.items() if key != "linear_issue"},
+    )
+    assert legacy.is_success and "linear_issue" not in legacy.json()["config"]
+    responses = await asyncio.gather(
+        *(multi_user_client.post(path, headers=alice, json=body) for _ in range(2))
+    )
+    assert all(response.is_success for response in responses)
+    first, replay = (response.json() for response in responses)
+    assert first == replay
+    assert first["id"] == legacy.json()["id"]
+    assert first["config"] == {
+        **defaults,
+        "use_worktree": True,
+        "template_project_id": template_id,
+        "source_key": "linear:w:i",
+        "linear_issue": issue,
+    }
+    updated = await multi_user_client.patch(
+        f"{path}/{first['id']}", headers=alice, json={"config": {}}
+    )
+    assert updated.json()["config"] == {
+        "source_key": "linear:w:i",
+        "template_project_id": template_id,
+        "linear_issue": issue,
+    }
+    another_parent = await multi_user_client.post(
+        path, headers=alice, json={"name": "Another parent"}
+    )
+    reopened = await multi_user_client.post(
+        path, headers=alice, json={**body, "template_project_id": another_parent.json()["id"]}
+    )
+    assert reopened.json()["id"] == first["id"]
+
+
 async def test_create_trims_and_rejects_empty(project_client: httpx.AsyncClient) -> None:
     """Names are trimmed; empty/whitespace-only names are rejected with 422."""
     resp = await project_client.post("/v1/projects", json={"name": "  Padded  "})
@@ -115,6 +174,46 @@ async def test_list_projects(project_client: httpx.AsyncClient) -> None:
     body = resp.json()
     assert body["object"] == "list"
     assert {p["name"] for p in body["data"]} == {"A", "B"}
+
+
+async def test_list_projects_pages_in_creation_order(
+    multi_user_client: httpx.AsyncClient,
+) -> None:
+    """A ``limit``/``after`` request pages the caller's own projects without gaps."""
+    for name in ("First", "Second", "Third"):
+        await multi_user_client.post("/v1/projects", json={"name": name}, headers=_as_user(ALICE))
+    bob = await multi_user_client.post("/v1/projects", json={"name": "Bob"}, headers=_as_user(BOB))
+
+    first = await multi_user_client.get(
+        "/v1/projects", params={"limit": 2}, headers=_as_user(ALICE)
+    )
+    assert first.status_code == 200, first.text
+    page = first.json()
+    assert len(page["data"]) == 2
+    assert page["has_more"] is True and page["last_id"] == page["data"][-1]["id"]
+
+    rest = await multi_user_client.get(
+        "/v1/projects", params={"limit": 2, "after": page["last_id"]}, headers=_as_user(ALICE)
+    )
+    assert rest.json()["has_more"] is False
+    paged = page["data"] + rest.json()["data"]
+    assert sorted(p["name"] for p in paged) == ["First", "Second", "Third"]
+    # Projects created in the same second fall back to id order.
+    keyset = sorted(paged, key=lambda p: (p["created_at"], p["id"]))
+    assert [p["id"] for p in paged] == [p["id"] for p in keyset]
+
+    foreign = await multi_user_client.get(
+        "/v1/projects", params={"after": bob.json()["id"]}, headers=_as_user(ALICE)
+    )
+    assert foreign.status_code == 400
+    unknown = await multi_user_client.get(
+        "/v1/projects", params={"after": "0" * 32}, headers=_as_user(ALICE)
+    )
+    assert unknown.status_code == 400
+    oversized = await multi_user_client.get(
+        "/v1/projects", params={"limit": 201}, headers=_as_user(ALICE)
+    )
+    assert oversized.status_code == 422
 
 
 async def test_get_project(project_client: httpx.AsyncClient) -> None:
@@ -159,6 +258,31 @@ async def test_create_and_get_roundtrips_config(project_client: httpx.AsyncClien
     assert created["config"] == cfg
     fetched = (await project_client.get(f"/v1/projects/{created['id']}")).json()
     assert fetched["config"] == cfg
+
+
+@pytest.mark.parametrize(
+    "repository",
+    [
+        {"url": "https://git.example.com/team/app.git", "branch": "main"},
+        # A legacy bare string, and a null, are stored as-is; the composer ignores them.
+        "https://git.example.com/team/app.git",
+        None,
+    ],
+    ids=["object", "legacy-string", "null"],
+)
+async def test_repository_config_is_stored_opaquely(
+    project_client: httpx.AsyncClient, repository: object
+) -> None:
+    """The saved repository round-trips through create, get and rename untouched."""
+    config = {"agent_id": "187b7cb7ac30abf4debfaa578d052ec6", "repository": repository}
+    created = (
+        await project_client.post("/v1/projects", json={"name": "Repo", "config": config})
+    ).json()
+    assert created["config"] == config
+    fetched = (await project_client.get(f"/v1/projects/{created['id']}")).json()
+    assert fetched["config"] == config
+    renamed = await project_client.patch(f"/v1/projects/{created['id']}", json={"name": "Renamed"})
+    assert renamed.json()["config"] == config
 
 
 async def test_patch_replaces_config(project_client: httpx.AsyncClient) -> None:

@@ -1,0 +1,14 @@
+# Apply after docker-compose.yaml to build this fork instead of upstream latest.
+name: egzakta-omnigent-studio
+
+services:
+  omnigent:
+    image: egzakta-omnigent-studio:${STUDIO_REVISION:?set STUDIO_REVISION to the checkout commit}
+    pull_policy: build
+    build:
+      args:
+        OMNIGENT_BUILD_SOURCE_COMMIT: "${STUDIO_REVISION}"
+    environment:
+      OMNIGENT_AUTH_ENABLED: "1"
+      OMNIGENT_STUDIO_CREATOR_PILOT: "${OMNIGENT_STUDIO_CREATOR_PILOT:-0}"
+      OMNIGENT_STUDIO_REVIEWS: "${OMNIGENT_STUDIO_REVIEWS:-1}"

@@ -11,18 +11,14 @@ import org.robolectric.RobolectricTestRunner
 class OriginsWorkspaceUiUrlTest {
     @Test
     fun `expands a bare workspace root`() {
-        assertEquals(
-            "https://dbc-a5d4177a-49dc.cloud.databricks.com/omnigent",
-            databricksWorkspaceUiUrl("https://dbc-a5d4177a-49dc.cloud.databricks.com"),
-        )
-        assertEquals(
+        listOf(
             "https://gtm-ai-agent.cloud.databricks.com/omnigent",
-            databricksWorkspaceUiUrl("https://gtm-ai-agent.cloud.databricks.com/"),
-        )
-        assertEquals(
             "https://adb-123.azuredatabricks.net/omnigent",
-            databricksWorkspaceUiUrl("https://adb-123.azuredatabricks.net"),
-        )
+        ).forEach { mount ->
+            val origin = mount.removeSuffix("/omnigent")
+            assertEquals(mount, databricksWorkspaceUiUrl(origin))
+            assertEquals(mount, databricksWorkspaceUiUrl("$origin/"))
+        }
     }
 
     @Test

@@ -90,29 +90,20 @@ class ServerStoreTest {
     }
 
     @Test
-    fun `a databricks workspace connects to its omnigent mount`() {
-        val store = storeWithPresets()
-
-        store.connect("https://dbc-a5d4177a-49dc.cloud.databricks.com")
-
-        assertEquals(
-            "https://dbc-a5d4177a-49dc.cloud.databricks.com/omnigent",
-            store.currentServerUrl(),
-        )
-        // The offered entry stays what the user typed.
-        assertEquals(
-            listOf("https://dbc-a5d4177a-49dc.cloud.databricks.com"),
-            store.recentServers(),
-        )
-    }
-
-    @Test
-    fun `a databricks url with a path is used as given`() {
+    fun `a workspace mount and its bare origin reconnect to the same page`() {
         val store = storeWithPresets()
 
         store.connect("https://ws.cloud.databricks.com/omnigent")
 
         assertEquals("https://ws.cloud.databricks.com/omnigent", store.currentServerUrl())
+
+        val mount = requireNotNull(store.currentServerUrl())
+        val origin = mount.removeSuffix("/omnigent")
+        assertEquals(listOf(mount), store.recentServers())
+        store.connect(origin)
+
+        assertEquals(mount, store.currentServerUrl())
+        assertEquals(listOf(origin, mount), store.recentServers())
     }
 
     @Test

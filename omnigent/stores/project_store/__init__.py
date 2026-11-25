@@ -88,6 +88,21 @@ class ProjectStore(ABC):
         ...
 
     @abstractmethod
+    def list_page(
+        self, *, user_id: str | None, limit: int, after_id: str | None = None
+    ) -> tuple[builtins.list[Project], bool]:
+        """
+        Return one page of the owner's projects in ``list`` order.
+
+        :param user_id: The owner whose projects to return.
+        :param limit: Maximum projects to return, at least 1.
+        :param after_id: Continue after this project, the previous page's last id.
+        :returns: ``(projects, has_more)``.
+        :raises ValueError: If ``after_id`` is not one of the owner's projects.
+        """
+        ...
+
+    @abstractmethod
     def update(
         self,
         project_id: str,
@@ -95,6 +110,7 @@ class ProjectStore(ABC):
         user_id: str | None,
         name: str | None = None,
         config: dict[str, Any] | None = None,
+        linear_issue: dict[str, str] | None = None,
     ) -> Project | None:
         """
         Update mutable fields of an owned project.
@@ -108,6 +124,7 @@ class ProjectStore(ABC):
             non-empty, unique among the owner's projects.
         :param config: New config object to replace the stored one, or ``None``
             to leave it unchanged. An empty dict clears the stored defaults.
+        :param linear_issue: Snapshot to store if the project has no saved issue details.
         :returns: The updated :class:`Project`, or ``None`` if not found.
         :raises OmnigentError: ``ALREADY_EXISTS`` if the new name collides with
             another of the owner's projects.

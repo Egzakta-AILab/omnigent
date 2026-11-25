@@ -71,8 +71,47 @@ describe("useExtensionHostServices", () => {
   it("declares a permission rule for every exposed host method", () => {
     const { result } = renderHook(() => useExtensionHostServices(extension), { wrapper });
     expect(Object.keys(result.current.methods).sort()).toEqual(
-      Object.keys(HOST_METHOD_PERMISSIONS).sort(),
+      Object.keys(HOST_METHOD_PERMISSIONS)
+        .filter((method) => !method.startsWith("linear."))
+        .sort(),
     );
+  });
+
+  it("resolves a Linear task by source key and finds its latest implementation session", async () => {
+    authenticatedFetchMock
+      .mockResolvedValueOnce(
+        Response.json({
+          data: [
+            {
+              id: "task-project",
+              name: "Task project",
+              config: { source_key: "linear:workspace:issue" },
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        Response.json({
+          has_more: false,
+          data: [
+            {
+              id: "review",
+              labels: { "omnigent.studio.issue": "KVAD-1576", "omnigent.studio.review": "true" },
+            },
+            { id: "implementation", labels: { "omnigent.studio.issue": "KVAD-1576" } },
+          ],
+        }),
+      );
+    const { result } = renderHook(
+      () => useExtensionHostServices({ ...extension, id: "egzakta.linear" }),
+      { wrapper },
+    );
+    await expect(
+      result.current.methods["linear.findTask"]?.(
+        { sourceKey: "linear:workspace:issue", issue: "KVAD-1576" },
+        signal(),
+      ),
+    ).resolves.toEqual({ projectId: "task-project", sessionId: "implementation" });
   });
 
   it("routes only to pages owned by the extension and preserves params", () => {

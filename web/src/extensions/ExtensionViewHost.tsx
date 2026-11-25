@@ -40,12 +40,14 @@ export function ExtensionViewHost({
   refresh,
   methods = NO_HOST_METHODS,
   events = NO_HOST_EVENTS,
+  embedded = false,
 }: {
   extension: ExtensionCatalogItem;
   page: ExtensionPage;
   refresh: () => Promise<ExtensionCatalogItem[]>;
   methods?: Readonly<Record<string, HostMethod>>;
   events?: Readonly<Record<string, unknown>>;
+  embedded?: boolean;
 }) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const portRef = useRef<MessagePort | null>(null);
@@ -100,7 +102,7 @@ export function ExtensionViewHost({
     setError(null);
     setFrameDocument(null);
     const refreshOnce = async () => {
-      if (staleRetryDoneRef.current) return [];
+      if (embedded || staleRetryDoneRef.current) return [];
       staleRetryDoneRef.current = true;
       return refresh();
     };
@@ -125,7 +127,7 @@ export function ExtensionViewHost({
       cancelled = true;
       closeRuntime();
     };
-  }, [closeRuntime, extension, page, refresh, retryKey]);
+  }, [closeRuntime, embedded, extension, page, refresh, retryKey]);
 
   useEffect(() => {
     const port = portRef.current;
@@ -296,7 +298,9 @@ export function ExtensionViewHost({
   }
 
   return (
-    <div className="extension-view-host relative flex h-full min-h-0 w-full flex-col overflow-hidden pt-14 md:pt-12">
+    <div
+      className={`extension-view-host relative flex h-full min-h-0 w-full flex-col overflow-hidden ${embedded ? "" : "pt-14 md:pt-12"}`}
+    >
       {frameDocument && (
         <iframe
           key={frameDocument.identity.nonce}
@@ -310,7 +314,9 @@ export function ExtensionViewHost({
         />
       )}
       {status !== "ready" && (
-        <div className="extension-view-status absolute inset-x-0 bottom-0 top-14 flex items-center justify-center bg-background md:top-12">
+        <div
+          className={`extension-view-status absolute inset-x-0 bottom-0 flex items-center justify-center bg-background ${embedded ? "top-0" : "top-14 md:top-12"}`}
+        >
           <Spinner className="size-5 text-muted-foreground" aria-label="Loading extension" />
         </div>
       )}

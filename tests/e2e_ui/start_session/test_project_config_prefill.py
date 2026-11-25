@@ -28,6 +28,7 @@ import json
 import re
 from typing import Any
 
+import pytest
 from playwright.async_api import Route, async_playwright, expect
 
 from tests._helpers.async_thread import run_in_fresh_loop as _run_in_fresh_loop
@@ -42,7 +43,7 @@ _CONFIG_WORKSPACE = "/work/configured-repo"
 # Bare create endpoint (POST captured); NOT the /{id}/... sub-routes.
 _SESSIONS_RE = re.compile(r"/v1/sessions(\?.*)?$")
 # One project config endpoint: /v1/projects/<id> (not the bare list).
-_PROJECT_CFG_RE = re.compile(r"/v1/projects/[^/?]+")
+_PROJECT_CFG_RE = re.compile(r"/v1/projects/[^/?]+(?:\?.*)?$")
 
 
 def _hosts_body() -> str:
@@ -98,23 +99,44 @@ def _project_config_body() -> str:
     )
 
 
-def test_composer_prefills_from_project_config(seeded_session: tuple[str, str]) -> None:
-    """A ``?project=`` visit seeds host / workspace / agent from stored config.
+@pytest.mark.parametrize(
+    ("mobile", "remembered"),
+    [(False, False), (True, False), (False, True)],
+    ids=["desktop", "mobile", "remembered-workspace"],
+)
+def test_composer_prefills_from_project_config(
+    seeded_session: tuple[str, str], mobile: bool, remembered: bool
+) -> None:
+    """Saved defaults launch normally and remembered settings browse a workspace before sending.
 
     The pinned agent (``ag_pinned_e2e``) and workspace (``/work/configured-repo``)
     come from ``config`` — NOT from the default-ranked Claude Code or a recent
     workspace — and ride along to ``POST /v1/sessions``.
     """
     base_url, session_id = seeded_session
-    _run_in_fresh_loop(_drive_prefill(base_url, session_id))
+    _run_in_fresh_loop(_drive_prefill(base_url, session_id, mobile, remembered))
 
 
-async def _drive_prefill(base_url: str, session_id: str) -> None:
+async def _drive_prefill(base_url: str, session_id: str, mobile: bool, remembered: bool) -> None:
     async with async_playwright() as pw:
         browser = await pw.chromium.launch()
-        page = await browser.new_page()
+        page = await browser.new_page(viewport={"width": 390, "height": 540} if mobile else None)
         try:
+            if remembered:
+                last_start = {
+                    _PROJECT_ID: {
+                        "agentId": "ag_pinned_e2e",
+                        "hostId": _HOST_ID,
+                        "workspace": _CONFIG_WORKSPACE,
+                        "configSignature": "[]",
+                    }
+                }
+                await page.add_init_script(
+                    "localStorage.setItem('omnigent:project-launch-defaults', "
+                    f"JSON.stringify({json.dumps(last_start)}));"
+                )
             create_bodies: list[dict[str, Any]] = []
+            events_sent: list[str] = []
 
             async def handle_hosts(route: Route) -> None:
                 await route.fulfill(
@@ -132,11 +154,14 @@ async def _drive_prefill(base_url: str, session_id: str) -> None:
                 )
 
             async def handle_project_config(route: Route) -> None:
-                await route.fulfill(
-                    status=200, content_type="application/json", body=_project_config_body()
-                )
+                project = json.loads(_project_config_body())
+                if remembered:
+                    project["config"] = {}
+                await route.fulfill(json=project)
 
             async def handle_events(route: Route) -> None:
+                if route.request.method == "POST":
+                    events_sent.append(route.request.method)
                 await route.fulfill(
                     status=200,
                     content_type="application/json",
@@ -163,6 +188,35 @@ async def _drive_prefill(base_url: str, session_id: str) -> None:
 
             await page.route("**/v1/hosts", handle_hosts)
             await stub_empty_host_picker_data(page, _HOST_ID)
+            if remembered:
+                await page.route(
+                    re.compile(rf"/v1/hosts/{_HOST_ID}/filesystem/work/configured-repo\?"),
+                    lambda route: route.fulfill(
+                        json={
+                            "object": "list",
+                            "data": [
+                                {
+                                    "name": "workspace-readme.md",
+                                    "path": f"{_CONFIG_WORKSPACE}/workspace-readme.md",
+                                    "type": "file",
+                                    "bytes": 24,
+                                    "modified_at": 0,
+                                }
+                            ],
+                            "has_more": False,
+                        }
+                    ),
+                )
+                await page.route(
+                    f"**/v1/projects/{_PROJECT_ID}/studio/files?**",
+                    lambda route: route.fulfill(
+                        json={
+                            "path": "workspace-readme.md",
+                            "content": "Project context fixture.",
+                            "truncated": False,
+                        }
+                    ),
+                )
             await page.route("**/v1/agents", handle_agents)
             await page.route("**/v1/sessions/projects", handle_projects_list)
             await page.route(_PROJECT_CFG_RE, handle_project_config)
@@ -178,24 +232,42 @@ async def _drive_prefill(base_url: str, session_id: str) -> None:
                 state="visible", timeout=30_000
             )
 
-            # The agent picker trigger reflects the config-pinned agent (Polly),
-            # not the default-ranked Claude Code — proof the config seed won.
+            # The agent picker reflects the project's saved or remembered agent.
             await expect(page.get_by_test_id("new-chat-landing-agent-select")).to_contain_text(
                 "Polly", timeout=15_000
             )
 
-            await page.get_by_test_id("new-chat-landing-input").fill("start here")
+            panel = page.get_by_role("complementary", name="Project workspace")
+            if mobile:
+                await page.get_by_role("button", name="Workspace", exact=True).click()
+            await expect(panel).to_be_visible()
+            if remembered:
+                await expect(
+                    panel.get_by_role("button", name="workspace-readme.md")
+                ).to_be_visible()
+                await panel.get_by_role("button", name="workspace-readme.md").click()
+                await expect(
+                    panel.get_by_text("Project context fixture.", exact=True)
+                ).to_be_visible()
+                await panel.get_by_role("button", name="Add file to prompt").click()
+            if mobile:
+                await panel.get_by_role("button", name="Back to chat", exact=True).click()
+            assert not create_bodies and not events_sent
+            composer = page.get_by_test_id("new-chat-landing-input")
+            await composer.fill("start here")
             await page.get_by_test_id("new-chat-landing-submit").click()
 
             await poll_until_async(lambda: len(create_bodies) == 1)
             body = create_bodies[0]
             assert body["host_id"] == _HOST_ID, body
-            # The create names its project and OMITS the fields still holding
-            # their untouched config seed, so the server default-fills them
-            # from that same config (one source of truth instead of a copy).
             assert body["project_id"] == _PROJECT_ID, body
-            assert "agent_id" not in body, body
-            assert "workspace" not in body, body
+            if remembered:
+                assert body["agent_id"] == "ag_pinned_e2e", body
+                assert body["workspace"] == _CONFIG_WORKSPACE, body
+            else:
+                # Untouched server defaults are filled by the server.
+                assert "agent_id" not in body, body
+                assert "workspace" not in body, body
         finally:
             await browser.close()
 

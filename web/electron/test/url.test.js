@@ -43,10 +43,7 @@ describe("defaultSchemeFor", () => {
 
 describe("normalizeUrl", () => {
   it("defaults a schemeless workspace URL to https and removes its path", () => {
-    assert.equal(
-      normalizeUrl("dbc-a5d4177a-49dc.cloud.databricks.com/omnigent"),
-      "https://dbc-a5d4177a-49dc.cloud.databricks.com/",
-    );
+    assert.equal(normalizeUrl("workspace.example.org/omnigent"), "https://workspace.example.org/");
   });
 
   it("defaults a bare remote host to https", () => {

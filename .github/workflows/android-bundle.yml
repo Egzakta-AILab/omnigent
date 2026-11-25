@@ -59,6 +59,10 @@ jobs:
           cache-read-only: false
 
       - name: Run unit tests and build release AAB
+        env:
+          # Robolectric downloads instrumented Android runtimes outside Gradle's
+          # repositories. Its default Central endpoint rate-limits hosted runners.
+          JAVA_TOOL_OPTIONS: -Drobolectric.dependency.repo.url=https://maven-central.storage-download.googleapis.com/maven2
         run: |
           ./gradlew testDebugUnitTest bundleRelease --no-daemon --console=plain \
             "-PversionCode=${{ inputs.version-code }}" \

@@ -23,13 +23,18 @@ None sends a message, so all stay fast and LLM-free.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+import shlex
+from base64 import b64decode
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from playwright.sync_api import Locator, Page, Route, expect
 
+from tests._helpers.pull_request_ui import open_session_pull_requests
 from tests.e2e_ui.conftest import (
     fetch_with_retry,
     open_right_rail,
@@ -188,7 +193,7 @@ def test_github_tab_shows_summary_checks_and_file_tree(
     page.goto(f"{base_url}/{'canvas/' if entry == 'canvas' else ''}c/{session_id}")
     rail = page.get_by_role("complementary", name="Workspace")
     if entry == "canvas":
-        page.get_by_test_id("composer-pr-link").click()
+        open_session_pull_requests(page, mobile=False)
     else:
         open_right_rail(page)
         rail.get_by_role("tab", name="Pull Requests").click()
@@ -273,7 +278,7 @@ def test_pr_diff_retry_keeps_associations(
         open_right_rail(page)
         panel.get_by_role("tab", name="Pull Requests").click()
     else:
-        page.get_by_test_id("composer-pr-link").click()
+        open_session_pull_requests(page, mobile=mobile)
     panel.get_by_role(
         "button", name=f"example.com/acme/app #{_PR_NUMBER} — Add the GitHub tab", exact=True
     ).click()
@@ -348,63 +353,74 @@ def test_composer_pr_link_opens_github_tab(
     page.set_viewport_size({"width": viewport_width, "height": 844 if is_mobile else 900})
     page.goto(f"{base_url}/c/{session_id}")
 
-    pr_link = page.get_by_test_id("composer-pr-link")
-    expect(pr_link).to_be_visible(timeout=30_000)
-    expect(pr_link).to_have_accessible_name(f"#{_PR_NUMBER}" if pr_count == 1 else "2 PRs")
-    expect(page.get_by_test_id("composer-workspace-dir")).to_have_text("demo-app")
-    expect(page.get_by_test_id("composer-git-branch")).to_have_text(branch)
-    context = page.get_by_test_id("composer-context-ring")
-    expect(context).to_have_accessible_name("66% of context used")
-    bar = page.get_by_test_id("composer-workspace-controls")
-    expect(bar.get_by_test_id("background-task-pill")).to_have_count(0)
-    expect(bar.get_by_test_id("subagent-task-pill")).to_have_count(0)
-    bar_bounds = bar.bounding_box()
-    assert bar_bounds is not None
-    # When the labels cannot all show in full, the bar collapses to icons (never
-    # ellipses); the collapse must be justified by the expanded layout not fitting.
-    collapsed = bar.get_attribute("data-labels") == "collapsed"
-    assert collapsed == workspace_bar_needs_collapse(bar), (viewport_width, font_size, pr_count)
-    font_sizes = {}
-    centers = {}
-    bounds = {}
-    for test_id in (
-        "composer-pr-link",
-        "composer-workspace-dir",
-        "composer-git-branch",
-        "composer-context-ring",
-    ):
-        indicator = page.get_by_test_id(test_id)
-        label = indicator.locator("span").last
-        parts = [("icon", indicator.locator("svg").first)]
-        # Only the directory and branch text collapse; the PR number and the
-        # context percentage stay visible in a crowded bar.
-        if collapsed and test_id in ("composer-workspace-dir", "composer-git-branch"):
-            expect(label).to_be_hidden()
-        elif test_id != "composer-context-ring":
-            expect(label).to_be_visible()
-            font_sizes[test_id] = label.evaluate("el => parseFloat(getComputedStyle(el).fontSize)")
-            parts.insert(0, ("label", label))
-        for part, element in parts:
-            rect = element.bounding_box()
-            assert rect is not None
-            bounds[f"{test_id}.{part}"] = rect
-            centers[f"{test_id}.{part}"] = rect["y"] + rect["height"] / 2
-    pr_bounds, context_bounds = pr_link.bounding_box(), context.bounding_box()
-    assert pr_bounds is not None and context_bounds is not None
-    group_gap = context_bounds["x"] - pr_bounds["x"] - pr_bounds["width"]
-    pair_gaps = {}
-    for test_id in ("composer-pr-link",):
-        icon, label = bounds[f"{test_id}.icon"], bounds[f"{test_id}.label"]
-        pair_gaps[test_id] = label["x"] - icon["x"] - icon["width"]
-    print(f"Composer fonts ({viewport_width}px, {font_size}px preference): {font_sizes}")
-    print(f"Composer centers: {centers}; group gap: {group_gap}; pair gaps: {pair_gaps}")
-    bar.screenshot(path=tmp_path / "workspace-bar.png", animations="disabled")
-    page.screenshot(path=tmp_path / "composer-pr-link.png", animations="disabled")
-
-    # Mobile has a full-screen drawer, not the desktop workspace tab strip.
     if is_mobile:
-        pr_link.tap()
+        expect(page.get_by_test_id("composer-workspace-controls")).to_have_count(0)
+        pr_link = page.get_by_role(
+            "button", name=re.compile(r"^(?:Conversation|Session) actions$")
+        )
+        pr_link.click()
+        expect(page.get_by_text("demo-app", exact=True)).to_be_visible()
+        page.get_by_role("menuitem", name="Pull Requests", exact=True).click()
     else:
+        pr_link = page.get_by_test_id("composer-pr-link")
+        expect(pr_link).to_be_visible(timeout=30_000)
+        expect(pr_link).to_have_accessible_name(f"#{_PR_NUMBER}" if pr_count == 1 else "2 PRs")
+        expect(page.get_by_test_id("composer-workspace-dir")).to_have_text("demo-app")
+        expect(page.get_by_test_id("composer-git-branch")).to_have_text(branch)
+        context = page.get_by_test_id("composer-context-ring")
+        expect(context).to_have_accessible_name("66% of context used")
+        bar = page.get_by_test_id("composer-workspace-controls")
+        expect(bar.get_by_test_id("background-task-pill")).to_have_count(0)
+        expect(bar.get_by_test_id("subagent-task-pill")).to_have_count(0)
+        bar_bounds = bar.bounding_box()
+        assert bar_bounds is not None
+        # When the labels cannot all show in full, the bar collapses to icons (never
+        # ellipses); the collapse must be justified by the expanded layout not fitting.
+        collapsed = bar.get_attribute("data-labels") == "collapsed"
+        assert collapsed == workspace_bar_needs_collapse(bar), (
+            viewport_width,
+            font_size,
+            pr_count,
+        )
+        font_sizes = {}
+        centers = {}
+        bounds = {}
+        for test_id in (
+            "composer-pr-link",
+            "composer-workspace-dir",
+            "composer-git-branch",
+            "composer-context-ring",
+        ):
+            indicator = page.get_by_test_id(test_id)
+            label = indicator.locator("span").last
+            parts = [("icon", indicator.locator("svg").first)]
+            # Only the directory and branch text collapse; the PR number and the
+            # context percentage stay visible in a crowded bar.
+            if collapsed and test_id in ("composer-workspace-dir", "composer-git-branch"):
+                expect(label).to_be_hidden()
+            elif test_id != "composer-context-ring":
+                expect(label).to_be_visible()
+                font_sizes[test_id] = label.evaluate(
+                    "el => parseFloat(getComputedStyle(el).fontSize)"
+                )
+                parts.insert(0, ("label", label))
+            for part, element in parts:
+                rect = element.bounding_box()
+                assert rect is not None
+                bounds[f"{test_id}.{part}"] = rect
+                centers[f"{test_id}.{part}"] = rect["y"] + rect["height"] / 2
+        pr_bounds, context_bounds = pr_link.bounding_box(), context.bounding_box()
+        assert pr_bounds is not None and context_bounds is not None
+        group_gap = context_bounds["x"] - pr_bounds["x"] - pr_bounds["width"]
+        pair_gaps = {}
+        for test_id in ("composer-pr-link",):
+            icon, label = bounds[f"{test_id}.icon"], bounds[f"{test_id}.label"]
+            pair_gaps[test_id] = label["x"] - icon["x"] - icon["width"]
+        print(f"Composer fonts ({viewport_width}px, {font_size}px preference): {font_sizes}")
+        print(f"Composer centers: {centers}; group gap: {group_gap}; pair gaps: {pair_gaps}")
+        bar.screenshot(path=tmp_path / "workspace-bar.png", animations="disabled")
+        page.screenshot(path=tmp_path / "composer-pr-link.png", animations="disabled")
+
         pr_link.click()
     panel = (
         page.get_by_test_id("github-panel-drawer")
@@ -445,8 +461,9 @@ def test_composer_pr_link_opens_github_tab(
         panel.get_by_role("button", name="Close", exact=True).click()
         expect(panel).to_have_attribute("data-state", "closed")
         expect(pr_link).to_be_in_viewport()
+        return
 
-    expected_font_size = font_size * 0.9
+    expected_font_size = font_size - 1
     for test_id, actual_font_size in font_sizes.items():
         assert actual_font_size == pytest.approx(expected_font_size, abs=0.01), (
             f"{test_id} should use the caption size at {font_size}px preference: {font_sizes}"
@@ -641,14 +658,14 @@ def test_post_top_level_pr_comment(
         open_right_rail(page)
         panel.get_by_role("tab", name="Pull Requests").click()
     else:
-        page.get_by_test_id("composer-pr-link").click()
+        open_session_pull_requests(page, mobile=mobile)
     panel.get_by_role(
         "button", name="example.com/acme/app #4242 — Add the GitHub tab", exact=True
     ).click()
     tabs = panel.get_by_role("tablist", name="Pull request", exact=True)
     tabs.get_by_role("tab", name="Comments 30", exact=True).click()
     textbox = panel.get_by_role("textbox", name="New PR comment")
-    post_button = panel.get_by_role("button", name="Post comment", exact=True)
+    post_button = panel.get_by_role("button", name="Submit", exact=True)
     expect(textbox).to_be_in_viewport()
     expect(post_button).to_be_in_viewport()
     feed = panel.get_by_role("region", name="PR comments", exact=True)
@@ -692,7 +709,7 @@ def test_post_top_level_pr_comment(
     panel.get_by_role("tab", name="Preview", exact=True).click()
     expect(panel.get_by_text("Thanks for reviewing!", exact=True)).to_be_visible()
     page.screenshot(path=str(tmp_path / f"comment-{entry}-preview.png"))
-    panel.get_by_role("button", name="Post comment", exact=True).click()
+    panel.get_by_role("button", name="Submit", exact=True).click()
     expect(tabs.get_by_role("tab", name="Comments 31", exact=True)).to_be_visible()
     feed.evaluate("el => { el.scrollTop = el.scrollHeight; }")
     expect(panel.get_by_text("Thanks for reviewing!", exact=True)).to_be_visible()
@@ -787,8 +804,8 @@ def test_reply_to_inline_review_conversation(
         ],
         "has_more": False,
         "next_cursor": None,
-        "head_sha": "head",
-        "base_sha": "base",
+        "head_sha": "a" * 40,
+        "base_sha": "b" * 40,
     }
     info = {
         **_INFO,
@@ -800,7 +817,7 @@ def test_reply_to_inline_review_conversation(
             "review_thread_replies": True,
             "review_thread_creation": True,
         },
-        "pr": {**_INFO["pr"], "head_sha": "head", "base_sha": "base"},
+        "pr": {**_INFO["pr"], "head_sha": "a" * 40, "base_sha": "b" * 40},
     }
     thread_reads = []
     pending_reads: list[Route] = []
@@ -858,7 +875,7 @@ def test_reply_to_inline_review_conversation(
     page.route(re.compile(r"/resources/github(?:\?|$)"), read_info)
     page.route(
         re.compile(r"/resources/github/diff(?:\?|$)"),
-        lambda route: route.fulfill(json={**_PR_DIFF, "head_sha": "head", "base_sha": "base"}),
+        lambda route: route.fulfill(json={**_PR_DIFF, "head_sha": "a" * 40, "base_sha": "b" * 40}),
     )
     page.route(re.compile(r"/resources/github/review-threads/thread-1/replies$"), reply)
     page.route(re.compile(r"/resources/github/review-threads$"), create_thread)
@@ -868,8 +885,12 @@ def test_reply_to_inline_review_conversation(
     if entry == "canvas":
         from tests.e2e_ui.sessions.test_canvas_page import _stub_server_info
 
-        _stub_server_info(page, canvas=True, session_pull_requests=True)
+        _stub_server_info(
+            page, canvas=True, session_pull_requests=True, comment_anchor_metadata=True
+        )
     page.goto(f"{base_url}/{'canvas/' if entry == 'canvas' else ''}c/{session_id}")
+    main_composer = page.get_by_label("Message the agent", exact=True)
+    main_composer.fill("Please keep the public API stable.")
     panel = (
         page.get_by_test_id("github-panel-drawer")
         if mobile
@@ -879,7 +900,7 @@ def test_reply_to_inline_review_conversation(
         open_right_rail(page)
         panel.get_by_role("tab", name="Pull Requests").click()
     else:
-        page.get_by_test_id("composer-pr-link").click()
+        open_session_pull_requests(page, mobile=mobile)
     panel.get_by_role(
         "button", name="example.com/acme/app #4242 — Add the GitHub tab", exact=True
     ).click()
@@ -1039,12 +1060,18 @@ def test_reply_to_inline_review_conversation(
     assert posts == [{"pr_url": pr_url, "body": "**This handles empty input.**"}]
     assert thread_reads
     fallback = panel.locator('[data-review-thread="outdated"]')
+    expect(fallback).to_have_count(0)
+    panel.get_by_role("button", name="More actions for removed.py", exact=True).click()
+    page.get_by_role("menuitem", name="Show earlier comments", exact=True).click()
     expect(fallback.get_by_role("button", expanded=False)).to_be_visible()
     fallback.get_by_role("button", expanded=False).click()
     expect(fallback.get_by_text("Original code context", exact=True)).to_be_visible()
     expect(fallback.get_by_text("Original context", exact=True)).to_be_visible()
     conversation.scroll_into_view_if_needed()
     page.screenshot(path=str(tmp_path / f"inline-{entry}-posted.png"))
+    panel.get_by_role("button", name="More actions for removed.py", exact=True).click()
+    page.get_by_role("menuitem", name="Hide earlier comments", exact=True).click()
+    expect(fallback).to_have_count(0)
 
     line = file.locator("diffs-container").first.locator(
         ":scope > [data-diff] > [data-code] > [data-gutter] "
@@ -1091,7 +1118,7 @@ def test_reply_to_inline_review_conversation(
     expect(draft.get_by_text("Separate conversation.", exact=True)).to_be_visible()
     draft.scroll_into_view_if_needed()
     page.screenshot(path=str(tmp_path / f"inline-{entry}-new-comment.png"))
-    draft.get_by_role("button", name="Post comment", exact=True).click()
+    draft.get_by_role("button", name="Submit", exact=True).click()
     created = file.locator('[data-review-thread="new-thread-1"]')
     expect(created.get_by_text("Separate conversation.", exact=True)).to_be_visible()
     expect(conversation.locator("li")).to_have_count(2)
@@ -1120,7 +1147,7 @@ def test_reply_to_inline_review_conversation(
     expect(draft.get_by_text("New conversation · Old lines 1–2", exact=True)).to_be_visible()
     expect(plus).to_have_count(0)
     draft.get_by_role("textbox", name="New review comment").fill("Consider these lines together.")
-    draft.get_by_role("button", name="Post comment", exact=True).click()
+    draft.get_by_role("button", name="Submit", exact=True).click()
     ranged = file.locator('[data-review-thread="new-thread-2"]')
     expect(ranged.get_by_text("Consider these lines together.", exact=True)).to_be_visible()
     assert (
@@ -1139,8 +1166,8 @@ def test_reply_to_inline_review_conversation(
                 "side": side,
                 "line": 2,
                 "start_line": start,
-                "head_sha": "head",
-                "base_sha": "base",
+                "head_sha": "a" * 40,
+                "base_sha": "b" * 40,
             },
         }
         for body, side, start in [
@@ -1150,6 +1177,1660 @@ def test_reply_to_inline_review_conversation(
     ]
     ranged.scroll_into_view_if_needed()
     page.screenshot(path=str(tmp_path / f"inline-{entry}-range-posted.png"))
+
+    # Local comments use the session API; provider writes remain unchanged.
+    for side, body in [
+        ("deletions", "Keep the original guard."),
+        ("additions", "Handle empty input."),
+    ]:
+        file.locator(
+            f'[data-code][data-{side}] [data-column-number="2"] [data-line-number-content]'
+        ).click()
+        plus.click()
+        draft.get_by_role("button", name="Agent", exact=True).click()
+        draft.get_by_role("textbox", name="New review comment").fill(body)
+        destination = draft.get_by_role("group", name="Comment destination").bounding_box()
+        write_preview = draft.get_by_role("tablist").bounding_box()
+        assert destination and write_preview
+        assert abs(destination["height"] - write_preview["height"]) <= 1
+        page.screenshot(path=str(tmp_path / f"inline-{entry}-{side}-composer.png"))
+        tabs.get_by_role("tab", name="Summary", exact=True).click()
+        tabs.get_by_role("tab", name="Changes", exact=False).click()
+        expect(draft.get_by_role("button", name="Agent", exact=True)).to_have_attribute(
+            "aria-pressed", "true"
+        )
+        draft.get_by_role("button", name="Submit", exact=True).click()
+        expect(
+            file.get_by_role("region", name="Local review comment").filter(has_text=body)
+        ).to_be_visible()
+    assert len(new_posts) == 2
+    response = page.request.get(
+        f"{base_url}/v1/sessions/{session_id}/comments?include_pr_comments=true"
+    )
+    assert response.ok
+    local_comments = response.json()["comments"]
+    assert len(local_comments) == 2
+    assert {comment["anchor_metadata"]["side"] for comment in local_comments} == {"LEFT", "RIGHT"}
+    page.screenshot(path=str(tmp_path / f"inline-{entry}-local-review.png"))
+    tabs.get_by_role("tab", name="Summary", exact=True).click()
+    if mobile:
+        panel.get_by_role("button", name="Close", exact=True).click()
+    expect(page.get_by_role("button", name=re.compile("Open local review comment"))).to_have_count(
+        2
+    )
+    expect(main_composer).to_have_value("Please keep the public API stable.")
+    page.screenshot(path=str(tmp_path / f"inline-{entry}-local-review-in-chat.png"))
+    chip = page.get_by_role(
+        "button", name="Open local review comment src/app/main.py:2 (old)", exact=True
+    )
+    chip.hover()
+    expect(page.get_by_text("Keep the original guard.", exact=True).last).to_be_visible()
+    chip.click()
+    old_comment = next(c for c in local_comments if c["anchor_metadata"]["side"] == "LEFT")
+    target = panel.locator(f'[data-local-review-comment="{old_comment["id"]}"]')
+    expect(target).to_be_focused()
+    expect(target).to_be_in_viewport()
+    expect(target.get_by_role("button", name="Edit local comment", exact=True)).to_be_visible()
+    expect(target.get_by_role("button", name="Delete local comment", exact=True)).to_be_visible()
+    expect(
+        target.get_by_role("button", name=re.compile("Attach to agent|Mark addressed"))
+    ).to_have_count(0)
+    if mobile:
+        panel.get_by_role("button", name="Close", exact=True).click()
+    page.get_by_role(
+        "button", name="Delete local review comment src/app/main.py:2 (new)", exact=True
+    ).click()
+    expect(page.get_by_role("button", name=re.compile("Open local review comment"))).to_have_count(
+        1
+    )
+    response = page.request.get(
+        f"{base_url}/v1/sessions/{session_id}/comments?include_pr_comments=true"
+    )
+    assert response.ok
+    assert [comment["id"] for comment in response.json()["comments"]] == [old_comment["id"]]
+    chip.click()
+    expect(file.get_by_role("region", name="Local review comment")).to_have_count(1)
+    target.get_by_role("button", name="Delete local comment", exact=True).click()
+    expect(file.get_by_role("region", name="Local review comment")).to_have_count(0)
+    if mobile:
+        panel.get_by_role("button", name="Close", exact=True).click()
+    expect(page.get_by_role("button", name=re.compile("Open local review comment"))).to_have_count(
+        0
+    )
+    response = page.request.get(
+        f"{base_url}/v1/sessions/{session_id}/comments?include_pr_comments=true"
+    )
+    assert response.ok
+    assert response.json() == {"comments": [], "next_cursor": None}
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        "rail",
+        "composer-desktop",
+        "composer-mobile",
+        "canvas",
+        pytest.param("project", marks=pytest.mark.browser_context_args(has_touch=True)),
+    ],
+)
+def test_studio_review_from_pr_panel(
+    page: Page, seeded_session: tuple[str, str], tmp_path: Path, entry: str
+) -> None:
+    """Exercise the UI with scripted review and provider responses."""
+    base_url, session_id = seeded_session
+    rail = entry == "rail"
+    project = entry == "project"
+    project_id = "e" * 32
+    project_name = "Workspace Review"
+    repository = "Egzakta-AILab/Services" if rail else "acme/app"
+    remote = f"github.com/{repository}"
+    pr_url = f"https://{remote}/pull/4242"
+    pr_title = "Update the services health check" if rail else _INFO["pr"]["title"]
+    branch = "feature/service-health" if rail else _INFO["pr"]["head_ref"]
+    head_repo = f"https://github.com/contributor/{repository.split('/')[-1]}"
+    host_id, agent_id, review_id, reviewer_id = ("a" * 32, "b" * 32, "c" * 32, "d" * 32)
+    if project:
+        reviewer_id = session_id
+    base_sha, head_sha = "1" * 40, "2" * 40
+    revision = {"base_sha": base_sha, "head_sha": head_sha}
+    workspace = "/work/acme/egzakta-org" if rail else "/work/acme/app"
+    role = {
+        "id": "backend",
+        "label": "Backend QA",
+        "description": "Review APIs and data access.",
+        "digest": "3" * 64,
+    }
+    model = "review-model"
+    association = {
+        "url": pr_url,
+        "host": "github.com",
+        "provider": "github",
+        "repository": repository,
+        "number": _PR_NUMBER,
+        "relationship": "attached" if rail else "created",
+    }
+    info = {
+        **_INFO,
+        "provider": "github",
+        "tracking_available": True,
+        "selected_pr_url": pr_url,
+        "prs": [association],
+        "pr": {
+            **_INFO["pr"],
+            **revision,
+            "url": pr_url,
+            "title": pr_title,
+            "head_ref": branch,
+            "head_repository_url": head_repo,
+        },
+    }
+    review = {
+        "id": review_id,
+        "target": {
+            **revision,
+            "pr_url": pr_url,
+            "host_id": host_id,
+            "workspace": workspace,
+            "repository": repository,
+            "pr_number": _PR_NUMBER,
+            **({"repository_path": ".", "source_project_id": project_id} if project else {}),
+        },
+        "profile": {
+            "agent_id": agent_id,
+            "harness": "codex-native",
+            "skill": None if rail else "team-review",
+            "role": role if rail else None,
+            "model": model,
+            "reasoning_effort": "high",
+        },
+        "state": "prepared",
+        "dispatch_status": "not_requested",
+        "reviewer_session_id": None,
+        "created_at": 1793836800000,
+        "updated_at": 1793836800000,
+    }
+    older_review = {
+        **review,
+        "id": "e" * 32,
+        "target": {**review["target"], "pr_url": "https://github.com/acme/app/pull/4241"},
+    }
+    report = {
+        "state": "incomplete",
+        "summary": None,
+        "message_id": None,
+        "findings": [],
+    }
+    captured = False
+    capture_keys: list[str] = []
+    start_keys: list[str] = []
+    older_reads = 0
+    attached = not rail
+    branch_reads: list[str] = []
+    promoted = False
+    profile_saved = False
+    nested_path = "worktrees/services"
+    reference_path = "references/upstream"
+    role_instructions = "Review **API boundaries** in the captured PR."
+
+    def profile_editor(route: Route) -> None:
+        nonlocal profile_saved
+        profile = {
+            "id": role["id"],
+            "label": role["label"],
+            "description": role["description"],
+            "instructions": role_instructions,
+            "archived": False,
+        }
+        if route.request.method == "PUT":
+            payload = route.request.post_data_json
+            assert payload["revision"] == "initial"
+            assert payload["profile"] == profile
+            profile_saved = True
+        else:
+            assert route.request.method == "GET"
+        route.fulfill(
+            json={
+                "revision": "saved" if profile_saved else "initial",
+                "profiles": [
+                    {**profile, "managed": True, "source": ".omnigent-review-profiles.json"}
+                ]
+                if profile_saved
+                else [],
+            }
+        )
+
+    def repository_settings(route: Route) -> None:
+        nonlocal promoted
+        if route.request.method == "PUT":
+            assert route.request.post_data_json == {
+                "revision": "initial",
+                "depth": 2,
+                "repositories": [
+                    {"path": nested_path, "role": "active", "origin": remote},
+                    {
+                        "path": reference_path,
+                        "role": "reference",
+                        "origin": "github.com/acme/upstream",
+                    },
+                ],
+            }
+            promoted = True
+        else:
+            assert route.request.method == "GET"
+        scanned = "depth=2" in route.request.url
+        route.fulfill(
+            json={
+                "revision": "saved" if promoted else "initial",
+                "depth": 2,
+                "truncated": False,
+                "repositories": [
+                    {
+                        "path": nested_path,
+                        "branch": branch,
+                        "origin": remote,
+                        "role": "active" if promoted else "reference",
+                        "declared": False,
+                        "checkout": "ready",
+                    },
+                    {
+                        "path": reference_path,
+                        "branch": "main",
+                        "origin": "github.com/acme/upstream",
+                        "role": "reference",
+                        "declared": False,
+                        "checkout": "ready",
+                    },
+                ]
+                if scanned or promoted
+                else [],
+            }
+        )
+
+    def workspace_repositories(route: Route) -> None:
+        assert route.request.method == "GET"
+        selected = parse_qs(urlsplit(route.request.url).query).get("repository")
+        if selected:
+            branch_reads.extend(selected)
+            route.fulfill(
+                json={
+                    "repository": nested_path,
+                    "branch": branch,
+                    "remote": remote,
+                    "state": "found",
+                    "pr": {"url": pr_url, "title": pr_title, "number": _PR_NUMBER},
+                }
+            )
+            return
+        route.fulfill(
+            json={
+                "manifest": "repos.yaml",
+                "repositories": [
+                    {
+                        "name": "KVARK",
+                        "path": "KVARK",
+                        "status": "active",
+                        "description": "Main product",
+                        "depends_on": ["Services"],
+                        "checkout": "ready",
+                    },
+                    {
+                        "name": "Services",
+                        "path": "Services",
+                        "status": "active",
+                        "description": "Supporting services",
+                        "depends_on": [],
+                        "checkout": "ready",
+                    },
+                    *(
+                        [
+                            {
+                                "name": nested_path,
+                                "path": nested_path,
+                                "status": "active",
+                                "description": "",
+                                "depends_on": [],
+                                "checkout": "ready",
+                            }
+                        ]
+                        if promoted
+                        else []
+                    ),
+                ],
+            }
+        )
+
+    def attach(route: Route) -> None:
+        nonlocal attached
+        assert route.request.method == "POST"
+        assert route.request.post_data_json == {"url": pr_url, "action": "attach"}
+        assert not attached
+        attached = True
+        route.fulfill(json=info)
+
+    def list_or_capture(route: Route) -> None:
+        nonlocal captured, older_reads
+        if route.request.method == "GET":
+            if "after_id=" in route.request.url:
+                older_reads += 1
+                if older_reads == 1:
+                    route.fulfill(
+                        status=503, json={"detail": "Review history temporarily unavailable"}
+                    )
+                elif older_reads == 2:
+                    route.fulfill(
+                        json={
+                            "object": "list",
+                            "data": [{**older_review, "id": "f" * 32}],
+                            "next_cursor": "f" * 32,
+                        }
+                    )
+                else:
+                    route.fulfill(status=404, json={"detail": "Session not found"})
+                return
+            records = [review] if captured else []
+            cursor = None
+            if entry == "rail":
+                records.append(older_review)
+                cursor = "e" * 32
+            route.fulfill(json={"object": "list", "data": records, "next_cursor": cursor})
+            return
+        assert route.request.method == "POST"
+        assert route.request.post_data_json == {
+            "pr_url": pr_url,
+            "expected_base_sha": base_sha,
+            "expected_head_sha": head_sha,
+            "agent_id": agent_id,
+            "harness": "codex-native",
+            "model": model,
+            "reasoning_effort": "high",
+            **({"host_id": host_id, "workspace": workspace, "repository": "."} if project else {}),
+            **(
+                {"profile_id": role["id"], "profile_digest": role["digest"]}
+                if rail
+                else {"skill": "team-review"}
+            ),
+        }
+        capture_keys.append(route.request.headers["idempotency-key"])
+        captured = True
+        route.fulfill(json={"review": review}, status=201)
+
+    def start(route: Route) -> None:
+        assert route.request.post_data_json == {}
+        start_keys.append(route.request.headers["idempotency-key"])
+        if entry == "rail" and len(start_keys) == 1:
+            route.fulfill(json={"detail": "Start response unavailable"}, status=503)
+            return
+        review.update(state="running", dispatch_status="running", reviewer_session_id=reviewer_id)
+        route.fulfill(json=review)
+
+    def session_metadata(route: Route) -> None:
+        response = route.fetch()
+        route.fulfill(
+            response=response, json={**response.json(), "host_id": host_id, "workspace": workspace}
+        )
+
+    page.route(
+        f"**/v1/sessions/{session_id}/resources/environments/default",
+        lambda route: route.fulfill(json={"metadata": {"root": workspace}}),
+    )
+    stub_session_pull_requests(page, lambda: [association] if attached else [], lambda _url: None)
+    page.route(
+        re.compile(r"/resources/github(?:\?|$)"),
+        lambda r: r.fulfill(
+            json=info if attached else {**info, "pr": None, "prs": [], "selected_pr_url": None}
+        ),
+    )
+    if rail:
+        page.route(
+            re.compile(r"/resources/workspace-repositories(?:\?|$)"), workspace_repositories
+        )
+        page.route("**/resources/github/prs", attach)
+        page.route(re.compile(r"/studio/repositories(?:\?|$)"), repository_settings)
+        page.route("**/studio/review-profiles/editor", profile_editor)
+    page.route(
+        re.compile(r"/resources/github/changes"),
+        lambda r: r.fulfill(json={**_CHANGES, **revision}),
+    )
+    page.route(
+        re.compile(r"/resources/github/diff(?:\?|$)"),
+        lambda r: r.fulfill(json={**_PR_DIFF, **revision}),
+    )
+    page.route(
+        "**/v1/info",
+        lambda r: r.fulfill(
+            json={
+                "single_user": True,
+                "features": {"canvas": entry == "canvas"},
+                "session_pull_requests": True,
+                "studio_reviews": True,
+                "workspace_repositories": rail,
+                "studio_workspace_settings": rail,
+            }
+        ),
+    )
+    page.route(re.compile(rf"/v1/sessions/{session_id}(?:\?|$)"), session_metadata)
+    page.route(
+        "**/v1/agents",
+        lambda r: r.fulfill(
+            json={
+                "data": [
+                    {
+                        "id": agent_id,
+                        "name": "codex-native-ui",
+                        "harness": "codex-native",
+                        "builtin": True,
+                    }
+                ]
+            }
+        ),
+    )
+    page.route(
+        "**/v1/skills?*",
+        lambda r: r.fulfill(
+            json={
+                "skills": [{"name": "team-review", "description": "Review a patch"}],
+                "warnings": [],
+            }
+        ),
+    )
+    page.route(
+        f"**/v1/hosts/{host_id}/harnesses/codex-native/model-options",
+        lambda r: r.fulfill(
+            json={
+                "models": [
+                    {
+                        "id": model,
+                        "displayName": "Review Model",
+                        "supportedReasoningEfforts": [{"reasoningEffort": "high"}],
+                    }
+                ]
+            }
+        ),
+    )
+    page.route(
+        "**/studio/review-profiles",
+        lambda r: r.fulfill(json={"profiles": [role] if rail and profile_saved else []}),
+    )
+    page.route(re.compile(r"/studio/reviews(?:\?|$)"), list_or_capture)
+    page.route(f"**/studio/reviews/{review_id}", lambda r: r.fulfill(json=review))
+    page.route(f"**/studio/reviews/{review_id}/start", start)
+    page.route(f"**/studio/reviews/{review_id}/report", lambda r: r.fulfill(json=report))
+
+    mobile = entry == "composer-mobile"
+    page.emulate_media(color_scheme="dark" if mobile else "light")
+    page.set_viewport_size({"width": 390 if mobile else 1440, "height": 900})
+    if project:
+        ordinary_creates: list[str] = []
+        review_events: list[str] = []
+
+        def reject_unexpected_create(route: Route) -> None:
+            if route.request.method == "POST":
+                ordinary_creates.append(route.request.url)
+                route.fulfill(status=500, json={"detail": "Unexpected ordinary session"})
+            else:
+                route.continue_()
+
+        def project_preview(route: Route) -> None:
+            assert parse_qs(urlsplit(route.request.url).query) == {
+                "host_id": [host_id],
+                "workspace": [workspace],
+                "repository": ["."],
+                "pr_url": [pr_url],
+            }
+            route.fulfill(
+                json={
+                    "pr": info["pr"],
+                    "files": [
+                        {
+                            "path": "src/app/main.py",
+                            "status": "modified",
+                            "lines_added": 1,
+                            "lines_removed": 0,
+                        }
+                    ],
+                    "files_truncated": False,
+                    "review_available": True,
+                    "canonical_workspace": workspace,
+                }
+            )
+
+        def observed_events(route: Route) -> None:
+            if route.request.method == "POST":
+                review_events.append(route.request.url)
+                route.fulfill(status=500, json={"detail": "Unexpected browser input"})
+            else:
+                route.continue_()
+
+        run_posts: list[str] = []
+        run: dict = {}
+        run_id = "f" * 32
+        single_run_id = "4" * 32
+        single_run: dict = {}
+        patch_sha = hashlib.sha256(_PR_DIFF["patch"].encode()).hexdigest()
+        run_reviewers = ("2" * 32, "3" * 32)
+        run_started = False
+        finding_key = "7" * 64
+        attached_receipts: list[dict] = []
+        receipt = {
+            "observed_at": "2026-11-05T10:30:00Z",
+            "image_id": "sha256:" + "6" * 64,
+            "command": ["python", "check.py"],
+            "timeout_seconds": 60,
+            "base": {
+                "commit": base_sha,
+                "state": "exited",
+                "exit_code": 0,
+                "elapsed_ms": 220,
+                "output": "observed_requests=1",
+            },
+            "head": {
+                "commit": head_sha,
+                "state": "exited",
+                "exit_code": 1,
+                "elapsed_ms": 267,
+                "output": "observed_requests=3",
+            },
+        }
+
+        screenshot = b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/lX8AAAAASUVORK5CYII="
+        )
+        screenshot_digest = hashlib.sha256(screenshot).hexdigest()
+        finding_artifacts: list[dict] = []
+        artifact_path = f"**/v1/studio/review-runs/{run_id}/findings/{finding_key}/evidence"
+
+        def finding_evidence(route: Route) -> None:
+            if route.request.method == "GET":
+                route.fulfill(json=finding_artifacts)
+                return
+            assert route.request.method == "POST"
+            assert route.request.headers["content-type"] == "image/png"
+            assert route.request.post_data_buffer == screenshot
+            assert parse_qs(urlsplit(route.request.url).query) == {"patch_sha256": [patch_sha]}
+            entry = {
+                "digest": screenshot_digest,
+                "media_type": "image/png",
+                "provenance": "uploaded",
+                "byte_size": len(screenshot),
+                "attached_at": review["created_at"],
+                "source": {**revision, "patch_sha256": patch_sha},
+            }
+            finding_artifacts.append(entry)
+            route.fulfill(json=entry)
+
+        page.route(artifact_path, finding_evidence)
+        page.route(f"{artifact_path}?*", finding_evidence)
+        page.route(
+            f"{artifact_path}/{screenshot_digest}",
+            lambda route: route.fulfill(body=screenshot, content_type="image/png"),
+        )
+
+        def project_reproductions(route: Route) -> None:
+            if route.request.method == "GET":
+                route.fulfill(json=attached_receipts)
+                return
+            assert route.request.method == "POST"
+            uploaded = route.request.post_data_json
+            expected = (
+                receipt if not attached_receipts else {**fix_receipt, "patch": proposed_patch}
+            )
+            assert uploaded == expected
+            digest = "8" if not attached_receipts else "9"
+            saved = {"digest": digest * 64, "provenance": "uploaded", "receipt": uploaded}
+            attached_receipts.append(saved)
+            route.fulfill(json=saved)
+
+        candidate_run_id = "3" * 32
+
+        def start_candidate_review(route: Route) -> None:
+            assert route.request.method == "POST" and route.request.post_data_json == {}
+            assert attached_receipts[1]["digest"] == "9" * 64
+            attached_receipts[1]["candidate_run_id"] = candidate_run_id
+            route.fulfill(json={"run": {"id": candidate_run_id}, "errors": {}})
+
+        page.route("**/reproductions/" + "9" * 64 + "/re-review", start_candidate_review)
+
+        proposed_patch = (
+            "diff --git a/src/app/main.py b/src/app/main.py\n"
+            "--- a/src/app/main.py\n+++ b/src/app/main.py\n"
+            "@@ -2 +2 @@\n-added line\n+verified input\n"
+        )
+        fix_receipt = {
+            **{key: value for key, value in receipt.items() if key not in {"base", "head"}},
+            "schema_version": "omnigent.studio.fix-verification.v1",
+            "included_paths": ["src/app"],
+            "before": receipt["head"],
+            "after": {**receipt["base"], "commit": "3" * 40},
+            "outcome": "fail_to_pass",
+        }
+
+        show_earlier_review = False
+
+        def project_runs(route: Route) -> None:
+            if route.request.method == "GET":
+                entries = [entry for entry in (run, single_run) if entry]
+                if show_earlier_review:
+                    entries = [
+                        {**entry, "target": {**entry["target"], "base_sha": "3" * 40}}
+                        for entry in entries
+                    ]
+                route.fulfill(json={"entries": entries, "next_cursor": None})
+                return
+            assert route.request.method == "POST"
+            inputs = route.request.post_data_json["reviewers"]
+            if len(inputs) == 1:
+                assert inputs == [
+                    {
+                        "pr_url": pr_url,
+                        "expected_base_sha": base_sha,
+                        "expected_head_sha": head_sha,
+                        "agent_id": agent_id,
+                        "harness": "codex-native",
+                        "model": model,
+                        "reasoning_effort": "high",
+                        "skill": "team-review",
+                        "host_id": host_id,
+                        "workspace": workspace,
+                        "repository": ".",
+                    }
+                ]
+                single_run.update(
+                    id=single_run_id,
+                    target=review["target"],
+                    patch_sha256=patch_sha,
+                    reviewers=[review],
+                    created_at=review["created_at"],
+                )
+                review["run_id"] = single_run_id
+                capture_keys.append(route.request.headers["idempotency-key"])
+                route.fulfill(json=single_run)
+                return
+            run_posts.append("capture")
+            assert [item["skill"] for item in inputs] == ["team-review", "security-review"]
+            assert all(item["expected_head_sha"] == head_sha for item in inputs)
+            run.update(
+                id=run_id,
+                target=review["target"],
+                patch_sha256=patch_sha,
+                reviewers=[
+                    {
+                        **review,
+                        "id": member_id,
+                        "run_id": run_id,
+                        "profile": {**review["profile"], "skill": item["skill"]},
+                        "dispatch_status": "not_requested",
+                        "reviewer_session_id": None,
+                    }
+                    for member_id, item in zip(run_reviewers, inputs, strict=True)
+                ],
+                created_at=review["created_at"],
+            )
+            route.fulfill(json=run)
+
+        def start_project_run(route: Route) -> None:
+            nonlocal run_started
+            assert route.request.method == "POST"
+            run_posts.append("start")
+            run_started = True
+            for member in run["reviewers"]:
+                member.update(dispatch_status="running", reviewer_session_id=member["id"])
+            route.fulfill(json={"run": run, "errors": {}})
+
+        def start_single_run(route: Route) -> None:
+            assert route.request.method == "POST" and route.request.post_data_json == {}
+            start_keys.append(route.request.headers["idempotency-key"])
+            review.update(
+                state="running", dispatch_status="running", reviewer_session_id=reviewer_id
+            )
+            route.fulfill(json={"run": single_run, "errors": {}})
+
+        def single_run_report(route: Route) -> None:
+            route.fulfill(
+                json={
+                    "reviewers": [{"review_id": review_id, "report": report}],
+                    "findings": [
+                        {"finding": finding, "review_ids": [review_id], "finding_key": finding_key}
+                        for finding in report["findings"]
+                    ],
+                }
+            )
+
+        def project_run_report(route: Route) -> None:
+            route.fulfill(
+                json={
+                    "reviewers": [
+                        {
+                            "review_id": member_id,
+                            "report": {
+                                **report,
+                                "state": "ready" if run_started else "pending",
+                                "summary": f"Reviewer {index + 1} report" if run_started else None,
+                                "citation_validation": "checked" if run_started else "not_checked",
+                                "unverified_findings": [
+                                    {
+                                        **report["findings"][0],
+                                        "title": "Invented citation",
+                                        "line": 999,
+                                    },
+                                ]
+                                if run_started and index == 1
+                                else [],
+                            },
+                        }
+                        for index, member_id in enumerate(run_reviewers)
+                    ],
+                    "findings": [
+                        {
+                            "finding": report["findings"][0],
+                            "review_ids": list(run_reviewers),
+                            "finding_key": finding_key,
+                        }
+                    ]
+                    if run_started
+                    else [],
+                }
+            )
+
+        project_path = f"**/v1/projects/{project_id}"
+        page.route(re.compile(r"/v1/sessions(?:\?|$)"), reject_unexpected_create)
+        page.route("**/v1/sessions/*/events", observed_events)
+        page.route(
+            "**/v1/sessions/projects",
+            lambda r: r.fulfill(json=[{"id": project_id, "name": project_name}]),
+        )
+        page.route(
+            project_path,
+            lambda r: r.fulfill(
+                json={
+                    "id": project_id,
+                    "name": project_name,
+                    "config": {"host_id": host_id, "workspace": workspace, "agent_id": agent_id},
+                }
+            ),
+        )
+        page.route(
+            "**/v1/hosts",
+            lambda r: r.fulfill(
+                json={
+                    "hosts": [
+                        {
+                            "host_id": host_id,
+                            "owner": "local",
+                            "name": "Project host",
+                            "status": "online",
+                        }
+                    ]
+                }
+            ),
+        )
+        page.route(
+            f"{project_path}/studio/repositories?*",
+            lambda r: r.fulfill(
+                json={
+                    "revision": "v1",
+                    "depth": 2,
+                    "truncated": False,
+                    "repositories": [{"path": ".", "checkout": "ready", "role": "active"}],
+                }
+            ),
+        )
+        page.route(
+            f"{project_path}/studio/pull-requests?*",
+            lambda r: r.fulfill(json={"pull_requests": [info["pr"]]}),
+        )
+        page.route(f"{project_path}/studio/pull-requests/preview?*", project_preview)
+
+        def project_patch(route: Route) -> None:
+            query = parse_qs(urlsplit(route.request.url).query)
+            assert query["base_sha"] == [base_sha]
+            assert query["head_sha"] == [head_sha]
+            route.fulfill(json={"patch": _PR_DIFF["patch"], "truncated": False})
+
+        page.route(f"{project_path}/studio/pull-requests/patch?*", project_patch)
+        page.route(
+            f"{project_path}/studio/review-profiles?*", lambda r: r.fulfill(json={"profiles": []})
+        )
+        page.route(re.compile(r"/studio/review-runs(?:\?|$)"), project_runs)
+        page.route(f"**/v1/studio/review-runs/{single_run_id}/start", start_single_run)
+        page.route(
+            re.compile(rf"/v1/studio/review-runs/{single_run_id}/report(?:\?|$)"),
+            single_run_report,
+        )
+        page.route(f"**/v1/studio/review-runs/{run_id}/start", start_project_run)
+        page.route(
+            re.compile(rf"/v1/studio/review-runs/{run_id}/report(?:\?|$)"), project_run_report
+        )
+        page.route(
+            f"**/v1/studio/review-runs/{run_id}/findings/{finding_key}/reproductions",
+            project_reproductions,
+        )
+        page.route(
+            re.compile(rf"/v1/studio/review-runs/{run_id}/patch(?:\?|$)"),
+            lambda r: r.fulfill(
+                json={**revision, "patch": _PR_DIFF["patch"], "sha256": patch_sha}
+            ),
+        )
+        page.route(
+            "**/v1/skills?*",
+            lambda r: r.fulfill(
+                json={
+                    "skills": [
+                        {"name": "team-review", "description": "Review a patch"},
+                        {"name": "security-review", "description": "Review security"},
+                    ],
+                    "warnings": [],
+                }
+            ),
+        )
+        page.route(f"**/v1/sessions/{reviewer_id}/studio/review", lambda r: r.fulfill(json=review))
+        report.update(
+            state="ready",
+            summary="The captured patch has one actionable finding.",
+            message_id="report-1",
+            findings=[
+                {
+                    "title": "Keep the input validation",
+                    "detail": "The new branch accepts invalid values.",
+                    "severity": "high",
+                    "path": "src/app/main.py",
+                    "side": "head",
+                    "line": 2,
+                }
+            ],
+        )
+        page.set_viewport_size({"width": 320, "height": 700})
+        page.goto(f"{base_url}/?project=Workspace%20Review")
+        workspace_panel = page.get_by_role("complementary", name="Project workspace")
+        composer = page.get_by_test_id("new-chat-landing-composer-surface")
+        draft = page.get_by_test_id("new-chat-landing-input")
+        expect(composer).to_be_visible()
+        expect(workspace_panel).to_be_hidden()
+        draft.fill("My project draft")
+        page.screenshot(path=str(tmp_path / "project-chat-first-mobile.png"))
+        composer.get_by_role("button", name="Workspace", exact=True).tap()
+        expect(workspace_panel).to_be_visible()
+        expect(composer).to_be_hidden()
+        tab_list = workspace_panel.get_by_role("tablist")
+        files = workspace_panel.get_by_role("tabpanel", name="Files", exact=True)
+        tab_bar_box = tab_list.bounding_box()
+        assert tab_bar_box["y"] + tab_bar_box["height"] <= files.bounding_box()["y"]
+        for tab in tab_list.get_by_role("tab").all():
+            box = tab.bounding_box()
+            assert box["height"] >= 44
+            assert box["y"] + box["height"] <= tab_bar_box["y"] + tab_bar_box["height"]
+        assert page.evaluate("document.documentElement.scrollWidth === window.innerWidth")
+        page.screenshot(path=str(tmp_path / "project-workspace-mobile.png"))
+        workspace_panel.get_by_role("button", name="Back to chat", exact=True).tap()
+        expect(composer).to_be_visible()
+        expect(draft).to_have_value("My project draft")
+        draft.fill("")
+        page.set_viewport_size({"width": 390, "height": 844})
+        composer.get_by_role("button", name="Workspace", exact=True).tap()
+        expect(workspace_panel).to_be_visible()
+        workspace_panel.get_by_role("tab", name="Pull Requests", exact=True).click()
+        workspace_panel.get_by_role("button", name=re.compile(re.escape(pr_title))).click()
+        diff_tab = workspace_panel.get_by_role("tab", name="Diff", exact=True)
+        expect(diff_tab).to_have_attribute("data-state", "active")
+        expect(workspace_panel.get_by_role("combobox", name="Changed file")).to_have_value(
+            "src/app/main.py"
+        )
+        workspace_panel.get_by_role("button", name="Pull request actions").click()
+        expect(page.get_by_role("menuitem", name="Open on GitHub")).to_be_visible()
+        expect(page.get_by_role("menuitem", name="Refresh revision")).to_be_visible()
+        page.keyboard.press("Escape")
+        workspace_panel.get_by_role("button", name="Review this PR", exact=True).click()
+        expect(
+            workspace_panel.get_by_role("button", name="Orchestrator", exact=True)
+        ).to_have_attribute("aria-pressed", "true")
+        workspace_panel.get_by_role("button", name="Manual", exact=True).click()
+        workspace_panel.get_by_role("combobox", name="Reviewer", exact=True).click()
+        page.get_by_role("option", name="Codex", exact=True).click()
+        workspace_panel.get_by_role("combobox", name="Review skill", exact=True).click()
+        page.get_by_role("option", name="team-review", exact=True).click()
+        workspace_panel.get_by_text("Model and workspace settings", exact=False).click()
+        workspace_panel.get_by_role("combobox", name="Model", exact=True).click()
+        page.get_by_role("option", name="Review Model", exact=True).click()
+        workspace_panel.get_by_role("combobox", name="Reasoning effort", exact=True).click()
+        page.get_by_role("option", name="High", exact=True).click()
+        assert not capture_keys and not start_keys and not ordinary_creates
+        workspace_panel.get_by_text("Model and workspace settings", exact=False).click()
+        assert page.evaluate("document.documentElement.scrollWidth === window.innerWidth")
+        page.screenshot(path=str(tmp_path / "project-review-before-launch.png"))
+        page.set_viewport_size({"width": 1440, "height": 900})
+        workspace_panel.get_by_role("button", name="Run review", exact=True).click()
+        expect(page.get_by_text(report["summary"], exact=True)).to_be_visible(timeout=15_000)
+        expect(page.get_by_role("link", name="Open transcript", exact=True)).to_be_visible()
+        expect(page.get_by_role("link", name="Open finding", exact=True)).to_have_attribute(
+            "href", f"/reviews/{single_run_id}/discussion?finding={finding_key}"
+        )
+        page.get_by_role("button", name="Open PR in Workspace", exact=True).click()
+        reviewed_pr = page.get_by_role("region", name="Reviewed pull request", exact=True)
+        expect(
+            reviewed_pr.get_by_role("link", name=f"{repository} #{_PR_NUMBER}")
+        ).to_have_attribute("href", pr_url)
+        expect(reviewed_pr.get_by_text(pr_title, exact=True)).to_be_visible()
+        expect(page.get_by_text("No open PR for main", exact=True)).not_to_be_visible()
+        page.screenshot(path=str(tmp_path / "project-review-report.png"))
+        review.pop("run_id")
+        page.reload()
+        expect(page.get_by_role("heading", name="Earlier review")).to_be_visible()
+        expect(page.get_by_role("link", name="Ask in original transcript")).to_have_attribute(
+            "href", f"/c/{reviewer_id}?view=chat"
+        )
+        page.get_by_role("button", name="Set up review of current PR").click()
+        reviewed_pr.get_by_role("button", name="Use previous reviewer settings").click()
+        expect(reviewed_pr.get_by_role("button", name="Run review", exact=True)).to_be_enabled()
+        assert len(capture_keys) == len(start_keys) == 1
+        review["run_id"] = single_run_id
+        show_earlier_review = True
+        page.goto(f"{base_url}/?project=Workspace%20Review")
+        workspace_panel.get_by_role("tab", name="Pull Requests", exact=True).click()
+        workspace_panel.get_by_role("button", name=re.compile(re.escape(pr_title))).click()
+        expect(workspace_panel.get_by_text("Saved reviews for earlier revisions")).to_be_visible()
+        workspace_panel.get_by_role("button", name="Review this PR", exact=True).click()
+        expect(workspace_panel.get_by_role("region", name="Run a review")).to_be_visible()
+        show_earlier_review = False
+        page.goto(f"{base_url}/?project=Workspace%20Review")
+        workspace_panel.get_by_role("tab", name="Pull Requests", exact=True).click()
+        workspace_panel.get_by_role("button", name=re.compile(re.escape(pr_title))).click()
+        expect(workspace_panel.get_by_text("Saved review for this revision")).to_be_visible()
+        workspace_panel.get_by_role("button", name="Open saved review", exact=True).click()
+        expect(
+            workspace_panel.get_by_role("region", name="Review runs", exact=True).get_by_role(
+                "link", name="Discuss review", exact=True
+            )
+        ).to_have_attribute("href", f"/reviews/{single_run_id}/discussion")
+        expect(workspace_panel.get_by_role("region", name="Run a review")).to_be_hidden()
+        assert len(capture_keys) == len(start_keys) == 1
+        workspace_panel.get_by_role("button", name="New review", exact=True).click()
+        workspace_panel.get_by_role("button", name="Manual", exact=True).click()
+        workspace_panel.get_by_role("combobox", name="Reviewer", exact=True).click()
+        page.get_by_role("option", name="Codex", exact=True).click()
+        for skill in ("team-review", "security-review"):
+            workspace_panel.get_by_role("combobox", name="Review skill", exact=True).click()
+            page.get_by_role("option", name=skill, exact=True).click()
+            workspace_panel.get_by_role("button", name="Add reviewer", exact=True).click()
+        workspace_panel.get_by_role("button", name="Run selected reviewers", exact=True).click()
+        runs_panel = workspace_panel.get_by_role("region", name="Review runs", exact=True)
+        expect(runs_panel.get_by_text("2 / 2 reports ready")).to_be_visible()
+        consolidation = runs_panel.get_by_role("region", name="Consolidation")
+        expect(consolidation.get_by_text("Keep the input validation")).to_have_count(1)
+        expect(consolidation.get_by_text(re.compile(r"1 unverified citation"))).to_be_visible()
+        consolidation.get_by_text("Reproductions", exact=True).click()
+        evidence_panel = consolidation.get_by_role("region", name="Finding reproductions")
+        attachments = evidence_panel.get_by_role("region", name="Finding evidence")
+        attachments.get_by_label("Finding evidence file").set_input_files(
+            {"name": "finding.png", "mimeType": "image/png", "buffer": screenshot}
+        )
+        attachments.get_by_role("button", name="Attach evidence", exact=True).click()
+        attachments.get_by_role("button", name="Open screenshot", exact=True).click()
+        expect(
+            attachments.get_by_role("img", name="Screenshot attached to this finding")
+        ).to_be_visible()
+        expect(attachments.get_by_role("link", name="Download evidence")).to_be_visible()
+        assert len(finding_artifacts) == 1
+        evidence_panel.get_by_label("Reproduction receipt").set_input_files(
+            {
+                "name": "reproduction.json",
+                "mimeType": "application/json",
+                "buffer": json.dumps(receipt).encode(),
+            }
+        )
+        evidence_panel.get_by_role("button", name="Attach receipt", exact=True).click()
+        expect(evidence_panel.get_by_text(re.compile(r"Uploaded receipt"))).to_be_visible()
+        evidence_panel.get_by_text(re.compile(r"Head.*Exit 1")).click()
+        expect(evidence_panel.get_by_text("observed_requests=3", exact=True)).to_be_visible()
+        evidence_panel.scroll_into_view_if_needed()
+        page.screenshot(path=str(tmp_path / "review-reproduction.png"))
+        assert len(attached_receipts) == 1
+        evidence_panel.get_by_label("Reproduction receipt").set_input_files(
+            {
+                "name": "fix-check.json",
+                "mimeType": "application/json",
+                "buffer": json.dumps(fix_receipt).encode(),
+            }
+        )
+        evidence_panel.get_by_role("button", name="Attach receipt", exact=True).click()
+        expect(evidence_panel.get_by_role("alert")).to_have_text(
+            "Choose the Git patch used for this fix check."
+        )
+        evidence_panel.get_by_label("Proposed patch for fix checks").set_input_files(
+            {"name": "proposed.patch", "mimeType": "text/plain", "buffer": proposed_patch.encode()}
+        )
+        evidence_panel.get_by_role("button", name="Attach receipt", exact=True).click()
+        expect(evidence_panel.get_by_text("Failed before, passed after")).to_be_visible()
+        expect(evidence_panel.get_by_text(re.compile(r"Captured head.*Exit 1"))).to_be_visible()
+        expect(
+            evidence_panel.get_by_text(re.compile(r"Proposed snapshot.*Exit 0"))
+        ).to_be_visible()
+        evidence_panel.get_by_text("View proposed patch", exact=True).click()
+        expect(evidence_panel.get_by_text("+verified input", exact=False)).to_be_visible()
+        page.screenshot(path=str(tmp_path / "review-fix-check.png"))
+        assert len(attached_receipts) == 2
+        evidence_panel.get_by_role("button", name="Re-review candidate", exact=True).click()
+        expect(evidence_panel.get_by_role("link", name="Open candidate review")).to_have_attribute(
+            "href", f"/reviews/{candidate_run_id}/discussion"
+        )
+        consolidation.get_by_role("button", name="Show in captured diff", exact=True).click()
+        captured_diff = runs_panel.get_by_role("region", name="Captured diff", exact=True)
+        expect(captured_diff.get_by_text("Review finding · src/app/main.py:2")).to_be_visible()
+        consolidation.get_by_role("button", name=re.compile(r"^security-review")).click()
+        expect(runs_panel.get_by_text("Reviewer 2 report")).to_be_visible()
+        runs_panel.get_by_text("Unverified citations (1)", exact=True).click()
+        expect(runs_panel.get_by_text("Invented citation", exact=True)).to_be_visible()
+        expect(runs_panel.get_by_role("link", name="Open reviewer report")).to_have_attribute(
+            "href", f"/c/{run_reviewers[1]}?view=review"
+        )
+        assert run_posts == ["capture", "start"]
+        assert len(capture_keys) == len(start_keys) == 1
+        assert not ordinary_creates and not review_events
+        collaborators: list[str] = []
+        publishers: list[str] = []
+        replies: list[dict] = []
+        inline_drafts: dict[str, dict] = {}
+        questions: list[dict] = []
+        agent_answers: list[dict] = []
+        answer_reads = 0
+        discussion_path = f"**/v1/studio/review-runs/{run_id}/discussion"
+
+        def draft_inline_comment(route: Route) -> None:
+            message = route.request.post_data_json
+            if route.request.method == "POST":
+                assert message["anchor"] == {"kind": "finding", "finding_key": finding_key}
+                saved = {
+                    **message,
+                    "thread": message["anchor"],
+                    "anchor": {
+                        "kind": "diff",
+                        "path": "src/app/main.py",
+                        "side": "head",
+                        "start": 2,
+                        "end": 2,
+                    },
+                    "version": 1,
+                    "created_at": review["created_at"],
+                    "updated_at": review["created_at"],
+                }
+                inline_drafts[message["id"]] = saved
+                route.fulfill(json=saved)
+                return
+            draft = inline_drafts[route.request.url.rsplit("/", 1)[-1]]
+            assert route.request.method == "PUT" and message["version"] == draft["version"]
+            draft.update(body=message["body"], version=draft["version"] + 1)
+            route.fulfill(json=draft)
+
+        def discard_inline_comment(route: Route) -> None:
+            draft_id = route.request.url.split("/")[-2]
+            assert route.request.post_data_json["version"] == inline_drafts[draft_id]["version"]
+            del inline_drafts[draft_id]
+            route.fulfill(status=204)
+
+        page.route(f"{discussion_path}/inline-drafts", draft_inline_comment)
+        page.route(f"{discussion_path}/inline-drafts/*", draft_inline_comment)
+        page.route(f"{discussion_path}/inline-drafts/*/discard", discard_inline_comment)
+
+        publish_count = 0
+        publication_digest = "8" * 64
+
+        def inline_publication(route: Route) -> None:
+            nonlocal publish_count
+            body = route.request.post_data_json
+            assert len(body["selected"]) == 1
+            choice = body["selected"][0]
+            draft = inline_drafts[choice["id"]]
+            assert choice["version"] == draft["version"]
+            if route.request.url.endswith("/confirm"):
+                assert body["confirm"] is True and body["digest"] == publication_digest
+                publish_count += 1
+                draft.update(publication_state="posted", provider_url=f"{pr_url}#discussion_r9")
+            else:
+                assert "confirm" not in body and "digest" not in body
+            route.fulfill(
+                json={
+                    **revision,
+                    "run_id": run_id,
+                    "pr_url": pr_url,
+                    "provider": "github",
+                    "digest": publication_digest,
+                    "drafts": [draft],
+                }
+            )
+
+        page.route(f"{discussion_path}/inline-publication/*", inline_publication)
+
+        def grant_discussion_access(route: Route) -> None:
+            data = route.request.post_data_json
+            account = "reviewer@example.test"
+            assert data["user_id"] == account
+            if "can_publish" not in data:
+                collaborators.append(account)
+            elif data["can_publish"] is True:
+                publishers.append(account)
+            else:
+                assert data["can_publish"] is False
+                publishers.remove(account)
+            route.fulfill(status=204)
+
+        def reply_in_discussion(route: Route) -> None:
+            message = route.request.post_data_json
+            expected_anchor = (
+                {"kind": "finding", "finding_key": finding_key}
+                if not replies
+                else {
+                    "kind": "diff",
+                    "path": "src/app/main.py",
+                    "side": "head",
+                    "start": 2,
+                    "end": 2,
+                }
+            )
+            assert message["anchor"] == expected_anchor
+            saved = {**message, "author": "fixture-owner", "created_at": review["created_at"]}
+            replies.append(saved)
+            route.fulfill(json=saved)
+
+        page.route(f"{discussion_path}/collaborators", grant_discussion_access)
+        page.route(f"{discussion_path}/comments", reply_in_discussion)
+
+        sandbox_check = {
+            "command": ["python", "-c", "print('$(literal)')"],
+            "paths": ["src/app/main.py"],
+            "timeout_seconds": 15,
+            "evidence_files": [],
+        }
+
+        def create_private_question(route: Route) -> None:
+            payload = route.request.post_data_json
+            if payload.get("action") == "propose_check":
+                assert payload["anchor"] == {"kind": "finding", "finding_key": finding_key}
+                assert payload["reviewer_key"] == "6" * 64
+                proposed_check = {
+                    **payload,
+                    "session_id": "a" * 32,
+                    "harness": "codex-native",
+                    "status": "accepted",
+                    "answer_state": "ready",
+                    "answer": "Inspect the exported file on both revisions.",
+                    "proposed_check": sandbox_check,
+                    "proposed_check_digest": "d" * 64,
+                    "published_at": None,
+                    "updated_at": review["created_at"],
+                }
+                questions.append(proposed_check)
+                route.fulfill(json=proposed_check)
+                return
+            if payload.get("action") == "propose_fix":
+                assert payload["anchor"] == {"kind": "finding", "finding_key": finding_key}
+                assert payload["reviewer_key"] == "6" * 64
+                fixed = {
+                    **payload,
+                    "session_id": "7" * 32,
+                    "harness": "codex-native",
+                    "status": "accepted",
+                    "answer_state": "ready",
+                    "answer": "Validate the input before using it.",
+                    "proposed_patch": proposed_patch,
+                    "published_at": None,
+                    "updated_at": review["created_at"],
+                }
+                questions.append(fixed)
+                route.fulfill(json=fixed)
+                return
+            assert payload["anchor"] == replies[-1]["anchor"]
+            assert payload["agent_id"] == agent_id and "host_id" not in payload
+            assert payload["model"] == model and payload["reasoning_effort"] == "high"
+            assert "reviewer_key" not in payload
+            if questions:
+                assert payload["id"] == questions[0]["id"]
+                route.fulfill(json=questions[0])
+                return
+            saved = {
+                "id": payload["id"],
+                "anchor": payload["anchor"],
+                "body": payload["body"],
+                "session_id": "9" * 32,
+                "harness": "codex-native",
+                "status": "accepted",
+                "answer_state": "pending",
+                "answer": None,
+                "published_at": None,
+                "updated_at": review["created_at"],
+            }
+            questions.append(saved)
+            route.fulfill(status=503, json={"detail": "Dispatch response lost"})
+
+        def private_question_status(route: Route) -> None:
+            nonlocal answer_reads
+            if questions[-1].get("action") == "propose_check":
+                check_question = questions[-1]
+                assert route.request.url.endswith(check_question["id"])
+                check_question["check_job"].update(state="attached", receipt_digest="e" * 64)
+                route.fulfill(json=check_question)
+                return
+            question = questions[0]
+            assert question["id"] in route.request.url
+            if route.request.method == "GET":
+                answer_reads += 1
+                if answer_reads == 1:
+                    route.fulfill(status=503, json={"detail": "Answer temporarily unavailable"})
+                    return
+            question.update(
+                answer_state="ready",
+                answer="The added line handles only valid input.",
+                citations=[
+                    {"path": "src/app/main.py", "side": "head", "line": 2, "quote": "added line"}
+                ],
+            )
+            if route.request.method == "POST":
+                question["published_at"] = review["created_at"]
+                agent_answers.append(
+                    {
+                        "id": question["id"],
+                        "anchor": question["anchor"],
+                        "question": question["body"],
+                        "answer": question["answer"],
+                        "citations": question["citations"],
+                        "harness": question["harness"],
+                        "requested_by": "fixture-owner",
+                        "published_at": question["published_at"],
+                    }
+                )
+                agent_answers.append(
+                    {
+                        **agent_answers[0],
+                        "id": "5" * 32,
+                        "requested_by": "teammate",
+                        "citations": [],
+                    }
+                )
+            route.fulfill(json=question)
+
+        def approve_check(route: Route) -> None:
+            assert route.request.post_data_json == {
+                "proposal_digest": "d" * 64,
+                "image_id": "sha256:" + "c" * 64,
+                "confirm": True,
+            }
+            proposal = questions[-1]
+            assert route.request.url.endswith(f"{proposal['id']}/run-check")
+            proposal["check_job"] = {
+                "id": "b" * 32,
+                "state": "running",
+                "image_id": "sha256:" + "c" * 64,
+                "started_at": review["created_at"],
+                "files_attached": 0,
+            }
+            route.fulfill(status=202, json=proposal["check_job"])
+
+        page.route(f"{discussion_path}/questions", create_private_question)
+        page.route(f"{discussion_path}/questions/*", private_question_status)
+        page.route(f"{discussion_path}/questions/*/share", private_question_status)
+        page.route(f"{discussion_path}/questions/*/run-check", approve_check)
+        page.route(
+            discussion_path,
+            lambda route: route.fulfill(
+                json={
+                    "id": run_id,
+                    **revision,
+                    "project_name": project_name,
+                    "repository": repository,
+                    "pr_url": pr_url,
+                    "pr_number": _PR_NUMBER,
+                    "patch": _PR_DIFF["patch"],
+                    "patch_sha256": patch_sha,
+                    "reports": [
+                        {
+                            "key": "6" * 64,
+                            "label": "Backend review",
+                            "state": "ready",
+                            "summary": report["summary"],
+                        }
+                    ],
+                    "findings": [{"key": finding_key, "finding": report["findings"][0]}],
+                    "comments": replies,
+                    "inline_drafts": list(inline_drafts.values()),
+                    "questions": questions,
+                    "agent_answers": agent_answers,
+                    "can_comment": True,
+                    "can_draft_inline": True,
+                    "can_publish_inline": True,
+                    "can_ask": True,
+                    "can_use_review_workspace": True,
+                    "check_repository": workspace,
+                    "review_workspace_host_id": host_id,
+                    "collaborators": collaborators,
+                    "publishers": publishers,
+                    "sharing_available": True,
+                }
+            ),
+        )
+        runs_panel.get_by_role("link", name="Discuss finding", exact=True).click()
+        expect(page.get_by_role("heading", name="Review discussion")).to_be_visible()
+        expect(page.get_by_role("region", name="Selected thread")).to_be_focused()
+        page.screenshot(path=str(tmp_path / "review-discussion-start.png"))
+        page.get_by_text("Share this review", exact=True).click()
+        page.get_by_label("Omnigent account ID").fill("reviewer@example.test")
+        page.get_by_role("button", name="Grant access", exact=True).click()
+        expect(page.get_by_text("reviewer@example.test", exact=True)).to_be_visible()
+        page.get_by_role("button", name="Allow publishing", exact=True).click()
+        expect(page.get_by_text("reviewer@example.test · Publisher", exact=True)).to_be_visible()
+        page.get_by_role("button", name="Remove publishing access", exact=True).click()
+        expect(page.get_by_text("reviewer@example.test", exact=True)).to_be_visible()
+        page.get_by_role("textbox", name="Internal reply").fill(
+            "Can we reproduce with empty input?"
+        )
+        page.get_by_role("button", name="Post internal reply", exact=True).click()
+        expect(page.get_by_text("Can we reproduce with empty input?", exact=True)).to_be_visible()
+        drafts = page.get_by_role("region", name="Your inline drafts")
+        drafts.get_by_role("button", name="Comment on PR", exact=True).click()
+        drafts.get_by_role("textbox", name="Inline comment draft").fill("Check the input first.")
+        drafts.get_by_role("button", name="Save for batch", exact=True).click()
+        expect(drafts.get_by_text("src/app/main.py:2 · Head", exact=True)).to_be_visible()
+        expect(drafts.get_by_text("Check the input first.", exact=True)).to_be_visible()
+        drafts.get_by_role("button", name="Edit draft").click()
+        drafts.get_by_role("textbox", name="Inline comment draft").fill(
+            "Validate empty input first."
+        )
+        drafts.get_by_role("button", name="Save for batch", exact=True).click()
+        expect(drafts.get_by_text("Validate empty input first.", exact=True)).to_be_visible()
+        page.screenshot(path=str(tmp_path / "review-inline-draft.png"))
+        drafts.get_by_role("button", name="Discard draft").click()
+        expect(drafts.get_by_text("Validate empty input first.", exact=True)).to_have_count(0)
+        drafts.get_by_role("button", name="Comment on PR", exact=True).click()
+        drafts.get_by_role("textbox", name="Inline comment draft").fill("Publish this line.")
+        drafts.get_by_role("button", name="Save for batch", exact=True).click()
+        drafts.get_by_role("button", name="Review batch", exact=True).click()
+        publishing = page.get_by_role("region", name="Publish inline drafts")
+        expect(publishing).to_be_focused()
+        publishing.get_by_role("checkbox", name=re.compile("Publish this line")).check()
+        publishing.get_by_role("button", name="Preview selected").click()
+        expect(publishing.get_by_role("heading", name="Publication preview")).to_be_visible()
+        expect(publishing.get_by_text(head_sha[:12], exact=False)).to_be_visible()
+        assert publish_count == 0
+        page.screenshot(path=str(tmp_path / "review-inline-publication-preview.png"))
+        publishing.get_by_role("button", name="Publish 1 inline comment", exact=True).click()
+        expect(publishing.get_by_role("link", name="Open published comment")).to_have_attribute(
+            "href", f"{pr_url}#discussion_r9"
+        )
+        expect(drafts.get_by_role("link", name="Open published comment")).to_have_attribute(
+            "href", f"{pr_url}#discussion_r9"
+        )
+        assert publish_count == 1
+        page.screenshot(path=str(tmp_path / "review-discussion.png"))
+        page.get_by_role("textbox", name="Internal reply").fill("An unsent finding reply.")
+        page.get_by_role("region", name="Review context").locator(
+            '[data-column-number="2"][data-line-type="change-addition"]'
+        ).click()
+        thread = page.get_by_role("region", name="Selected thread")
+        expect(thread.get_by_role("heading", name="src/app/main.py:2 · Head")).to_be_visible()
+        thread.get_by_role("textbox", name="Internal reply").fill("Check this changed line.")
+        thread.get_by_role("button", name="Post internal reply", exact=True).click()
+        expect(thread.get_by_text("Check this changed line.", exact=True)).to_be_visible()
+
+        def ask_question() -> None:
+            thread.get_by_role("button", name="Ask an agent", exact=True).click()
+            thread.get_by_label("Answer with").select_option("reviewer:" + "6" * 64)
+            expect(thread.get_by_label("Model", exact=True)).to_have_count(0)
+            thread.get_by_label("Answer with").select_option(agent_id)
+            thread.get_by_label("Model", exact=True).select_option(model)
+            thread.get_by_label("Reasoning effort", exact=True).select_option("high")
+            thread.get_by_label("Question for agent").fill("What does this line handle?")
+            page.screenshot(path=str(tmp_path / "review-question-model.png"))
+            thread.get_by_role("button", name="Ask privately", exact=True).click()
+
+        ask_question()
+        expect(thread.get_by_role("alert")).to_contain_text("Dispatch response lost")
+        thread.get_by_role("button", name="Ask an agent", exact=True).click()
+        ask_question()
+        expect(thread.get_by_role("alert")).to_contain_text("Answer temporarily unavailable")
+        expect(thread.get_by_role("link", name="Open private session")).to_be_visible()
+        thread.get_by_role("button", name="Check for answer", exact=True).click()
+        expect(
+            thread.get_by_text("The added line handles only valid input.", exact=True)
+        ).to_be_visible()
+        excerpts = thread.get_by_role("region", name="Matched diff excerpts")
+        expect(excerpts.get_by_text("added line", exact=True)).to_be_visible()
+        expect(thread.get_by_role("link", name="Open private session")).to_have_attribute(
+            "href", "/c/" + "9" * 32
+        )
+        thread.get_by_role("button", name="Share answer", exact=True).click()
+        expect(
+            thread.get_by_text("Codex answer · Shared by fixture-owner", exact=True)
+        ).to_be_visible()
+        expect(excerpts.get_by_text("added line", exact=True)).to_be_visible()
+        expect(thread.get_by_role("link", name="Continue in private session")).to_have_attribute(
+            "href", "/c/" + "9" * 32
+        )
+        expect(thread.get_by_text("Codex answer · Shared by teammate", exact=True)).to_be_visible()
+        expect(thread.get_by_role("link", name="Continue in private session")).to_have_count(1)
+        page.screenshot(path=str(tmp_path / "review-agent-answer.png"))
+        page.get_by_role("button", name=re.compile(r"Keep the input validation")).click()
+        expect(thread.get_by_role("textbox", name="Internal reply")).to_have_value(
+            "An unsent finding reply."
+        )
+        thread.get_by_role("button", name="Propose a fix", exact=True).click()
+        thread.get_by_label("Answer with").select_option("reviewer:" + "6" * 64)
+        thread.get_by_role("button", name="Request private proposal", exact=True).click()
+        expect(thread.get_by_text("Private fix proposal · Codex")).to_be_visible()
+        thread.get_by_text("Preview proposed patch", exact=True).click()
+        expect(thread.locator("pre").filter(has_text="+verified input")).to_be_visible()
+        expect(thread.get_by_role("button", name="Share answer", exact=True)).to_have_count(0)
+        with page.expect_download() as download:
+            thread.get_by_role("button", name="Download patch", exact=True).click()
+        assert download.value.path().read_bytes() == proposed_patch.encode()
+        page.screenshot(path=str(tmp_path / "review-private-fix-proposal.png"))
+        page.context.grant_permissions(["clipboard-read", "clipboard-write"], origin=base_url)
+        thread.get_by_role("button", name="More actions", exact=True).click()
+        page.get_by_role("menuitem", name="Draft sandbox check", exact=True).click()
+        thread.get_by_label("Answer with").select_option("reviewer:" + "6" * 64)
+        thread.get_by_role("button", name="Request private proposal", exact=True).click()
+        card = thread.get_by_role("region", name="Sandbox check proposal")
+        expect(card).to_be_visible()
+        card.get_by_text("Run from terminal", exact=True).click()
+        run_button = card.get_by_role("button", name="Run on workspace host", exact=True)
+        expect(run_button).to_be_disabled()
+        command_button = card.get_by_role("button", name="Copy sandbox command", exact=True)
+        expect(command_button).to_be_disabled()
+        card.get_by_label("Docker image ID").fill("sha256:" + "c" * 64)
+        command_button.click()
+        expect(card.get_by_text("Command copied.")).to_be_visible()
+        tokens = shlex.split(page.evaluate("navigator.clipboard.readText()"))
+        assert tokens[tokens.index("--proposal-id") + 1] == questions[-1]["id"]
+        assert tokens[tokens.index("--") + 1 : tokens.index("&&")] == sandbox_check["command"]
+        assert tokens[tokens.index("--finding") + 1] == finding_key
+        run_button.click()
+        expect(card.get_by_text("Check results attached", exact=True)).to_be_visible()
+        page.screenshot(path=str(tmp_path / "review-sandbox-check-proposal.png"))
+        page.set_viewport_size({"width": 390, "height": 844})
+        discussion_region = page.get_by_role("region", name="Internal discussion")
+        context_region = page.get_by_role("region", name="Review context")
+        assert discussion_region.bounding_box()["y"] < context_region.bounding_box()["y"]
+        thread.get_by_role("button", name="View cited line", exact=True).click()
+        expect(context_region.get_by_role("heading", name="Captured diff")).to_be_focused()
+        context_region.get_by_role("button", name="Back to thread", exact=True).click()
+        expect(thread).to_be_focused()
+        ask_button = thread.get_by_role("button", name="Ask an agent", exact=True)
+        if ask_button.get_attribute("aria-expanded") != "true":
+            ask_button.click()
+        question = thread.get_by_role("textbox", name="Question for agent", exact=True)
+        question.fill("Can you clarify this result?")
+        ask_button.click()
+        ask_button.click()
+        expect(question).to_have_value("Can you clarify this result?")
+        assert page.evaluate("document.documentElement.scrollWidth === window.innerWidth")
+        ask_button.click()
+        page.screenshot(path=str(tmp_path / "review-discussion-mobile.png"))
+        return
+
+    page.goto(f"{base_url}/{'canvas/' if entry == 'canvas' else ''}c/{session_id}")
+    panel = (
+        page.get_by_test_id("github-panel-drawer")
+        if mobile
+        else page.get_by_role("complementary", name="Workspace")
+    )
+    if rail:
+        open_right_rail(page)
+        panel.get_by_role("tab", name="Pull Requests", exact=True).click()
+        panel.get_by_text("Workspace repositories", exact=True).click()
+        picker = panel.get_by_role("combobox", name="Workspace repository", exact=True)
+        expect(picker).to_have_value("KVARK")
+        expect(panel.get_by_text("Uses Services", exact=True)).to_be_visible()
+        expect(panel.get_by_text("repos.yaml", exact=True)).to_be_visible()
+        expect(panel.get_by_text("Ready", exact=True)).to_be_visible()
+        find_button = panel.get_by_role("button", name="Find branch PR", exact=True)
+        expect(find_button).to_be_enabled()
+        page.screenshot(path=str(tmp_path / "workspace-repositories.png"))
+        picker.select_option("Services")
+        expect(panel.get_by_text("Supporting services", exact=True)).to_be_visible()
+        panel.get_by_role("button", name="Manage repositories").click()
+        settings = page.get_by_role("dialog", name="Workspace repositories")
+        settings.get_by_role("button", name="Scan repositories").click()
+        nested = settings.get_by_role("combobox", name=f"Role for {nested_path}")
+        expect(nested).to_have_value("reference")
+        assert not promoted
+        nested.select_option("active")
+        page.screenshot(path=str(tmp_path / "workspace-repository-discovery.png"))
+        settings.get_by_role("button", name="Save repositories").click()
+        expect(settings.get_by_text("Repository settings saved.")).to_be_visible()
+        settings.get_by_role("button", name="Close", exact=True).click()
+        expect(picker.get_by_role("option", name=nested_path)).to_have_count(1)
+        expect(picker.get_by_role("option", name=reference_path)).to_have_count(0)
+        picker.select_option(nested_path)
+        assert branch_reads == []
+        find_button.click()
+        expect(panel.get_by_text(pr_title, exact=False)).to_be_visible()
+        expect(panel.get_by_text(branch, exact=True)).to_be_visible()
+        expect(panel.get_by_text(remote, exact=True)).to_be_visible()
+        assert branch_reads == [nested_path]
+        assert not attached
+        page.screenshot(path=str(tmp_path / "workspace-repositories-branch-pr.png"))
+        panel.get_by_role("button", name="Link this PR", exact=True).click()
+        panel.get_by_text("Workspace repositories", exact=True).click()
+    else:
+        if mobile:
+            # The hydrated session replaces the provisional header menu.
+            expect(
+                page.get_by_role("button", name=re.compile(f"^Host {host_id},"))
+            ).to_be_visible()
+        open_session_pull_requests(page, mobile=mobile)
+    tabs = panel.get_by_role("tablist", name="Pull request", exact=True)
+    tabs.get_by_role("tab", name="Review", exact=True).click()
+    panel.get_by_role("combobox", name="Reviewer", exact=True).click()
+    page.get_by_role("option", name="Codex", exact=True).click()
+    if rail:
+        panel.get_by_role("button", name="Manage profiles").click()
+        editor = page.get_by_role("dialog", name="Reviewer profiles")
+        editor.get_by_role("button", name="New profile").click()
+        editor.get_by_role("textbox", name="Name", exact=True).fill(role["label"])
+        editor.get_by_role("textbox", name="Profile ID").fill(role["id"])
+        editor.get_by_role("textbox", name="Description").fill(role["description"])
+        editor.get_by_role("textbox", name="Instructions").fill(role_instructions)
+        editor.get_by_role("button", name="Preview").click()
+        expect(editor.get_by_text("API boundaries", exact=True)).to_be_visible()
+        assert not profile_saved
+        page.screenshot(path=str(tmp_path / "workspace-profile-editor.png"))
+        editor.get_by_role("button", name="Save profile").click()
+        expect(editor.get_by_text("Profile saved", exact=True)).to_be_visible()
+        editor.get_by_role("button", name="Close", exact=True).click()
+        panel.get_by_role("combobox", name="Reviewer profile", exact=True).click()
+        page.get_by_role("option", name="Backend QA", exact=True).click()
+        expect(panel.get_by_text(role["description"], exact=True)).to_be_visible()
+    else:
+        panel.get_by_role("combobox", name="Review skill", exact=True).click()
+        page.get_by_role("option", name="team-review", exact=True).click()
+    panel.get_by_text("Model and workspace settings", exact=False).click()
+    if rail:
+        expect(
+            panel.get_by_role("region", name="Run a review").get_by_text(workspace)
+        ).to_be_visible()
+    panel.get_by_role("combobox", name="Model", exact=True).click()
+    page.get_by_role("option", name="Review Model", exact=True).click()
+    panel.get_by_role("combobox", name="Reasoning effort", exact=True).click()
+    page.get_by_role("option", name="High", exact=True).click()
+    if rail:
+        page.screenshot(path=str(tmp_path / "studio-review-role-and-model.png"))
+    run_button = panel.get_by_role("button", name="Run review", exact=True)
+    if entry == "rail":
+        # Plain HTTP omits randomUUID. Mask it after app setup to exercise the action itself.
+        page.evaluate("() => Object.defineProperty(crypto, 'randomUUID', { value: undefined })")
+    run_button.click()
+    if entry == "rail":
+        expect(panel.get_by_role("alert")).to_have_text("Start response unavailable")
+        run_button.click()
+    expect(panel.get_by_text("Review requested", exact=True)).to_be_visible()
+    expect(
+        panel.get_by_text(re.compile("The reviewer has not produced a complete report"))
+    ).to_be_visible()
+    expect(panel.get_by_role("link", name="Open review report")).to_have_attribute(
+        "href", f"/c/{reviewer_id}?view=review"
+    )
+    report.update(
+        state="ready",
+        summary="Reviewed the captured patch.",
+        message_id="report-1",
+        findings=[
+            {
+                "title": "Keep the input validation",
+                "detail": "The new branch accepts invalid values.",
+                "severity": "high",
+                "path": "src/app/main.py",
+                "side": "head",
+                "line": 2,
+            }
+        ],
+    )
+    panel.get_by_role("button", name="Refresh report", exact=True).click()
+    expect(panel.get_by_role("heading", name="Keep the input validation")).to_be_visible()
+    expect(panel.get_by_role("link", name="Open source")).to_have_attribute(
+        "href", f"{head_repo}/blob/{head_sha}/src/app/main.py#L2"
+    )
+    page.screenshot(path=str(tmp_path / f"studio-review-{entry}-findings.png"))
+    if entry == "rail":
+        panel.get_by_role("button", name="Load older reviews", exact=True).click()
+        expect(panel.get_by_text("Couldn’t load review history.", exact=True)).to_be_visible()
+        expect(panel.get_by_role("heading", name="Keep the input validation")).to_be_visible()
+        panel.get_by_role("button", name="Retry history", exact=True).click()
+        expect(panel.get_by_text("Couldn’t load review history.", exact=True)).to_have_count(0)
+        panel.get_by_role("button", name="Full screen", exact=True).click()
+        tabs.get_by_role("tab", name="Changes", exact=True).click()
+        panel.get_by_role("button", name="Find in changes", exact=True).click()
+        panel.get_by_role("textbox", name="Find in changes", exact=True).fill("line2")
+        expect(panel.get_by_text("1 of 1", exact=True)).to_be_visible()
+        tabs.get_by_role("tab", name="Review", exact=True).click()
+    panel.get_by_role("button", name="Show in diff", exact=True).click()
+    expect(panel.get_by_text("Review finding · src/app/main.py:2", exact=True)).to_be_visible()
+    expect(panel.get_by_role("textbox", name="Find in changes", exact=True)).to_have_count(0)
+    page.wait_for_function(
+        """() => [...(CSS.highlights.get("pr-find-active") ?? [])].some((range) =>
+            range.startContainer.isConnected && range.toString() === "added line"
+            && range.startContainer.parentElement.closest("[data-line]")
+                ?.getAttribute("data-line") === "2")"""
+    )
+    if entry == "rail":
+        panel.get_by_role("button", name="Find in changes", exact=True).press("ControlOrMeta+f")
+        panel.get_by_role("textbox", name="Find in changes", exact=True).fill("line2")
+        page.wait_for_function(
+            """() => [...(CSS.highlights.get("pr-find-active") ?? [])].some((range) =>
+                range.startContainer.isConnected && range.toString() === "line2")"""
+        )
+        tabs.get_by_role("tab", name="Review", exact=True).click()
+        info["pr"]["head_sha"] = "3" * 40
+        panel.get_by_role("button", name="Refresh", exact=True).click()
+        expect(panel.get_by_text("Outdated", exact=True)).to_be_visible()
+        expect(panel.get_by_role("button", name="Show in diff", exact=True)).to_have_count(0)
+        panel.get_by_role("button", name="Load older reviews", exact=True).click()
+        expect(tabs.get_by_role("tab", name="Review", exact=True)).to_have_count(0)
+    assert len(capture_keys) == 1
+    assert re.fullmatch(
+        r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+        capture_keys[0],
+    )
+    assert len(start_keys) == (2 if entry == "rail" else 1)
+    assert len(set(start_keys)) == 1
+    if rail:
+        assert attached
+        assert branch_reads == [nested_path]
 
 
 # Two additions match "added": the first on line 2, the second on line 4.
@@ -1191,7 +2872,7 @@ def test_changes_find_reveals_collapsed_and_filtered(
         else page.get_by_role("complementary", name="Workspace")
     )
     if mobile:
-        page.get_by_test_id("composer-pr-link").click()
+        open_session_pull_requests(page, mobile=mobile)
     else:
         open_right_rail(page)
         panel.get_by_role("tab", name="Pull Requests").click()
@@ -1262,11 +2943,25 @@ def test_changes_find_reveals_collapsed_and_filtered(
     page.screenshot(path=str(tmp_path / f"find-{entry}-reopened.png"))
 
 
+# README.md's hunk, so its viewed mark has a patch to be checked against.
+_README_PATCH = (
+    "diff --git a/README.md b/README.md\n"
+    "new file mode 100644\n"
+    "index 0000000..4c2d3e1\n"
+    "--- /dev/null\n"
+    "+++ b/README.md\n"
+    "@@ -0,0 +1,2 @@\n"
+    "+# Demo\n"
+    "+Adds the GitHub tab.\n"
+)
+
+
 @pytest.mark.parametrize("entry", ["rail", "composer-mobile"])
 def test_changes_viewed_progress_persists_and_resets(
     page: Page, seeded_session: tuple[str, str], tmp_path: Path, entry: str
 ) -> None:
-    """Viewed marks collapse files, survive a reload, and reset when the PR gets a new head."""
+    """Viewed marks collapse files and survive a reload. A new head keeps the mark on an
+    unchanged file and flags a changed one as "Changed since viewed"."""
     base_url, session_id = seeded_session
     mobile = entry == "composer-mobile"
     page.set_viewport_size({"width": 390 if mobile else 1280, "height": 900})
@@ -1274,6 +2969,11 @@ def test_changes_viewed_progress_persists_and_resets(
     pr_url = _INFO["pr"]["url"]
     # The PR's head moves mid-test, so every resource answers for the current head.
     head = {"sha": "head1"}
+    # head2 reworks main.py's hunk and leaves README.md's hunk as it was.
+    patches = {
+        "head1": _PR_DIFF["patch"] + _README_PATCH,
+        "head2": _PR_DIFF["patch"].replace("+added line", "+reworked line") + _README_PATCH,
+    }
 
     def info_at_head(route: Route) -> None:
         route.fulfill(
@@ -1301,12 +3001,19 @@ def test_changes_viewed_progress_persists_and_resets(
     )
     page.route(
         re.compile(r"/resources/github/diff(?:\?|$)"),
-        lambda r: r.fulfill(json={**_PR_DIFF, "head_sha": head["sha"], "base_sha": "base"}),
+        lambda r: r.fulfill(
+            json={
+                **_PR_DIFF,
+                "patch": patches[head["sha"]],
+                "head_sha": head["sha"],
+                "base_sha": "base",
+            }
+        ),
     )
 
     def open_changes() -> Locator:
         if mobile:
-            page.get_by_test_id("composer-pr-link").click()
+            open_session_pull_requests(page, mobile=mobile)
             panel = page.get_by_test_id("github-panel-drawer")
         else:
             open_right_rail(page)
@@ -1321,11 +3028,12 @@ def test_changes_viewed_progress_persists_and_resets(
     panel = open_changes()
     expect(panel.get_by_text("0 / 2 files viewed", exact=True)).to_be_visible(timeout=30_000)
     panel.get_by_role("checkbox", name="Viewed README.md").click()
+    panel.get_by_role("checkbox", name="Viewed src/app/main.py").click()
     expect(panel.get_by_role("checkbox", name="Viewed README.md")).to_be_checked()
-    expect(panel.get_by_text("1 / 2 files viewed", exact=True)).to_be_visible()
+    expect(panel.get_by_text("2 / 2 files viewed", exact=True)).to_be_visible()
     if not mobile:  # Mobile shows the count without the bar.
         expect(panel.get_by_role("progressbar", name="Files viewed")).to_have_attribute(
-            "aria-valuenow", "50"
+            "aria-valuenow", "100"
         )
     # Marking collapses the file's diff.
     expect(
@@ -1337,22 +3045,26 @@ def test_changes_viewed_progress_persists_and_resets(
     page.reload()
     panel = open_changes()
     expect(panel.get_by_role("checkbox", name="Viewed README.md")).to_be_checked(timeout=30_000)
-    expect(panel.get_by_text("1 / 2 files viewed", exact=True)).to_be_visible()
+    expect(panel.get_by_text("2 / 2 files viewed", exact=True)).to_be_visible()
 
-    # A new head starts with no marks and says so until the notice is dismissed.
+    # The new head changes main.py's hunk. README.md keeps its mark, and main.py loses its
+    # mark and is flagged until it is marked again.
     head["sha"] = "head2"
     page.reload()
     panel = open_changes()
-    expect(panel.get_by_text("0 / 2 files viewed", exact=True)).to_be_visible(timeout=30_000)
-    expect(panel.get_by_role("checkbox", name="Viewed README.md")).not_to_be_checked()
-    expect(panel.get_by_text(re.compile("viewed marks were reset"))).to_be_visible()
+    expect(panel.get_by_text("1 / 2 files viewed", exact=True)).to_be_visible(timeout=30_000)
+    expect(panel.get_by_role("checkbox", name="Viewed README.md")).to_be_checked()
+    expect(panel.get_by_role("checkbox", name="Viewed src/app/main.py")).not_to_be_checked()
+    expect(panel.get_by_text("Changed since viewed", exact=True)).to_have_count(1)
+    expect(panel.get_by_text(re.compile("changed files lost their viewed marks"))).to_be_visible()
     page.screenshot(path=str(tmp_path / f"viewed-{entry}-reset.png"), animations="disabled")
     panel.get_by_role("button", name="Dismiss", exact=True).click()
-    expect(panel.get_by_text(re.compile("viewed marks were reset"))).to_have_count(0)
+    expect(panel.get_by_text(re.compile("changed files lost their viewed marks"))).to_have_count(0)
 
-    # Hiding viewed files, once every file is viewed, shows the all-viewed state.
-    panel.get_by_role("checkbox", name="Viewed README.md").click()
+    # Marking the changed file on the new head clears its badge. Then hiding viewed files,
+    # once every file is viewed, shows the all-viewed state.
     panel.get_by_role("checkbox", name="Viewed src/app/main.py").click()
+    expect(panel.get_by_text("Changed since viewed", exact=True)).to_have_count(0)
     panel.get_by_role("checkbox", name="Hide viewed").click()
     expect(panel.get_by_text("All 2 files viewed", exact=True)).to_be_visible()
     if not mobile:
@@ -1438,7 +3150,7 @@ def test_changes_filter_copy_open(page: Page, seeded_session: tuple[str, str], e
     page.context.grant_permissions(["clipboard-read", "clipboard-write"], origin=base_url)
     page.goto(f"{base_url}/c/{session_id}")
     if is_mobile:
-        page.get_by_test_id("composer-pr-link").click()
+        open_session_pull_requests(page, mobile=True)
         panel = page.get_by_test_id("github-panel-drawer")
         expect(panel).to_have_attribute("data-state", "open")
     else:
@@ -1476,3 +3188,165 @@ def test_changes_filter_copy_open(page: Page, seeded_session: tuple[str, str], e
     expect(page.get_by_role("menuitem", name="Open in GitHub")).to_have_attribute(
         "href", "https://example.com/fork/app/blob/head/README.md"
     )
+
+
+_COMMIT_ONE, _COMMIT_TWO = "1" * 40, "2" * 40
+# GET /resources/github/commits — oldest first; each commit's patch is served by sha below.
+_COMMITS = {
+    "object": "list",
+    "has_more": False,
+    "data": [
+        {
+            "object": "session.github.commit",
+            "sha": _COMMIT_ONE,
+            "title": "Add the parser",
+            "author": "Ada",
+            "date": "2026-11-01T10:00:00Z",
+        },
+        {
+            "object": "session.github.commit",
+            "sha": _COMMIT_TWO,
+            "title": "Wire the README",
+            "author": "Grace",
+            "date": "2026-11-02T10:00:00Z",
+        },
+    ],
+}
+_COMMIT_PATCHES = {
+    _COMMIT_ONE: _PR_DIFF["patch"],
+    _COMMIT_TWO: (
+        "diff --git a/README.md b/README.md\n"
+        "new file mode 100644\n"
+        "--- /dev/null\n"
+        "+++ b/README.md\n"
+        "@@ -0,0 +1 @@\n"
+        "+# Demo\n"
+    ),
+}
+
+
+@pytest.mark.parametrize("entry", ["rail"])
+def test_changes_commits_view_lists_and_opens_a_commit(
+    page: Page, seeded_session: tuple[str, str], tmp_path: Path, entry: str
+) -> None:
+    """Switch the Changes tab to Commits, open one commit, and step between commits.
+
+    Only the commit's own files are listed, the viewed controls are absent there, and
+    Back returns to the commit list. Back in Changes, **Changes since** narrows the tab to
+    the changes after a picked commit and the PR base restores them all. The commit list
+    and patches are stubbed routes.
+    """
+    base_url, session_id = seeded_session
+    pr_url = _INFO["pr"]["url"]
+    _stub_github(page)
+    # Commit history needs the Changes list pinned to a head, and the provider to support it.
+    page.route(
+        re.compile(r"/resources/github(?:\?|$)"),
+        lambda route: route.fulfill(
+            json={
+                **_INFO,
+                "tracking_available": True,
+                "selected_pr_url": pr_url,
+                "capabilities": {"commit_history": True},
+                "prs": [
+                    {
+                        "url": pr_url,
+                        "host": "example.com",
+                        "repository": "acme/app",
+                        "number": _PR_NUMBER,
+                        "relationship": "created",
+                    }
+                ],
+            }
+        ),
+    )
+    page.route(
+        re.compile(r"/resources/github/changes"),
+        lambda route: route.fulfill(json={**_CHANGES, "head_sha": "head", "base_sha": "base"}),
+    )
+    list_urls: list[str] = []
+    patch_urls: list[str] = []
+
+    def commit_list(route: Route) -> None:
+        list_urls.append(route.request.url)
+        route.fulfill(json=_COMMITS)
+
+    def commit_patch(route: Route) -> None:
+        patch_urls.append(route.request.url)
+        sha = re.search(r"commit_sha=([0-9a-f]+)", route.request.url)
+        assert sha is not None, route.request.url
+        route.fulfill(
+            json={"object": "session.github.pr_diff", "patch": _COMMIT_PATCHES[sha.group(1)]}
+        )
+
+    page.route(re.compile(r"/resources/github/commits"), commit_list)
+    # The whole-PR patch reports the head it describes, so viewed marks are available in Changes.
+    page.route(
+        re.compile(r"/resources/github/diff(?:\?|$)"),
+        lambda route: route.fulfill(json={**_PR_DIFF, "head_sha": "head", "base_sha": "base"}),
+    )
+    page.route(re.compile(r"/resources/github/commit-diff\?"), commit_patch)
+    compare_urls: list[str] = []
+
+    def changes_since_patch(route: Route) -> None:
+        compare_urls.append(route.request.url)
+        # After the first commit, only the second commit's changes reach the head.
+        route.fulfill(
+            json={"object": "session.github.pr_diff", "patch": _COMMIT_PATCHES[_COMMIT_TWO]}
+        )
+
+    page.route(re.compile(r"/resources/github/compare-diff\?"), changes_since_patch)
+    page.goto(f"{base_url}/c/{session_id}")
+    open_right_rail(page)
+    panel = page.get_by_role("complementary", name="Workspace")
+    panel.get_by_role("tab", name="Pull Requests").click()
+    panel.get_by_role("tablist", name="Pull request").get_by_role("tab", name="Changes").click()
+    files = panel.locator("[data-github-file]")
+    expect(files).to_have_count(2, timeout=30_000)
+    expect(panel.get_by_role("checkbox", name="Hide viewed")).to_be_visible()
+    expect(panel.get_by_role("checkbox", name="Viewed src/app/main.py")).to_be_visible()
+
+    panel.get_by_role("group", name="Show changes or commits").get_by_role(
+        "button", name="Commits", exact=True
+    ).click()
+    search = panel.get_by_role("searchbox", name="Search commits")
+    expect(panel.get_by_text("2 commits", exact=True)).to_be_visible()
+    search.fill("readme")
+    expect(panel.get_by_role("button", name=re.compile("Wire the README"))).to_be_visible()
+    expect(panel.get_by_role("button", name=re.compile("Add the parser"))).to_have_count(0)
+    search.fill("")
+    page.screenshot(path=str(tmp_path / f"commits-{entry}-list.png"), animations="disabled")
+
+    panel.get_by_role("button", name=re.compile("Add the parser")).click()
+    expect(files).to_have_count(1)
+    expect(files).to_have_attribute("data-github-file", "src/app/main.py")
+    expect(panel.get_by_role("checkbox", name="Hide viewed")).to_have_count(0)
+    expect(panel.get_by_role("checkbox", name="Viewed src/app/main.py")).to_have_count(0)
+    # The list is pinned to the head the Changes list shows; the patch names the selected commit.
+    assert "head_sha=head" in list_urls[0], list_urls
+    assert "/resources/github/commit-diff?" in patch_urls[-1], patch_urls
+    assert f"commit_sha={_COMMIT_ONE}" in patch_urls[-1], patch_urls
+    page.screenshot(path=str(tmp_path / f"commits-{entry}-diff.png"), animations="disabled")
+
+    panel.get_by_role("button", name="Next commit").click()
+    expect(files).to_have_attribute("data-github-file", "README.md")
+    panel.get_by_role("button", name="Back to commits").click()
+    expect(panel.get_by_text("2 commits", exact=True)).to_be_visible()
+
+    panel.get_by_role("group", name="Show changes or commits").get_by_role(
+        "button", name="Changes", exact=True
+    ).click()
+    expect(files).to_have_count(2)
+    panel.get_by_role("combobox", name="Changes since").click()
+    page.get_by_role("option", name=re.compile("Add the parser")).click()
+    expect(files).to_have_count(1)
+    expect(files).to_have_attribute("data-github-file", "README.md")
+    # The narrowed patch is pinned to the head the Changes list shows, after the picked commit.
+    assert "head_sha=head" in compare_urls[-1], compare_urls
+    assert f"from_sha={_COMMIT_ONE}" in compare_urls[-1], compare_urls
+    expect(panel.get_by_role("checkbox", name="Hide viewed")).to_have_count(0)
+    page.screenshot(path=str(tmp_path / f"commits-{entry}-since.png"), animations="disabled")
+    panel.get_by_role("combobox", name="Changes since").click()
+    page.get_by_role("option", name="PR base (all changes)").click()
+    expect(files).to_have_count(2)
+    expect(panel.get_by_role("checkbox", name="Hide viewed")).to_be_visible()

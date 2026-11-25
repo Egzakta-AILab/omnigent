@@ -1,4 +1,4 @@
-/** Isaac seeds "<user>'s arca"; accept that suffix or the id saved by Run on Arca. */
+/** Match a managed host by its default name or its remembered ID. */
 
 import type { Host } from "@/hooks/useHosts";
 
@@ -14,7 +14,7 @@ export function isArcaHost(
   );
 }
 
-/** Prefer the remembered Arca, then an Isaac-seeded Arca with a live connection. */
+/** Prefer the remembered host, then one with the default name and a live connection. */
 export function findConnectedArcaHost(
   hosts: readonly Host[],
   storedArcaHostId: string | null,

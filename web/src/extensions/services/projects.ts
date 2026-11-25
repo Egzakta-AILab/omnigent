@@ -72,10 +72,13 @@ export async function listProjectSummaries(): Promise<ExtensionProjectSummary[]>
   return projects.map(projectSummary);
 }
 
-export async function createProjectSummary(name: string): Promise<ExtensionProjectSummary> {
+export async function createProjectSummary(
+  name: string,
+  template?: { template_project_id: unknown; source_key: unknown; linear_issue?: unknown },
+): Promise<ExtensionProjectSummary> {
   let project: Project;
   try {
-    project = await createProject(name);
+    project = template ? await createProject(name, undefined, template) : await createProject(name);
   } catch (error) {
     const detail = error instanceof Error ? error.message.slice(0, PROJECT_ERROR_MAX_LENGTH) : "";
     throw new ExtensionHostServiceError(

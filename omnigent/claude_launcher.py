@@ -6,9 +6,7 @@ The native Claude terminal is normally spawned as ``claude <args>`` -- the
 ``_auto_create_claude_terminal`` in :mod:`omnigent.runner.app` (managed-host
 runner). Downstream integrations need to launch that *same* Claude Code process
 through a wrapper binary so the wrapper's process-level setup -- auth, telemetry,
-cost controls, enforcement hooks, plugin management -- is always applied. The
-motivating case is Databricks' ``isaac``, which wraps Claude/Codex with that
-tooling; running ``isaac claude`` instead of bare ``claude`` keeps it in force.
+cost controls, enforcement hooks, plugin management -- is always applied.
 
 Rather than hardcode the binary at each site, both paths route the
 ``(command, args)`` pair through :func:`resolve_claude_launch`. By default this

@@ -44,7 +44,32 @@ function pickerAgent(overrides: Record<string, unknown> = {}) {
   };
 }
 vi.mock("@/lib/CapabilitiesContext", () => ({
-  useServerInfo: () => ({ managed_sandboxes_enabled: false, sandbox_provider: null }),
+  useServerInfo: () => ({
+    managed_sandboxes_enabled: false,
+    sandbox_provider: null,
+    studio_workspace_settings: true,
+    studio_reviews: true,
+  }),
+}));
+vi.mock("@/studio/RepositorySettingsDialog", () => ({
+  RepositorySettingsDialog: ({
+    open,
+    endpoint,
+    onOpenChange,
+  }: {
+    open: boolean;
+    endpoint: string;
+    onOpenChange: (open: boolean) => void;
+  }) =>
+    open && (
+      <button type="button" onClick={() => onOpenChange(false)}>
+        {endpoint}
+      </button>
+    ),
+}));
+vi.mock("@/studio/reviews/ProfileEditorDialog", () => ({
+  ProfileEditorDialog: ({ open, endpoint }: { open: boolean; endpoint: string }) =>
+    open && <p>{endpoint}</p>,
 }));
 // The filesystem browser owns its own data-fetching; stub its explicit commit
 // action so this suite can drive the shared dialog without filesystem plumbing.
@@ -96,6 +121,21 @@ afterEach(() => {
 });
 
 describe("ProjectSettingsDialog", () => {
+  it("opens both workspace managers for the saved project target", async () => {
+    getProjectMock.mockResolvedValue({
+      id: "p_1",
+      name: "Work",
+      config: { host_id: "h1", workspace: "/work/core" },
+    });
+    renderDialog();
+    const repositories = screen.getByRole("button", { name: /^Repositories$/ });
+    await waitFor(() => expect(repositories).toBeEnabled());
+    fireEvent.click(repositories);
+    fireEvent.click(screen.getByRole("button", { name: "/v1/projects/p_1/studio/repositories" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Reviewer profiles$/ }));
+    expect(screen.getByText("/v1/projects/p_1/studio/review-profiles/editor")).toBeInTheDocument();
+  });
+
   it("seeds fields from the project's stored config", async () => {
     // No stored host → the working directory can't be chosen yet, so it shows
     // the "pick a host first" placeholder rather than a path input / browser.
@@ -299,6 +339,18 @@ describe("ProjectSettingsDialog", () => {
     // Even if a submit is forced, onSubmit bails — no clearing PATCH is sent.
     fireEvent.submit(screen.getByTestId("project-settings-save").closest("form")!);
     expect(updateMock).not.toHaveBeenCalled();
+  });
+
+  it("shows no tooltip on a healthy picker that no shortcut opens", async () => {
+    getProjectMock.mockResolvedValue({ id: "p_1", name: "Work", config: {} });
+    renderDialog();
+    fireEvent.focus(await screen.findByTestId("new-chat-landing-agent-select"));
+    // Give a tooltip time to open, then check none did.
+    await new Promise((resolve) => {
+      setTimeout(resolve, 50);
+    });
+    expect(screen.queryByTestId("new-chat-landing-agent-tooltip")).toBeNull();
+    expect(screen.queryByText("Open model picker")).toBeNull();
   });
 
   it("offers the same agent set as the composer picker (hidden agents excluded)", async () => {
