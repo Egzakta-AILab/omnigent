@@ -6,6 +6,7 @@ from typing import Any
 from fastapi import HTTPException, WebSocketException
 from starlette.requests import HTTPConnection
 
+from omnigent.db.utils import shared_read_scope
 from omnigent.entities import Conversation
 from omnigent.runner.routing import routing_host_session
 from omnigent.server.auth import AuthProvider, effective_admin
@@ -105,4 +106,13 @@ def pooled_access_dependency(
             raise WebSocketException(code=1008, reason=DENIAL)
         raise HTTPException(403, DENIAL)
 
-    return check
+    def check_and_read(connection: HTTPConnection) -> None:
+        read_inputs = getattr(connection.scope.get("endpoint"), "session_snapshot_inputs", None)
+        if read_inputs is None:
+            check(connection)
+            return
+        with shared_read_scope():
+            check(connection)
+            connection.state.session_snapshot_inputs = read_inputs(connection)
+
+    return check_and_read

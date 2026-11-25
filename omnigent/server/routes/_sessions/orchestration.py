@@ -15241,6 +15241,8 @@ def _read_session_snapshot_inputs(
     permission_store: PermissionStore | None,
     conversation_store: ConversationStore,
     agent_store: AgentStore,
+    *,
+    conversation: Conversation | None = None,
 ) -> tuple[SessionAccess, Conversation, Agent | None]:
     """Authorize a snapshot read and fetch its store inputs over one checkout.
 
@@ -15248,6 +15250,7 @@ def _read_session_snapshot_inputs(
     :func:`asyncio.to_thread`) in one :func:`shared_read_scope`; the scope is
     released before the snapshot's network lookups.
 
+    :param conversation: Requested row already loaded by the pooled-host guard.
     :returns: The access result, the conversation (read here when the access
         check did not), and the bound agent row, or ``None`` when the session
         has no agent binding, the row is gone, or its read failed.
@@ -15256,9 +15259,14 @@ def _read_session_snapshot_inputs(
     """
     with shared_read_scope():
         access = require_access_and_level_sync(
-            user_id, session_id, LEVEL_READ, permission_store, conversation_store
+            user_id,
+            session_id,
+            LEVEL_READ,
+            permission_store,
+            conversation_store,
+            conversation=conversation,
         )
-        conv = access.conversation
+        conv = access.conversation or conversation
         if conv is None:
             conv = conversation_store.get_conversation(session_id)
         if conv is None:
