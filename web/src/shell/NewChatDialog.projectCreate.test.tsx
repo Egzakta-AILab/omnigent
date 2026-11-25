@@ -780,6 +780,9 @@ describe("NewChatLandingScreen nested agent creation", () => {
   it.each([false, true])(
     "submits the clicked source for JSON and uploaded agents (bundle=%s)",
     async (bundled) => {
+      vi.mocked(useHosts).mockReturnValue({
+        data: [host(), host({ host_id: "host_2", name: "build-server" })],
+      } as ReturnType<typeof useHosts>);
       vi.mocked(getSessionSlim).mockImplementation(async (id) => ({ ...SOURCE_SESSION, id }));
       searchParams = new URLSearchParams("sibling=other");
       renderLanding({ sibling_sessions: true });
