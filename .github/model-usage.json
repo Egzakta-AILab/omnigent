@@ -107,6 +107,7 @@
     "pr-hygiene-live.yml",
     "pr-issue-link-test.yml",
     "pr-size.yml",
+    "pr-targeted-tests.yml",
     "ready-for-review-test.yml",
     "release-omnigent.yml",
     "release.yml",
