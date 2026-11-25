@@ -1,0 +1,98 @@
+name: Targeted PR tests
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: targeted-pr-tests-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    uses: ./.github/workflows/security-gate.yml
+    permissions:
+      contents: read
+      pull-requests: read
+
+  targeted:
+    name: Targeted PR tests
+    needs: gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      OMNIGENT_SKIP_WEB_UI: 'true'
+      UV_INDEX_URL: https://pypi.org/simple
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Select tests for the PR merge diff
+        id: select
+        shell: python
+        run: |
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+
+          base, head = subprocess.check_output(["git", "rev-parse", "HEAD^1", "HEAD"], text=True).splitlines()
+          output = subprocess.check_output([
+              "python3", ".github/scripts/ci/pr_signal_tests.py", base, head,
+          ], text=True)
+          selection = json.loads(output)
+          (Path(os.environ["RUNNER_TEMP"]) / "selected-tests.json").write_text(output)
+          with open(os.environ["GITHUB_OUTPUT"], "a") as outputs:
+              for suite in ("python", "web"):
+                  print(f"{suite}={str(bool(selection[suite])).lower()}", file=outputs)
+          if not (selection["python"] or selection["web"]):
+              raise SystemExit("The selector did not return any tests.")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+              print(f"Selected {len(selection['python'])} pytest targets and {len(selection['web'])} Vitest files.", file=summary)
+              if selection["smoke"]:
+                  print("This diff uses a bounded sample or fallback smoke test.", file=summary)
+          print(output)
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        if: steps.select.outputs.python == 'true'
+        with:
+          python-version-file: .python-version
+      - uses: ./.github/actions/setup-uv
+        if: steps.select.outputs.python == 'true'
+      - name: Install Python test dependencies
+        if: steps.select.outputs.python == 'true'
+        run: uv sync --locked --extra all --group test
+
+      - uses: ./.github/actions/setup-pnpm
+        if: steps.select.outputs.web == 'true'
+      - name: Install web test dependencies
+        if: steps.select.outputs.web == 'true'
+        run: pnpm install --frozen-lockfile --filter web
+
+      - name: Run selected tests
+        shell: python
+        run: |
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+
+          selection = json.loads((Path(os.environ["RUNNER_TEMP"]) / "selected-tests.json").read_text())
+          if selection["python"]:
+              pytest = [".venv/bin/python", "-P", "-m", "pytest", "-q", "--maxfail=1", "-m", "not databricks", "--"]
+              result = subprocess.run([*pytest, *selection["python"]])
+              if result.returncode == 5:
+                  # A target may consist entirely of provider-specific tests.
+                  with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+                      print("No local pytest cases collected. Ran the version smoke test instead.", file=summary)
+                  subprocess.run([*pytest, "tests/test_version.py"], check=True)
+              else:
+                  result.check_returncode()
+          if selection["web"]:
+              paths = ["./" + str(Path(path).relative_to("web")) for path in selection["web"]]
+              subprocess.run(["node_modules/.bin/vitest", "run", *paths], cwd="web", check=True)
