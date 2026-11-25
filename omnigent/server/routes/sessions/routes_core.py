@@ -2536,6 +2536,21 @@ def register_core_routes(
 
     # ── GET /sessions/{session_id} ───────────────────────────────
 
+    def _snapshot_read_inputs(
+        request: Request,
+    ) -> tuple[str | None, SessionAccess, Conversation, Agent | None, bool]:
+        user_id = _get_user_id(request, auth_provider)
+        with shared_read_scope():
+            access, conv, agent = _read_session_snapshot_inputs(
+                user_id,
+                request.path_params["session_id"],
+                permission_store,
+                conversation_store,
+                agent_store,
+                conversation=getattr(request.state, "studio_checked_conversation", None),
+            )
+            return user_id, access, conv, agent, _side_chat_allowed_sync(user_id, conv)
+
     @router.get(
         "/sessions/{session_id}",
         # See create_session for the response_model=None rationale. We keep
@@ -2592,23 +2607,11 @@ def register_core_routes(
         :raises OmnigentError: 404 if no session exists.
         """
         response.headers["Cache-Control"] = "no-store"
-        user_id = _get_user_id(request, auth_provider)
-
-        # One read burst over a single pool checkout: authorization, the
-        # conversation row, the bound agent row and the side-chat owner
-        # grant, each reused by the snapshot instead of re-read.
-        def _read_inputs() -> tuple[SessionAccess, Conversation, Agent | None, bool]:
-            with shared_read_scope():
-                access, conv, agent = _read_session_snapshot_inputs(
-                    user_id,
-                    session_id,
-                    permission_store,
-                    conversation_store,
-                    agent_store,
-                )
-                return access, conv, agent, _side_chat_allowed_sync(user_id, conv)
-
-        access, conv, agent, side_chat_ok = await asyncio.to_thread(_read_inputs)
+        inputs = getattr(request.state, "session_snapshot_inputs", None)
+        if inputs is None:
+            # Servers without the pooled-host dependency read the same inputs here.
+            inputs = await asyncio.to_thread(_snapshot_read_inputs, request)
+        user_id, access, conv, agent, side_chat_ok = inputs
         snapshot = await _get_session_snapshot(
             conversation_store,
             session_id,
@@ -2630,6 +2633,10 @@ def register_core_routes(
         )
         snapshot.side_chat_allowed = side_chat_ok
         return snapshot
+
+    # The global pooled-host guard preloads these reads in its worker, after
+    # admission and before releasing its connection for the async snapshot.
+    get_session.__dict__["session_snapshot_inputs"] = _snapshot_read_inputs
 
     @router.get(
         "/sessions/{session_id}/labels",

@@ -238,6 +238,8 @@ async def _drive_prefill(base_url: str, session_id: str, mobile: bool, remembere
             )
 
             panel = page.get_by_role("complementary", name="Project workspace")
+            if mobile:
+                await page.get_by_role("button", name="Workspace", exact=True).click()
             await expect(panel).to_be_visible()
             if remembered:
                 await expect(
@@ -248,6 +250,8 @@ async def _drive_prefill(base_url: str, session_id: str, mobile: bool, remembere
                     panel.get_by_text("Project context fixture.", exact=True)
                 ).to_be_visible()
                 await panel.get_by_role("button", name="Add file to prompt").click()
+            if mobile:
+                await panel.get_by_role("button", name="Back to chat", exact=True).click()
             assert not create_bodies and not events_sent
             composer = page.get_by_test_id("new-chat-landing-input")
             await composer.fill("start here")
