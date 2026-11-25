@@ -36,9 +36,19 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Install kustomize
+        env:
+          KUSTOMIZE_VERSION: v5.8.3
+          KUSTOMIZE_SHA256: cb9e31198d3f63b44848bd0afc4c8efc56e6cfef9c93a4a39a211940e6decd61
         run: |
-          curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
-          sudo mv kustomize /usr/local/bin/
+          install_dir="$(mktemp -d "$RUNNER_TEMP/kustomize.XXXXXX")"
+          cd "$install_dir"
+          archive="kustomize_${KUSTOMIZE_VERSION}_linux_amd64.tar.gz"
+          curl --fail --silent --show-error --location --retry 3 --output "$archive" \
+            "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2F${KUSTOMIZE_VERSION}/$archive"
+          echo "$KUSTOMIZE_SHA256  $archive" | sha256sum --check
+          tar -xzf "$archive" kustomize
+          ./kustomize version
+          echo "$install_dir" >> "$GITHUB_PATH"
 
       - name: Render all overlays
         run: |
