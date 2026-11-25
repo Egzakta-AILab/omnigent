@@ -429,9 +429,7 @@ def test_project_menu_is_visible_without_hover(
             touch.keyboard.press("Escape")
             shortcut.click()
         expect(touch).to_have_url(f"{base_url}/?project={project.replace(' ', '%20')}")
-        expect(
-            touch.get_by_role("textbox", name=f"Start a new session in {project}")
-        ).to_be_visible()
+        expect(touch.get_by_test_id("new-chat-landing-input")).to_be_visible()
         if viewport["width"] < 768:
             expect(touch.get_by_role("button", name="Open sidebar", exact=True)).to_be_visible()
     finally:
