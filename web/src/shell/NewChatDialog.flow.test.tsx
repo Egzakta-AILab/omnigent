@@ -97,6 +97,7 @@ const SEEDED_WORKSPACE = "/Users/corey/universe/src/foo";
 // (`@/lib/routing`), not react-router directly — mock that so the create
 // flow's navigate() lands on our spy regardless of router/provider setup.
 vi.mock("@/lib/routing", () => ({
+  Link: ({ to, children }: { to: string; children: ReactNode }) => <a href={to}>{children}</a>,
   useLocation: () => ({ hash: "", state: null }),
   useReplaceSearchParams: () => replaceSearchParamsMock,
   useNavigate: () => navigateMock,
