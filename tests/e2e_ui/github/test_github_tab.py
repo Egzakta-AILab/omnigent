@@ -1570,6 +1570,10 @@ def test_studio_review_from_pr_panel(
             response=response, json={**response.json(), "host_id": host_id, "workspace": workspace}
         )
 
+    page.route(
+        f"**/v1/sessions/{session_id}/resources/environments/default",
+        lambda route: route.fulfill(json={"metadata": {"root": workspace}}),
+    )
     stub_session_pull_requests(page, lambda: [association] if attached else [], lambda _url: None)
     page.route(
         re.compile(r"/resources/github(?:\?|$)"),
@@ -2094,7 +2098,7 @@ def test_studio_review_from_pr_panel(
         assert page.evaluate("document.documentElement.scrollWidth === window.innerWidth")
         page.screenshot(path=str(tmp_path / "project-review-before-launch.png"))
         page.set_viewport_size({"width": 1440, "height": 900})
-        workspace_panel.get_by_role("button", name="Run diff review", exact=True).click()
+        workspace_panel.get_by_role("button", name="Run review", exact=True).click()
         expect(page.get_by_text(report["summary"], exact=True)).to_be_visible(timeout=15_000)
         expect(page.get_by_role("link", name="Open transcript", exact=True)).to_be_visible()
         expect(page.get_by_role("link", name="Open finding", exact=True)).to_have_attribute(
@@ -2116,7 +2120,7 @@ def test_studio_review_from_pr_panel(
         )
         page.get_by_role("button", name="Set up review of current PR").click()
         reviewed_pr.get_by_role("button", name="Use previous reviewer settings").click()
-        expect(reviewed_pr.get_by_role("button", name="Run diff review")).to_be_enabled()
+        expect(reviewed_pr.get_by_role("button", name="Run review", exact=True)).to_be_enabled()
         assert len(capture_keys) == len(start_keys) == 1
         review["run_id"] = single_run_id
         show_earlier_review = True
@@ -2519,24 +2523,24 @@ def test_studio_review_from_pr_panel(
         page.get_by_role("button", name="Post internal reply", exact=True).click()
         expect(page.get_by_text("Can we reproduce with empty input?", exact=True)).to_be_visible()
         drafts = page.get_by_role("region", name="Your inline drafts")
-        drafts.get_by_role("button", name="Draft inline comment").click()
+        drafts.get_by_role("button", name="Comment on PR", exact=True).click()
         drafts.get_by_role("textbox", name="Inline comment draft").fill("Check the input first.")
-        drafts.get_by_role("button", name="Save draft").click()
+        drafts.get_by_role("button", name="Save for batch", exact=True).click()
         expect(drafts.get_by_text("src/app/main.py:2 · Head", exact=True)).to_be_visible()
         expect(drafts.get_by_text("Check the input first.", exact=True)).to_be_visible()
         drafts.get_by_role("button", name="Edit draft").click()
         drafts.get_by_role("textbox", name="Inline comment draft").fill(
             "Validate empty input first."
         )
-        drafts.get_by_role("button", name="Save draft").click()
+        drafts.get_by_role("button", name="Save for batch", exact=True).click()
         expect(drafts.get_by_text("Validate empty input first.", exact=True)).to_be_visible()
         page.screenshot(path=str(tmp_path / "review-inline-draft.png"))
         drafts.get_by_role("button", name="Discard draft").click()
         expect(drafts.get_by_text("Validate empty input first.", exact=True)).to_have_count(0)
-        drafts.get_by_role("button", name="Draft inline comment").click()
+        drafts.get_by_role("button", name="Comment on PR", exact=True).click()
         drafts.get_by_role("textbox", name="Inline comment draft").fill("Publish this line.")
-        drafts.get_by_role("button", name="Save draft").click()
-        drafts.get_by_role("button", name="Review drafts to publish").click()
+        drafts.get_by_role("button", name="Save for batch", exact=True).click()
+        drafts.get_by_role("button", name="Review batch", exact=True).click()
         publishing = page.get_by_role("region", name="Publish inline drafts")
         expect(publishing).to_be_focused()
         publishing.get_by_role("checkbox", name=re.compile("Publish this line")).check()
@@ -2605,8 +2609,7 @@ def test_studio_review_from_pr_panel(
         expect(thread.get_by_role("textbox", name="Internal reply")).to_have_value(
             "An unsent finding reply."
         )
-        thread.get_by_role("button", name="More actions", exact=True).click()
-        page.get_by_role("menuitem", name="Propose a fix", exact=True).click()
+        thread.get_by_role("button", name="Propose a fix", exact=True).click()
         thread.get_by_label("Answer with").select_option("reviewer:" + "6" * 64)
         thread.get_by_role("button", name="Request private proposal", exact=True).click()
         expect(thread.get_by_text("Private fix proposal · Codex")).to_be_visible()
@@ -2705,13 +2708,14 @@ def test_studio_review_from_pr_panel(
         panel.get_by_role("button", name="Link this PR", exact=True).click()
         panel.get_by_text("Workspace repositories", exact=True).click()
     else:
-        page.get_by_test_id("composer-pr-link").click()
+        if mobile:
+            # The hydrated session replaces the provisional header menu.
+            expect(
+                page.get_by_role("button", name=re.compile(f"^Host {host_id},"))
+            ).to_be_visible()
+        open_session_pull_requests(page, mobile=mobile)
     tabs = panel.get_by_role("tablist", name="Pull request", exact=True)
     tabs.get_by_role("tab", name="Review", exact=True).click()
-    if rail:
-        expect(
-            panel.get_by_role("region", name="Run a review").get_by_text(workspace)
-        ).to_be_visible()
     panel.get_by_role("combobox", name="Reviewer", exact=True).click()
     page.get_by_role("option", name="Codex", exact=True).click()
     if rail:
@@ -2736,6 +2740,10 @@ def test_studio_review_from_pr_panel(
         panel.get_by_role("combobox", name="Review skill", exact=True).click()
         page.get_by_role("option", name="team-review", exact=True).click()
     panel.get_by_text("Model and workspace settings", exact=False).click()
+    if rail:
+        expect(
+            panel.get_by_role("region", name="Run a review").get_by_text(workspace)
+        ).to_be_visible()
     panel.get_by_role("combobox", name="Model", exact=True).click()
     page.get_by_role("option", name="Review Model", exact=True).click()
     panel.get_by_role("combobox", name="Reasoning effort", exact=True).click()
@@ -2809,7 +2817,7 @@ def test_studio_review_from_pr_panel(
         tabs.get_by_role("tab", name="Review", exact=True).click()
         info["pr"]["head_sha"] = "3" * 40
         panel.get_by_role("button", name="Refresh", exact=True).click()
-        expect(panel.get_by_text("Earlier revision", exact=True)).to_be_visible()
+        expect(panel.get_by_text("Outdated", exact=True)).to_be_visible()
         expect(panel.get_by_role("button", name="Show in diff", exact=True)).to_have_count(0)
         panel.get_by_role("button", name="Load older reviews", exact=True).click()
         expect(tabs.get_by_role("tab", name="Review", exact=True)).to_have_count(0)
