@@ -2586,6 +2586,37 @@
         "title": "CompletedEvent",
         "type": "object"
       },
+      "ConfirmInlinePublication": {
+        "additionalProperties": false,
+        "properties": {
+          "confirm": {
+            "const": true,
+            "title": "Confirm",
+            "type": "boolean"
+          },
+          "digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Digest",
+            "type": "string"
+          },
+          "selected": {
+            "items": {
+              "$ref": "#/components/schemas/InlineDraftSelection"
+            },
+            "maxItems": 8,
+            "minItems": 1,
+            "title": "Selected",
+            "type": "array"
+          }
+        },
+        "required": [
+          "selected",
+          "digest",
+          "confirm"
+        ],
+        "title": "ConfirmInlinePublication",
+        "type": "object"
+      },
       "ConsolidatedFinding": {
         "additionalProperties": false,
         "properties": {
@@ -5899,6 +5930,28 @@
         "title": "InlineDraft",
         "type": "object"
       },
+      "InlineDraftSelection": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "version": {
+            "exclusiveMaximum": 2147483647,
+            "format": "int64",
+            "minimum": 1,
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "version",
+          "id"
+        ],
+        "title": "InlineDraftSelection",
+        "type": "object"
+      },
       "InlinePublicationPreview": {
         "additionalProperties": false,
         "properties": {
@@ -5953,6 +6006,25 @@
           "drafts"
         ],
         "title": "InlinePublicationPreview",
+        "type": "object"
+      },
+      "InlinePublicationRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "selected": {
+            "items": {
+              "$ref": "#/components/schemas/InlineDraftSelection"
+            },
+            "maxItems": 8,
+            "minItems": 1,
+            "title": "Selected",
+            "type": "array"
+          }
+        },
+        "required": [
+          "selected"
+        ],
+        "title": "InlinePublicationRequest",
         "type": "object"
       },
       "LaunchRunnerRequest": {
