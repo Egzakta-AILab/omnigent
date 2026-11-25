@@ -1,0 +1,39 @@
+name: Bootstrap private Studio package
+on:
+  push:
+    branches: [studio/bootstrap-private-ghcr]
+permissions: {}
+jobs:
+  bootstrap:
+    if: github.repository == 'Egzakta-AILab/omnigent'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      packages: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      IMAGE: ghcr.io/egzakta-ailab/omnigent-studio
+      ENDPOINT: https://api.github.com/orgs/Egzakta-AILab/packages/container/omnigent-studio
+    steps:
+      - name: Create an empty bootstrap image and verify private visibility
+        run: |
+          set -eu
+          query() {
+            curl -sS -o "$RUNNER_TEMP/package.json" -w '%{http_code}' -H "Authorization: Bearer $GH_TOKEN" "$ENDPOINT"
+          }
+          verify() {
+            jq -e '.name == "omnigent-studio" and .package_type == "container" and .visibility == "private"' "$RUNNER_TEMP/package.json"
+          }
+          case "$(query)" in
+            200) verify; exit 0 ;;
+            404) ;;
+            *) exit 1 ;;
+          esac
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          printf '%s\n' 'FROM scratch' 'LABEL org.opencontainers.image.source="https://github.com/Egzakta-AILab/omnigent"' 'LABEL org.opencontainers.image.description="Empty registry bootstrap marker"' | docker build -t "$IMAGE:bootstrap-$GITHUB_RUN_ID" -
+          docker push "$IMAGE:bootstrap-$GITHUB_RUN_ID"
+          for attempt in 1 2 3 4 5; do
+            if [ "$(query)" = 200 ]; then verify; exit 0; fi
+            sleep 2
+          done
+          exit 1
