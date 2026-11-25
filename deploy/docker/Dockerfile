@@ -466,3 +466,43 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD curl -fsS "http://127.0.0.1:${PORT}/health" || exit 1
 
 CMD ["python", "/app/entrypoint.py"]
+
+# Fork releases select --target studio and supply only verified distribution
+# wheels through the studio-extension-wheels build context.
+FROM server-builder AS studio-wheels
+ARG OMNIGENT_BUILD_SOURCE_COMMIT
+ARG STUDIO_EXTENSION_TAG
+ARG STUDIO_EXTENSION_COMMIT
+COPY --from=studio-extension-wheels / /opt/studio/wheels/
+RUN python -m pip wheel --no-deps --wheel-dir /opt/studio/wheels /build /build/sdks/python-client /build/sdks/ui
+COPY deploy/docker/studio_release.py /tmp/studio_release.py
+RUN python /tmp/studio_release.py wheels /opt/studio/wheels \
+ && cd /opt/studio/wheels \
+ && python -c 'import json, sys; print(json.dumps(dict(zip(("omnigent_commit", "extensions_tag", "extensions_commit"), sys.argv[1:], strict=True))))' "$OMNIGENT_BUILD_SOURCE_COMMIT" "$STUDIO_EXTENSION_TAG" "$STUDIO_EXTENSION_COMMIT" > STUDIO-RELEASE.json \
+ && sha256sum *.whl STUDIO-RELEASE.json > SHA256SUMS
+
+FROM runtime AS studio
+ARG STUDIO_EXTENSION_TAG
+ARG STUDIO_EXTENSION_COMMIT
+LABEL studio.extensions.tag=$STUDIO_EXTENSION_TAG studio.extensions.commit=$STUDIO_EXTENSION_COMMIT
+COPY --from=studio-wheels /opt/studio/wheels /opt/studio/wheels
+RUN cd /opt/studio/wheels && sha256sum -c SHA256SUMS \
+ && python -m pip install --no-cache-dir --no-deps --force-reinstall ./*.whl \
+ && python -m pip install --no-cache-dir ./*.whl && python -m pip check \
+ && python -c 'from importlib.resources import files; assert files("omnigent.server").joinpath("static/web-ui/index.html").is_file()'
+# Install the client matching the reviewed Services chart. The two hashes are
+# the official v2.38.4 release asset digests.
+RUN set -eu; arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) sha=d1d906964852c32413402078d8379a9a2693fa17182703fa8fd77aa463841b2b ;; \
+      arm64) sha=7d854fbd7fef8341b1b8c1ebfb9fa85c0e96a244a3f63105c45173994d371de8 ;; \
+      *) exit 1 ;; \
+    esac; \
+    curl --proto '=https' -fsSL --retry 3 "https://github.com/coder/coder/releases/download/v2.38.4/coder_2.38.4_linux_${arch}.tar.gz" -o /tmp/coder.tar.gz; \
+    echo "$sha  /tmp/coder.tar.gz" | sha256sum -c -; \
+    member="$(tar -tzf /tmp/coder.tar.gz | grep -E '(^|/)coder$')"; \
+    tar -xOzf /tmp/coder.tar.gz "$member" > /usr/local/bin/coder; \
+    chmod 0755 /usr/local/bin/coder; rm /tmp/coder.tar.gz; coder version
+
+# Keep the upstream server as the image produced by unqualified builds.
+FROM runtime AS default-runtime

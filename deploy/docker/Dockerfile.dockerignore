@@ -63,3 +63,4 @@ openapi.json
 # not runtime — exclude them too.
 deploy/databricks/
 deploy/aws/
+.studio-extensions/
