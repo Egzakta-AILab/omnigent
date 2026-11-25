@@ -126,6 +126,7 @@
     "setup-uv-test.yml",
     "stale.yml",
     "sync-openapi-to-site.yml",
+    "studio-build.yml",
     "sync-pr-priority-test.yml",
     "sync-pr-priority.yml",
     "trivy.yml",
