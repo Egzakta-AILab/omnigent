@@ -27,3 +27,24 @@ exclude-newer = "P7D"
 # - nimble-python: the verified Agent API V2 1.2 contract release, required by
 #   nimble_research for typed run fields. Drop once it has aged past P7D.
 exclude-newer-package = { cwsandbox = "2026-06-12T00:00:00Z", google-antigravity = "2026-06-12T00:00:00Z", nimble-python = "2026-07-29T00:00:00Z" }
+
+# uv checks direct source archives for metadata even when their extra is disabled.
+# Copy Requires-Python and Requires-Dist from the backport wheel when updating
+# the E2B source pin in pyproject.toml.
+[[dependency-metadata]]
+name = "e2b"
+version = "2.26.0+egzakta.1"
+requires-python = ">=3.10,<4.0"
+requires-dist = [
+    "attrs>=23.2.0",
+    "dockerfile-parse>=2.0.1,<3.0.0",
+    "h2>=4,<5",
+    "httpcore>=1.0.5,<2.0.0",
+    "httpx>=0.27.0,<1.0.0",
+    "packaging>=24.1",
+    "protobuf>=4.21.0",
+    "python-dateutil>=2.8.2",
+    "rich>=14.0.0",
+    "typing-extensions>=4.1.0",
+    "wcmatch==11.2",
+]
