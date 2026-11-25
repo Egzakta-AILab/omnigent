@@ -94,5 +94,11 @@ jobs:
               else:
                   result.check_returncode()
           if selection["web"]:
-              paths = ["./" + str(Path(path).relative_to("web")) for path in selection["web"]]
-              subprocess.run(["node_modules/.bin/vitest", "run", *paths], cwd="web", check=True)
+              paths = [str(Path(path).relative_to("web")) for path in selection["web"]]
+              # Vitest CLI file filters match substrings, so .test.ts also runs .test.tsx.
+              # The selector permits only literal paths without glob metacharacters.
+              runner = """
+              import { startVitest } from "vitest/node";
+              await startVitest("test", [], { run: true, include: process.argv.slice(1) });
+              """
+              subprocess.run(["node", "--input-type=module", "-e", runner, "--", *paths], cwd="web", check=True)
