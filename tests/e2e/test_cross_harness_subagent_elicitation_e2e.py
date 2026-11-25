@@ -439,6 +439,7 @@ def test_codex_parent_answers_real_claude_child_elicitation(
             {"text": "Waiting for the Claude child."},
         ],
         key=_PARENT_MODEL,
+        required_tools=["exec_command"],
     )
     configure_mock_llm(
         mock_url,
