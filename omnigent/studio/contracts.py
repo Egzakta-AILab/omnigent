@@ -53,6 +53,7 @@ def run_contracts() -> dict[str, Any]:
     junit = evidence_dir / "junit.xml"
     command = [
         sys.executable,
+        "-P",
         "-m",
         "pytest",
         *_TEST_FILES,

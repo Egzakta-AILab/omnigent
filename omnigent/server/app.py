@@ -6019,7 +6019,15 @@ def create_app(
         app.add_middleware(BasePathMiddleware, base_path=resolved_base_path)
 
     install_stream_event_schemas(app)
-    register_component_models(app, SESSION_CREATE_BODY_MODELS)
+    body_models = SESSION_CREATE_BODY_MODELS
+    if studio_review_store is not None:
+        from omnigent.studio.reviews.discussion import (
+            ConfirmInlinePublication,
+            InlinePublicationRequest,
+        )
+
+        body_models += (InlinePublicationRequest, ConfirmInlinePublication)
+    register_component_models(app, body_models)
     return app
 
 

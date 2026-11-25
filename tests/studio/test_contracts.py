@@ -34,16 +34,22 @@ def test_invocation_retains_unique_evidence_and_uses_current_python(
 
     def run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         calls.append(command)
-        assert command[0] == sys.executable
-        assert command[1:3] == ["-m", "pytest"]
-        assert command[3:7] == [
+        assert command[:14] == [
+            sys.executable,
+            "-P",
+            "-m",
+            "pytest",
             "tests/studio/test_review_capture.py",
             "tests/stores/test_studio_review_store.py",
             "tests/server/routes/test_studio_reviews.py",
             "tests/db/test_migration_studio_reviews.py",
+            "--reruns",
+            "0",
+            "--num-shards",
+            "1",
+            "--shard-id",
+            "0",
         ]
-        assert command[7:9] == ["--reruns", "0"]
-        assert command[9:13] == ["--num-shards", "1", "--shard-id", "0"]
         assert kwargs["cwd"] == local_checkout
         assert "PYTEST_ADDOPTS" not in kwargs["env"]
         assert "OMNIGENT_TEST_DB_URI" not in kwargs["env"]
