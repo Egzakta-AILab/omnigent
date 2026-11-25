@@ -37,6 +37,7 @@ RUN npm install -g pnpm@11.15.1
 RUN pnpm install --frozen-lockfile --filter web
 
 COPY web/ ./web/
+COPY sdks/web-extension/src/ ./sdks/web-extension/src/
 RUN pnpm --filter web run build
 
 # ── Python builder (shared: server + host) ──────────────

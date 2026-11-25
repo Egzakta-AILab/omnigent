@@ -212,7 +212,7 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 import click
 from fastapi import HTTPException
 
-from omnigent.db.db_models import LABEL_VALUE_MAX_LEN
+from omnigent.db.db_models import LABEL_VALUE_MAX_LEN, current_workspace_id
 from omnigent.db.utils import builtin_agent_id, now_epoch
 from omnigent.onboarding.sandboxes.base import (
     OwnerCredentialMissingError,
@@ -4059,6 +4059,9 @@ def build_owner_launcher(
     """
     launcher = entry.launcher_factory()
     # getattr: embedding deployments may inject duck-typed launchers.
+    bind_context = getattr(launcher, "bind_owner_context", None)
+    if callable(bind_context):
+        bind_context(owner, current_workspace_id())
     needed = getattr(launcher, "owner_credential_provider", None)
     if needed is not None and deployment is not None:
         resolver = deployment.owner_credentials.get(needed)
@@ -5257,7 +5260,6 @@ async def stop_archived_session_sandbox(
         hosts are not configured.
     :returns: ``True`` when the provider stopped the sandbox.
     """
-    from omnigent.db.db_models import current_workspace_id
     from omnigent.server.scheduled.schedule import continued_sandbox_host_id
     from omnigent.stores.conversation_store import (
         CREATED_BY_SESSION_LABEL_KEY,

@@ -5010,6 +5010,8 @@ def server(
     scheduled_task_store = SqlAlchemyScheduledTaskStore(db_uri)
     project_store = SqlAlchemyProjectStore(db_uri)
     memory_store = _create_memory_store(memory_backend, db_uri, cfg.get("memory"))
+    from omnigent.stores.studio_tasks import StudioTaskStore
+
     studio_review_store = StudioReviewStore.from_deployment(db_uri)
     preference_store = None
     if authority_id is not None:
@@ -5225,6 +5227,7 @@ def server(
         scheduled_task_store=scheduled_task_store,
         project_store=project_store,
         studio_review_store=studio_review_store,
+        studio_task_store=StudioTaskStore(db_uri),
         preference_store=preference_store,
         memory_store=memory_store,
         auth_provider=auth_provider,

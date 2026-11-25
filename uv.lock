@@ -49,6 +49,12 @@ members = [
     "omnigent-issue-prioritization",
 ]
 
+[[manifest.dependency-metadata]]
+name = "e2b"
+version = "2.26.0+egzakta.1"
+requires-dist = ["attrs>=23.2.0", "dockerfile-parse>=2.0.1,<3.0.0", "h2>=4,<5", "httpcore>=1.0.5,<2.0.0", "httpx>=0.27.0,<1.0.0", "packaging>=24.1", "protobuf>=4.21.0", "python-dateutil>=2.8.2", "rich>=14.0.0", "typing-extensions>=4.1.0", "wcmatch==11.2"]
+requires-python = ">=3.10, <4.0"
+
 [[package]]
 name = "absl-py"
 version = "2.4.0"

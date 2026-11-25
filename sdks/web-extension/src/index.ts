@@ -1,5 +1,6 @@
 import {
   EXTENSION_RPC_SOURCE,
+  extensionRequestTimeout,
   EXTENSION_RPC_VERSION,
   type ExtensionCancelMessage,
   type ExtensionDisposeMessage,
@@ -26,6 +27,9 @@ export type {
   ReviewPanelPage,
   ReviewProofTarget,
 } from "./reviewPanel";
+
+import { createStudioClient } from "./studio";
+export type * from "./studio";
 
 export interface Disposable {
   dispose(): void;
@@ -65,6 +69,7 @@ export interface ExtensionContext {
   apiVersion: number;
   capabilities: readonly string[];
   review: ReviewPanelApi;
+  studio: ReturnType<typeof createStudioClient>;
   navigation: {
     openPage(
       pageId: string,
@@ -230,7 +235,7 @@ export function defineExtension(lifecycle: ExtensionLifecycle): void {
         reject(
           new ExtensionApiError("Timeout", `Host method ${method} timed out`),
         );
-      }, 10_000);
+      }, extensionRequestTimeout(method));
       pending.set(requestId, {
         resolve: (value) => resolve(value as T),
         reject,
@@ -246,6 +251,7 @@ export function defineExtension(lifecycle: ExtensionLifecycle): void {
     view: identity.view,
     apiVersion: identity.apiVersion,
     capabilities: [...grantedCapabilities].sort(),
+    studio: createStudioClient(request),
     review: {
       read: (options = {}) => request<ReviewPanelPage>("review.read", options),
       async openProof(target) {

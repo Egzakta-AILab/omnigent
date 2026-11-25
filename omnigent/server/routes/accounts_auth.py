@@ -44,7 +44,7 @@ from omnigent.server.auth import (
     UnifiedAuthProvider,
     effective_admin,
 )
-from omnigent.server.oidc import mint_session_cookie
+from omnigent.server.oidc import mint_session_cookie, set_browser_consent_cookie
 from omnigent.server.passwords import (
     InvalidPasswordError,
     hash_password,
@@ -151,6 +151,7 @@ def _set_session_cookie(
     cookie_name: str,
     secure: bool,
     max_age_seconds: int,
+    cookie_secret: bytes,
 ) -> None:
     """Attach the session JWT to a response.
 
@@ -166,6 +167,9 @@ def _set_session_cookie(
     # direct URL (top-level tab). To support the embedded case, this would need a
     # "samesite=none; Secure" option gated behind an opt-in env var — deferred, as
     # it widens CSRF exposure and the direct-URL path already works.
+    set_browser_consent_cookie(
+        response, cookie_name, token, cookie_secret, secure, max_age_seconds
+    )
     response.set_cookie(
         key=cookie_name,
         value=token,
@@ -179,6 +183,9 @@ def _set_session_cookie(
 
 def _clear_session_cookie(response: Response, *, cookie_name: str, secure: bool) -> None:
     """Delete the session cookie. Same attrs as the setter, by design."""
+    response.delete_cookie(
+        cookie_name + "_consent", path="/", secure=secure, httponly=True, samesite="strict"
+    )
     response.delete_cookie(
         key=cookie_name,
         path="/",
@@ -287,6 +294,7 @@ def create_accounts_auth_router(
             cookie_name=_session_cookie,
             secure=_secure,
             max_age_seconds=_session_max_age,
+            cookie_secret=config.cookie_secret,
         )
 
     # ── Login / logout / me ───────────────────────────────────────
@@ -389,6 +397,7 @@ def create_accounts_auth_router(
             cookie_name=_session_cookie,
             secure=_secure,
             max_age_seconds=_session_max_age,
+            cookie_secret=config.cookie_secret,
         )
         _logger.info("auth/login: success for %s", _redact_for_log(username))
         return resp
@@ -535,6 +544,7 @@ def create_accounts_auth_router(
             cookie_name=_session_cookie,
             secure=_secure,
             max_age_seconds=_session_max_age,
+            cookie_secret=config.cookie_secret,
         )
         _logger.info(
             "auth/register: %s created via invite (admin=%s)",
@@ -638,6 +648,7 @@ def create_accounts_auth_router(
             cookie_name=_session_cookie,
             secure=_secure,
             max_age_seconds=_session_max_age,
+            cookie_secret=config.cookie_secret,
         )
         _logger.info("auth/setup: first admin %s claimed the instance", _redact_for_log(username))
         return resp
@@ -720,6 +731,7 @@ def create_accounts_auth_router(
             cookie_name=_session_cookie,
             secure=_secure,
             max_age_seconds=_session_max_age,
+            cookie_secret=config.cookie_secret,
         )
         _logger.info("auth/magic/redeem: signed in %s", _redact_for_log(token.user_id))
         return resp

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { extensionRequestTimeout } from "../../../sdks/web-extension/src/protocol";
 import { Spinner } from "@/components/ui/spinner";
 import type { ExtensionCatalogItem, ExtensionPage } from "./types";
 import { buildExtensionDocument, createExtensionNonce, loadExtensionBundle } from "./rpc/host";
@@ -18,7 +19,7 @@ import {
 import { ExtensionHostServiceError } from "./services/errors";
 
 const ACTIVATION_TIMEOUT_MS = 10_000;
-const REQUEST_TIMEOUT_MS = 10_000;
+
 const MAX_PENDING_HOST_REQUESTS = 32;
 
 type HostMethod = (params: unknown, signal: AbortSignal) => unknown | Promise<unknown>;
@@ -222,7 +223,7 @@ export function ExtensionViewHost({
           ...response,
           error: { code: "RequestTimeout", message: "Host request timed out" },
         });
-      }, REQUEST_TIMEOUT_MS);
+      }, extensionRequestTimeout(message.method));
       pendingRef.current.set(message.requestId, { controller, timeout: requestTimeout });
       void Promise.resolve()
         .then(() => method(message.params, controller.signal))

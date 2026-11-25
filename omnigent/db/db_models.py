@@ -2548,3 +2548,71 @@ class SqlScheduledTaskShare(OmnigentBase):
             "scheduled_task_id",
         ),
     )
+
+
+class SqlStudioTask(OmnigentBase):
+    """Organization-readable issue anchor, with private session contents held separately."""
+
+    __tablename__ = "studio_tasks"
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, default=current_workspace_id
+    )
+    id: Mapped[str] = mapped_column(Uuid16, primary_key=True)
+    linear_workspace: Mapped[str] = mapped_column(Uuid16, nullable=False)
+    linear_issue_id: Mapped[str] = mapped_column(Uuid16, nullable=False)
+    acceptance_check: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    links_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    confirmations_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id", "linear_workspace", "linear_issue_id", name="uq_studio_task_issue"
+        ),
+    )
+
+
+class SqlStudioTaskHandoff(OmnigentBase):
+    __tablename__ = "studio_task_handoffs"
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, default=current_workspace_id
+    )
+    request_id: Mapped[str] = mapped_column(Uuid16, primary_key=True)
+    task_id: Mapped[str] = mapped_column(Uuid16, nullable=False)
+    schema_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    sender: Mapped[str] = mapped_column(String(128), nullable=False)
+    sender_generation: Mapped[str | None] = mapped_column(String(32))
+    recipient: Mapped[str] = mapped_column(String(128), nullable=False)
+    recipient_generation: Mapped[str | None] = mapped_column(String(32))
+    packet_json: Mapped[str] = mapped_column(Text, nullable=False)
+    response_json: Mapped[str | None] = mapped_column(Text)
+    __table_args__ = (
+        Index("ix_studio_inbox_recipient", "workspace_id", "recipient", "request_id"),
+    )
+
+
+class SqlStudioAgentLease(OmnigentBase):
+    __tablename__ = "studio_agent_leases"
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, default=current_workspace_id
+    )
+    idempotency_key: Mapped[str] = mapped_column(Uuid16, primary_key=True)
+    task_id: Mapped[str] = mapped_column(Uuid16, nullable=False)
+    actor: Mapped[str] = mapped_column(String(128), nullable=False)
+    actor_generation: Mapped[str | None] = mapped_column(String(32))
+    harness: Mapped[str] = mapped_column(String(32), nullable=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False)
+    fix_round: Mapped[int] = mapped_column(Integer, nullable=False)
+    lease_expires_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    __table_args__ = (CheckConstraint("fix_round BETWEEN 0 AND 3", name="ck_studio_lease_round"),)
+
+
+class SqlStudioSeatSlot(OmnigentBase):
+    __tablename__ = "studio_seat_slots"
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, default=current_workspace_id
+    )
+    slot_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    harness: Mapped[str] = mapped_column(String(32), nullable=False)
+    encrypted_profile_ref: Mapped[str] = mapped_column(String(512), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    weight: Mapped[int] = mapped_column(Integer, nullable=False)
+    cooldown_until: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)

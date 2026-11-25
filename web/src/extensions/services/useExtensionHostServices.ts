@@ -18,6 +18,8 @@ import { isImplementationSession, issueWorkspaceUrl, linearIssueKey } from "@/li
 import { useNavigate } from "@/lib/routing";
 import type { ExtensionCatalogItem, ExtensionPullRequest } from "../types";
 import { ExtensionHostServiceError } from "./errors";
+import { studioHostMethods } from "./studio";
+import { useLinearConfirmation } from "./useLinearConfirmation";
 import { grantedHostMethods } from "./registry";
 import {
   cachedProjectSummaries,
@@ -84,6 +86,7 @@ function pageSearch(value: unknown): string {
 }
 
 export function useExtensionHostServices(extension: ExtensionCatalogItem) {
+  const { confirm, dialog } = useLinearConfirmation();
   const navigate = useNavigate();
   const theme = useResolvedThemeMode();
   const queryClient = useQueryClient();
@@ -96,6 +99,7 @@ export function useExtensionHostServices(extension: ExtensionCatalogItem) {
 
   const methods = useMemo(() => {
     const implementations = {
+      ...studioHostMethods(extension.id, authenticatedFetch, confirm),
       "navigation.openPage": (params: unknown, signal: AbortSignal) => {
         throwIfAborted(signal);
         const input = objectParams(params);
@@ -333,6 +337,7 @@ export function useExtensionHostServices(extension: ExtensionCatalogItem) {
     return grantedHostMethods(extension, implementations);
   }, [
     extension,
+    confirm,
     navigate,
     pullRequestLimiter,
     queryClient,
@@ -342,5 +347,5 @@ export function useExtensionHostServices(extension: ExtensionCatalogItem) {
     writeLimiter,
   ]);
   const events = useMemo(() => ({ "theme.changed": { theme } }), [theme]);
-  return { methods, events };
+  return { methods, events, dialog };
 }

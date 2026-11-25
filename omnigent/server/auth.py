@@ -419,6 +419,10 @@ class AuthProvider(ABC):
     When ``None`` is returned, the route helpers respond with 401.
     """
 
+    def has_browser_consent(self, request: HTTPConnection) -> bool:  # noqa: ARG002
+        """Whether this authenticated request carries the interactive login cookie pair."""
+        return False
+
     @abstractmethod
     def get_user_id(self, request: HTTPConnection) -> str | None:
         """Return the authenticated user ID, or ``None``."""
@@ -655,6 +659,33 @@ class UnifiedAuthProvider(AuthProvider):
             ttl_seconds,
             self._source,
             account_generation=account_generation(user_id),
+        )
+
+    def has_browser_consent(self, request: HTTPConnection) -> bool:
+        import hmac
+        from urllib.parse import urlsplit
+
+        from omnigent.server.oidc import browser_consent_proof
+
+        config = self._oidc_config if self._source == "oidc" else self._accounts_config
+        if (
+            self._source not in ("oidc", "accounts")
+            or config is None
+            or request.headers.get("authorization")
+        ):
+            return False
+        expected = urlsplit(config.base_url)
+        if (
+            request.headers.get("origin") != f"{expected.scheme}://{expected.netloc}"
+            or request.headers.get("sec-fetch-site") != "same-origin"
+        ):
+            return False
+        token = request.cookies.get(config.session_cookie_name)
+        proof = request.cookies.get(config.session_cookie_name + "_consent", "")
+        return bool(
+            token
+            and proof.isascii()
+            and hmac.compare_digest(proof, browser_consent_proof(token, config.cookie_secret))
         )
 
     def _check_cookie(self, request: HTTPConnection) -> str | None:

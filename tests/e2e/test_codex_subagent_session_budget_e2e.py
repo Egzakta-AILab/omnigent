@@ -276,6 +276,8 @@ def test_codex_child_enforces_root_cost_budget_without_parent_activity(
     (child_dir / "config.yaml").write_text(yaml.safe_dump(child), encoding="utf-8")
     for marker in ("<session>", "<user_message>", "Generate a concise, single-line task title"):
         configure_mock_llm(mock_url, [{"text": "Budget test"}], match=marker)
+    # Auxiliary Codex requests can use the work model without exposing any tools.
+    # Reserve each sequence, including its follow-up text, for real agent turns.
     configure_mock_llm(
         mock_url,
         [
@@ -296,6 +298,7 @@ def test_codex_child_enforces_root_cost_budget_without_parent_activity(
             {"text": "Waiting for worker."},
         ],
         key=_PARENT_MODEL,
+        required_tools=["exec_command"],
     )
     configure_mock_llm(
         mock_url,
@@ -311,6 +314,7 @@ def test_codex_child_enforces_root_cost_budget_without_parent_activity(
             {"text": "CHILD_BUDGET_DENIED"},
         ],
         key=_CHILD_MODEL,
+        required_tools=["exec_command"],
     )
     agent_name = upload_agent(client, bundle)
     parent_id = create_runner_bound_session(client, agent_name=agent_name, runner_id=runner_id)

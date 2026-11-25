@@ -18,6 +18,11 @@ EXTENSION_API_VERSION = 1
 class ExtensionPermission(StrEnum):
     """Host capabilities an extension may request."""
 
+    STUDIO_TASKS = "studio.tasks"
+    STUDIO_FLEET = "studio.fleet"
+    STUDIO_INBOX = "studio.inbox"
+    STUDIO_REVIEWS = "studio.reviews"
+    STUDIO_RELEASES = "studio.releases"
     NAVIGATION = "navigation"
     LINEAR_READ = "linear.read"
     PROJECTS_READ = "projects.read"

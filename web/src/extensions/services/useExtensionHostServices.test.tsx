@@ -72,9 +72,26 @@ describe("useExtensionHostServices", () => {
     const { result } = renderHook(() => useExtensionHostServices(extension), { wrapper });
     expect(Object.keys(result.current.methods).sort()).toEqual(
       Object.keys(HOST_METHOD_PERMISSIONS)
-        .filter((method) => !method.startsWith("linear."))
+        .filter((method) => !method.startsWith("linear.") && !method.startsWith("studio."))
         .sort(),
     );
+  });
+
+  it("grants only the declared Studio scopes", () => {
+    const { result } = renderHook(
+      () => useExtensionHostServices({ ...extension, permissions: ["studio.tasks"] }),
+      { wrapper },
+    );
+    expect(
+      Object.keys(result.current.methods)
+        .filter((name) => name.startsWith("studio."))
+        .sort(),
+    ).toEqual(
+      Object.keys(HOST_METHOD_PERMISSIONS)
+        .filter((name) => name.startsWith("studio.tasks."))
+        .sort(),
+    );
+    expect(result.current.methods["studio.fleet.adminSeats"]).toBeUndefined();
   });
 
   it("resolves a Linear task by source key and finds its latest implementation session", async () => {

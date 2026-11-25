@@ -65,3 +65,8 @@ export interface ExtensionDisposeMessage extends ExtensionIdentity {
   source: typeof EXTENSION_RPC_SOURCE;
   type: "dispose";
 }
+
+// Give users time to read the comment in the trusted host dialog.
+export function extensionRequestTimeout(method: string): number {
+  return method === "studio.tasks.syncLinearConfirmed" ? 120_000 : 10_000;
+}

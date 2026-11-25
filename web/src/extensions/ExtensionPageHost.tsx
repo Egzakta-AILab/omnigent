@@ -5,14 +5,17 @@ import { useExtensionHostServices } from "./services/useExtensionHostServices";
 
 export function ExtensionPageHost({ resolved }: { resolved: ResolvedExtensionPage }) {
   const refresh = useRefreshExtensions();
-  const { methods, events } = useExtensionHostServices(resolved.extension);
+  const { methods, events, dialog } = useExtensionHostServices(resolved.extension);
   return (
-    <ExtensionViewHost
-      extension={resolved.extension}
-      page={resolved.page}
-      refresh={refresh}
-      methods={methods}
-      events={events}
-    />
+    <>
+      <ExtensionViewHost
+        extension={resolved.extension}
+        page={resolved.page}
+        refresh={refresh}
+        methods={methods}
+        events={events}
+      />
+      {dialog}
+    </>
   );
 }
