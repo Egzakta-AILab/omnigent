@@ -342,6 +342,7 @@ def build_app(resolved_config: _ResolvedConfig | None = None) -> _BuiltApp:
         SqlAlchemyScheduledTaskStore,
     )
     from omnigent.stores.studio_review_store import StudioReviewStore
+    from omnigent.stores.studio_tasks import StudioTaskStore
 
     telemetry.init()
 
@@ -479,6 +480,7 @@ def build_app(resolved_config: _ResolvedConfig | None = None) -> _BuiltApp:
         project_store=project_store,
         memory_store=memory_store,
         studio_review_store=studio_review_store,
+        studio_task_store=StudioTaskStore(database_url),
         auth_provider=auth_provider,
         account_store=account_store,
         policy_modules=cfg.get("policy_modules"),
