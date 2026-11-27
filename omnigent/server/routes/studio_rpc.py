@@ -307,8 +307,7 @@ def create_studio_rpc_router(
                         rpc.WorkspaceRef.model_validate(params),
                     )
                 if method == "allocatePreview":
-                    if not effective_admin(await asyncio.to_thread(permissions.is_admin, actor)):
-                        raise HTTPException(403, "Preview allocation requires a Studio operator")
+                    # The Coder provider grants the pr-preview profile to configured operators.
                     return await asyncio.to_thread(
                         fleet.allocate, request, tasks, actor, rpc.Preview.model_validate(params)
                     )
