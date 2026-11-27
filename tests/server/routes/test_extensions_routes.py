@@ -549,6 +549,41 @@ async def test_studio_shared_issue_private_session_and_confirmation(db_uri, tmp_
             ).raise_for_status()
         task = (await alice.post(f"{prefix}/tasks/getOrCreate", json=key)).json()
         assert (await bob.post(f"{prefix}/tasks/getOrCreate", json=key)).json() == task
+        from unittest.mock import Mock
+
+        from fastapi import HTTPException
+
+        from omnigent.studio import fleet
+
+        preview = {
+            "task_id": task["task_id"],
+            "repository": "Egzakta-AILab/KVARK",
+            "number": 7,
+            "head_sha": "a" * 40,
+        }
+        launcher = Mock()
+        launcher.allocate_preview.return_value = "workspace-7"
+
+        def preview_provider(request, actor, profile):
+            assert profile == "pr-preview"
+            if actor != _USER:
+                raise HTTPException(403, "Sandbox profile access denied")
+            return launcher, {"revision": "template-version"}
+
+        with monkeypatch.context() as patch:
+            patch.setenv("OMNIGENT_STUDIO_PREVIEW_REPOSITORY", preview["repository"])
+            patch.setattr(fleet, "provider", preview_provider)
+            (await alice.post(f"{prefix}/tasks/linkPr", json=preview)).raise_for_status()
+            path = f"{prefix}/fleet/allocatePreview"
+            assert (await bob.post(path, json=preview)).status_code == 403
+            assert (
+                await alice.post(path, json={**preview, "head_sha": "b" * 40})
+            ).status_code == 409
+            launcher.allocate_preview.assert_not_called()
+            result = (await alice.post(path, json=preview)).raise_for_status()
+            assert result.json()["workspace_id"] == "workspace-7"
+            launcher.allocate_preview.assert_called_once_with(7, preview["head_sha"])
+
         args = {"task_id": task["task_id"], "session_id": source.id}
         association = f"{prefix}/tasks/forSession"
         session_ref = {"session_id": source.id}
