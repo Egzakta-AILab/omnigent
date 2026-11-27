@@ -242,6 +242,7 @@ def test_build_app_passes_configured_policy_and_debug_router_modules(
 ) -> None:
     from omnigent.runtime import get_caps
     from omnigent.server import app as server_app
+    from omnigent.stores.studio_tasks import StudioTaskStore
 
     create_app_kwargs: dict[str, object] = {}
     real_create_app = server_app.create_app
@@ -259,6 +260,10 @@ def test_build_app_passes_configured_policy_and_debug_router_modules(
         "policy_modules: [acme.policies]\n"
         "debug_router_modules: [tests._helpers.runner_lifecycle_controls]\n",
     )
+
+    tasks = create_app_kwargs.get("studio_task_store")
+    assert isinstance(tasks, StudioTaskStore)
+    assert tasks.storage_location == f"sqlite:///{tmp_path / 'entrypoint.db'}"
 
     # policy_modules feed load_registry in the lifespan, so assert the handoff.
     assert create_app_kwargs["policy_modules"] == ["acme.policies"]
